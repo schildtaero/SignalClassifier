@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 20. November 2026, SignalClassifier 0.2.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 20. November 2026, SignalClassifier 0.2.1, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 85 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall und Vergleichsansicht. Python-Wheel 0.2.0 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
+- 96 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl und Bereinigung. Python-Wheel 0.2.1 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,14 @@ Prüfstand: 20. November 2026, SignalClassifier 0.2.0, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.2.1
+
+- Sammelauswahl bestätigter Aufnahmen und verfügbarer Topologien im Experiment-Setup, Aufheben der Auswahl, Erhalt in Entwürfen und erneute Vorprüfung. Nicht verfügbare neuronale Ansätze bleiben gesperrt.
+- Einheitliches Limit von 1000 Aufnahmen in API, Vorprüfung und Loader. Ein LDA-Versuch verarbeitet 130 reale numerische SigMF-Testdateien vollständig mit erhaltener Gruppenherkunft; 1001 Dateien werden vor Zugriff abgewiesen. 128-MiB-IQ-Budget und 4096 Segmente je Split bleiben bestehen und werden vor dem Start geprüft.
+- Sieben API-Tests zur Bereinigung kurzer Aufnahmen: strikt weniger als 0,5 s, beide IQ-Datentypen, Dateipaare samt Labels, explizite Vorschau-IDs, keine nachträgliche Aufnahme neuer Dateien, erneute Dauer-/Änderungsprüfung sowie Schutz aktiver Empfänger und Experimentdaten. Genau 0,5 s bleibt erhalten.
+- Simulierte Datei-/Datenbankfehler vor dem Commit stellen die betroffenen Paare wieder her. Ein simulierter Unlink-Fehler nach dem Commit liefert eine eigene Warnung und zählt nur tatsächlich entfernte Dateibytes. Ein Prozessabbruch während einer mehrteiligen Dateioperation wird damit nicht als vollständig crash-atomar ausgewiesen.
+- Visuelle Vorschau erneut versucht; der verwaltete Start scheiterte weiterhin am lokalen Port-Binding. Die Browserabnahme bleibt offen.
 
 ## Ergänzungen in 0.2.0
 

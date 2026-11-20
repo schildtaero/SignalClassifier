@@ -33,6 +33,9 @@
     datasetReadiness: null,
     readinessSequence: 0,
     wasReceiving: false,
+    cleanupPlan: null,
+    cleanupBusy: false,
+    cleanupSequence: 0,
   };
   const titles = {
     empfang: [
@@ -485,6 +488,13 @@
       (typeof active === "string" ? active : "Feature-Kaskade");
     if (status.version) $("#version").textContent = `v${status.version}`;
     const hw = status.hardware || {};
+    if (
+      state.topologies.length &&
+      state.topologyTorchAvailable !== hw.torch_available
+    ) {
+      state.topologyTorchAvailable = hw.torch_available;
+      refreshTopologyAvailability();
+    }
     const device = hw.gpu_name || hw.gpu || hw.device;
     const cpu = hw.cpu || hw.processor;
     $("#footer-hardware").textContent =
@@ -1993,7 +2003,12 @@
     const selected = new Set(
       $$("#experiment-recordings input:checked").map((n) => n.value),
     );
-    const verified = records.filter((r) => r.verified && r.label);
+    const invalidIds = new Set(
+      state.recordings.filter((raw) => raw.error).map((raw) => raw.id),
+    );
+    const verified = records.filter(
+      (r) => r.verified && r.label && !invalidIds.has(r.id),
+    );
     $("#experiment-recordings").replaceChildren(
       ...(verified.length
         ? verified.map((r) =>
@@ -2018,6 +2033,7 @@
             }),
           ]),
     );
+    updateExperimentRecordingSelection();
     scheduleReadiness();
     updateCaptureSizeEstimate();
   }
@@ -2130,6 +2146,221 @@
     notice.textContent = `${result.count ?? updated.length} Labels bestätigt.${skipped.length ? ` ${skipped.length} übersprungen: ${skipped.map((r) => `${r.id}: ${text(r.reason)}`).join("; ")}` : ""}`;
     toast(`${result.count ?? updated.length} Aufnahmen bestätigt.`);
   }
+  const CLEANUP_DURATION_SECONDS = 0.5;
+  function cleanupDeletionPlan(preview) {
+    if (
+      !preview ||
+      preview.max_duration_seconds !== CLEANUP_DURATION_SECONDS ||
+      !Array.isArray(preview.recordings)
+    )
+      throw new Error(
+        "Die Bereinigungsvorschau ist ungültig; bitte aktualisieren.",
+      );
+    if (preview.blocked_reason) throw new Error(String(preview.blocked_reason));
+    if (
+      preview.recordings.length > 10000 ||
+      preview.count !== preview.recordings.length
+    )
+      throw new Error(
+        "Die Vorschau überschreitet die Grenze von 10000 Aufnahmen oder ist unvollständig.",
+      );
+    const expected = preview.expected_files;
+    if (!expected || typeof expected !== "object" || Array.isArray(expected))
+      throw new Error(
+        "Dateiabgleich fehlt in der Vorschau; bitte aktualisieren.",
+      );
+    const ids = [],
+      fingerprints = Object.create(null),
+      seen = new Set();
+    for (const row of preview.recordings) {
+      if (
+        typeof row.id !== "string" ||
+        !row.id ||
+        seen.has(row.id) ||
+        typeof row.duration_seconds !== "number" ||
+        !Number.isFinite(row.duration_seconds) ||
+        row.duration_seconds < 0 ||
+        row.duration_seconds >= CLEANUP_DURATION_SECONDS
+      )
+        throw new Error(
+          "Die Vorschau enthält keine eindeutig kurze, gültige Aufnahme; es wurde keine Löschung freigegeben.",
+        );
+      const fingerprint = expected[row.id];
+      if (
+        typeof fingerprint !== "string" ||
+        !fingerprint ||
+        (row.fingerprint !== undefined && row.fingerprint !== fingerprint)
+      )
+        throw new Error(
+          "Dateiabgleich der Vorschau ist nicht vollständig; bitte aktualisieren.",
+        );
+      seen.add(row.id);
+      ids.push(row.id);
+      fingerprints[row.id] = fingerprint;
+    }
+    return Object.freeze({
+      recording_ids: Object.freeze(ids),
+      max_duration_seconds: CLEANUP_DURATION_SECONDS,
+      expected_files: Object.freeze(fingerprints),
+    });
+  }
+  function updateCleanupControls() {
+    const count = state.cleanupPlan?.recording_ids.length || 0;
+    const busy = state.cleanupBusy;
+    $("#recording-cleanup-confirm").disabled = busy || count === 0;
+    $("#recording-cleanup-confirm").textContent = busy
+      ? "Löschung läuft …"
+      : `${count} Aufnahmen endgültig löschen`;
+    $("#recording-cleanup-refresh").disabled = busy;
+    $$("[data-close]", $("#recording-cleanup-dialog")).forEach((button) => {
+      button.disabled = busy;
+    });
+  }
+  async function loadCleanupPreview() {
+    if (state.cleanupBusy) return;
+    const sequence = ++state.cleanupSequence;
+    state.cleanupPlan = null;
+    $("#recording-cleanup-summary").textContent = "Vorschau wird geladen …";
+    $("#recording-cleanup-preview").replaceChildren();
+    $("#recording-cleanup-blocked").hidden = true;
+    $("#recording-cleanup-skipped-details").hidden = true;
+    $(".dialog-error", $("#recording-cleanup-dialog"))?.remove();
+    updateCleanupControls();
+    try {
+      const preview = await api(
+        `/api/recordings/cleanup-preview?max_duration_seconds=${CLEANUP_DURATION_SECONDS}`,
+      );
+      if (
+        sequence !== state.cleanupSequence ||
+        !$("#recording-cleanup-dialog").open
+      )
+        return;
+      const rows = arr(preview.recordings),
+        verified = rows.filter(
+          (row) => row.verified === true && row.label,
+        ).length;
+      const referenced = rows.filter(
+        (row) => Number(row.experiment_count) > 0,
+      ).length;
+      $("#recording-cleanup-summary").textContent =
+        `${num(rows.length, 0)} geschlossene Aufnahmen unter 0,5 s · ${bytes(preview.total_bytes)} einschließlich Metadaten. ${verified} bestätigte Labels werden mitgelöscht${referenced ? `; ${referenced} Aufnahmen werden von früheren Experimenten referenziert` : ""}.`;
+      $("#recording-cleanup-preview").replaceChildren(
+        ...rows.map((row) =>
+          el("tr", {}, [
+            detailCell(
+              row.filename || row.id,
+              Number(row.experiment_count) > 0
+                ? `${num(row.experiment_count, 0)} historische Experimentreferenzen`
+                : undefined,
+            ),
+            el("td", {
+              class: "mono",
+              text:
+                typeof row.duration_seconds === "number" &&
+                Number.isFinite(row.duration_seconds)
+                  ? `${String(row.duration_seconds).replace(".", ",")} s`
+                  : "Ungültige Dauer",
+            }),
+            el("td", { class: "mono", text: bytes(row.bytes) }),
+            el("td", {}, [
+              row.label
+                ? pill(
+                    `${row.label}${row.verified ? " · bestätigt" : " · vorläufig"}`,
+                    row.verified ? "green" : "amber",
+                  )
+                : pill("Ohne Label"),
+            ]),
+          ]),
+        ),
+      );
+      const skipped = arr(preview.skipped);
+      $("#recording-cleanup-skipped-details").hidden = skipped.length === 0;
+      $("#recording-cleanup-skipped-count").textContent =
+        `${skipped.length} geschützte oder übersprungene Aufnahmen`;
+      $("#recording-cleanup-skipped").replaceChildren(
+        ...skipped.map((row) =>
+          el("p", { text: `${text(row.id)}: ${text(row.reason)}` }),
+        ),
+      );
+      try {
+        state.cleanupPlan = cleanupDeletionPlan(preview);
+      } catch (error) {
+        state.cleanupPlan = null;
+        $("#recording-cleanup-blocked").hidden = false;
+        $("#recording-cleanup-blocked").textContent = errorMessage(error);
+      }
+      if (!rows.length && !preview.blocked_reason)
+        $("#recording-cleanup-summary").textContent =
+          "Keine löschbaren geschlossenen Aufnahmen unter 0,5 Sekunden gefunden.";
+      updateCleanupControls();
+    } catch (error) {
+      if (
+        sequence !== state.cleanupSequence ||
+        !$("#recording-cleanup-dialog").open
+      )
+        return;
+      state.cleanupPlan = null;
+      $("#recording-cleanup-summary").textContent =
+        "Die Vorschau konnte nicht geladen werden. Es ist keine Löschung freigegeben.";
+      showError(error);
+      updateCleanupControls();
+    }
+  }
+  async function openCleanupDialog() {
+    if (state.cleanupBusy) return;
+    await openDialog("recording-cleanup-dialog");
+    await loadCleanupPreview();
+  }
+  async function submitCleanupDeletion() {
+    if (state.cleanupBusy) return;
+    const plan = state.cleanupPlan;
+    if (!plan || !plan.recording_ids.length) return;
+    state.cleanupBusy = true;
+    updateCleanupControls();
+    try {
+      const result = await api("/api/recordings/delete-batch", {
+        method: "POST",
+        body: plan,
+      });
+      const deleted = new Set(arr(result.deleted));
+      deleted.forEach((id) => state.selectedRecordings.delete(id));
+      $$("#experiment-recordings input").forEach((input) => {
+        if (deleted.has(input.value)) input.checked = false;
+      });
+      updateExperimentRecordingSelection();
+      scheduleReadiness();
+      state.cleanupPlan = null;
+      const skipped = arr(result.skipped),
+        notice = $("#recording-cleanup-result");
+      notice.hidden = false;
+      notice.className = `notice${result.cleanup_warning ? " error" : ""}`;
+      notice.textContent = `${num(result.count ?? deleted.size, 0)} Aufnahmen gelöscht · ${bytes(result.bytes_deleted)} freigegeben.${skipped.length ? ` ${skipped.length} übersprungen: ${skipped.map((row) => `${text(row.id)}: ${text(row.reason)}`).join("; ")}` : ""}${result.cleanup_warning ? ` Hinweis: ${result.cleanup_warning}` : ""}`;
+      closeDialog($("#recording-cleanup-dialog"));
+      try {
+        await loadRecordings();
+      } catch (error) {
+        showError(error);
+        notice.append(
+          " Die Bibliotheksansicht konnte noch nicht aktualisiert werden.",
+        );
+      }
+      toast(
+        `${num(result.count ?? deleted.size, 0)} Kurzaufnahmen gelöscht${skipped.length ? `; ${skipped.length} übersprungen` : ""}.`,
+      );
+    } catch (error) {
+      state.cleanupPlan = null;
+      $("#recording-cleanup-blocked").hidden = false;
+      $("#recording-cleanup-blocked").textContent =
+        "Das Löschergebnis wurde nicht bestätigt. Vor einer weiteren Bestätigung die Vorschau aktualisieren; die Anfrage wird nicht automatisch wiederholt.";
+      showError(error);
+      try {
+        await loadRecordings();
+      } catch (_ignored) {}
+    } finally {
+      state.cleanupBusy = false;
+      updateCleanupControls();
+    }
+  }
   async function loadEmitters() {
     state.emitters = itemArray(await api("/api/emitters"), "emitters");
     renderEmitters();
@@ -2184,9 +2415,95 @@
           ]),
     );
   }
+  function topologyAvailable(
+    topology,
+    torchAvailable = state.status.hardware?.torch_available,
+  ) {
+    if (topology.family === "feature_lda") return true;
+    if (
+      torchAvailable === false ||
+      topology.status === "requires_torch" ||
+      topology.trainable === false
+    )
+      return false;
+    return torchAvailable === true || topology.status === "available";
+  }
+  function validateTopologyIds(
+    ids,
+    catalog,
+    torchAvailable = state.status.hardware?.torch_available,
+  ) {
+    if (
+      !Array.isArray(ids) ||
+      ids.length > 50 ||
+      ids.some((id) => typeof id !== "string" || !id)
+    )
+      throw new Error("Höchstens 50 gültige Topologie-IDs auswählen.");
+    const unique = [...new Set(ids)];
+    for (const id of unique) {
+      const topology = catalog.find((t) => t.id === id);
+      if (!topology)
+        throw new Error(
+          "Die Topologien dieser Konfiguration zuerst im Tab Topologien laden.",
+        );
+      if (!topologyAvailable(topology, torchAvailable))
+        throw new Error(
+          `${topology.name || id}: nicht verfügbar. Für neuronale Ansätze wird PyTorch benötigt.`,
+        );
+    }
+    return unique;
+  }
+  function selectedExperimentRecordingIds() {
+    return $$("#experiment-recordings input:checked").map(
+      (input) => input.value,
+    );
+  }
+  function updateExperimentRecordingSelection() {
+    const inputs = $$("#experiment-recordings input");
+    const count = inputs.filter((input) => input.checked).length;
+    inputs.forEach((input) => {
+      input.disabled = !input.checked && count >= 1000;
+    });
+    $("#experiment-recording-selection-count").textContent =
+      `${count} / 1000 ausgewählt · ${inputs.length} verfügbar`;
+    $("#experiment-recordings-all").disabled = inputs.length === 0;
+    $("#experiment-recordings-none").disabled = count === 0;
+  }
+  function setExperimentRecordingSelection(ids) {
+    const selected = recordingSelectionWithAdditions(new Set(), ids, 1000);
+    if (!selected) {
+      showError(
+        new Error(
+          "Höchstens 1000 Aufnahmen je Experiment auswählen. Die bestehende Auswahl wurde nicht geändert.",
+        ),
+      );
+      return false;
+    }
+    $$("#experiment-recordings input").forEach((input) => {
+      input.checked = selected.has(input.value);
+    });
+    updateExperimentRecordingSelection();
+    scheduleReadiness();
+    return true;
+  }
+  function refreshTopologyAvailability() {
+    let changed = false;
+    for (const option of $("#experiment-topology").options) {
+      const topology = state.topologies.find((t) => t.id === option.value);
+      const disabled = !topology || !topologyAvailable(topology);
+      if (option.disabled !== disabled) changed = true;
+      option.disabled = disabled;
+      if (disabled && option.selected) {
+        option.selected = false;
+        changed = true;
+      }
+    }
+    updateTopologySelection();
+    if (changed) scheduleReadiness();
+  }
   function selectedTopologyIds() {
     return [...$("#experiment-topology").options]
-      .filter((option) => option.selected && option.value)
+      .filter((option) => option.selected && !option.disabled && option.value)
       .map((option) => option.value);
   }
   function updateTopologySelection() {
@@ -2198,9 +2515,16 @@
     );
   }
   function setTopologySelection(ids) {
-    const selected = new Set(ids);
+    let valid;
+    try {
+      valid = validateTopologyIds(ids, state.topologies);
+    } catch (error) {
+      showError(error);
+      return false;
+    }
+    const selected = new Set(valid);
     for (const option of $("#experiment-topology").options)
-      option.selected = selected.has(option.value);
+      option.selected = !option.disabled && selected.has(option.value);
     state.topologySelectionInitialized = true;
     updateTopologySelection();
     scheduleReadiness();
@@ -2212,15 +2536,17 @@
     renderTopologies();
     if (needsDefault && previous.size === 0) {
       const reference =
-        state.topologies.find((t) => t.id === "feature-lda") ||
-        state.topologies[0];
+        state.topologies.find(
+          (t) => t.id === "feature-lda" && topologyAvailable(t),
+        ) || state.topologies.find((t) => topologyAvailable(t));
       if (reference) previous.add(reference.id);
     }
     $("#experiment-topology").replaceChildren(
       ...state.topologies.map((t) =>
         el("option", {
           value: t.id,
-          selected: previous.has(t.id),
+          selected: previous.has(t.id) && topologyAvailable(t),
+          disabled: !topologyAvailable(t),
           text: `${t.name} · ${t.family}${t.status === "requires_torch" ? " · PyTorch nötig" : ""}`,
         }),
       ),
@@ -2332,7 +2658,7 @@
     await changeView("experimente");
     const ids = selectedTopologyIds();
     if (!ids.includes(id)) ids.push(id);
-    setTopologySelection(ids);
+    if (setTopologySelection(ids) === false) return;
     $("#experiment-topology").focus();
     toast("Topologie zur Vergleichsauswahl hinzugefügt.");
   }
@@ -2446,12 +2772,15 @@
       throw new Error(`${name}: bitte gültige Zahlen mit Komma trennen.`);
     return values;
   }
-  function experimentConfig() {
+  function experimentConfig({ allowEmptyTopologies = false } = {}) {
     const form = $("#experiment-form");
     const f = new FormData(form);
     const lengths = parseList(f.get("segment_lengths"), "Segmentlängen", true);
     const topologyIds = selectedTopologyIds();
-    if (topologyIds.length < 1 || topologyIds.length > 50)
+    if (
+      (!allowEmptyTopologies && topologyIds.length < 1) ||
+      topologyIds.length > 50
+    )
       throw new Error("Bitte 1–50 Topologien für das Experiment auswählen.");
     const config = {
       name: f.get("name"),
@@ -2489,12 +2818,18 @@
       ].map((k) => [k, Number(f.get(k))]),
     );
     if (config.source === "recordings")
-      config.recording_ids = $$("#experiment-recordings input:checked").map(
-        (n) => n.value,
-      );
+      config.recording_ids = selectedExperimentRecordingIds();
     return config;
   }
   function scheduleReadiness() {
+    ++state.readinessSequence;
+    state.datasetReadiness = null;
+    $("#dataset-readiness").replaceChildren(
+      el("p", {
+        class: "field-help",
+        text: "Datengrundlage wird aktualisiert …",
+      }),
+    );
     clearTimeout(readinessTimer);
     readinessTimer = setTimeout(() => refreshReadiness(), 350);
   }
@@ -3911,7 +4246,7 @@
     if (data.port) $("#bridge-form [name=port]").value = data.port;
   }
   function exportExperimentConfig() {
-    const config = experimentConfig();
+    const config = experimentConfig({ allowEmptyTopologies: true });
     const blob = new Blob(
       [
         JSON.stringify(
@@ -3937,18 +4272,154 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     toast("Versuchskonfiguration gespeichert.");
   }
+  function prepareExperimentDraft(
+    c,
+    catalog,
+    availableRecordings,
+    torchAvailable,
+  ) {
+    if (!c || typeof c !== "object" || Array.isArray(c))
+      throw new Error(
+        "Eine Versuchskonfiguration als JSON-Objekt ist erforderlich.",
+      );
+    const topologyIds = validateTopologyIds(
+      c.topology_ids !== undefined
+        ? c.topology_ids
+        : c.topology_id
+          ? [c.topology_id]
+          : [],
+      catalog,
+      torchAvailable,
+    );
+    if (
+      c.source !== undefined &&
+      !["synthetic", "recordings"].includes(c.source)
+    )
+      throw new Error("Ungültige Datenquelle.");
+    if (
+      c.evaluation_mode !== undefined &&
+      !["independent", "training_only"].includes(c.evaluation_mode)
+    )
+      throw new Error("Ungültiger Bewertungsmodus.");
+    if (c.device !== undefined && !["auto", "cpu", "cuda"].includes(c.device))
+      throw new Error("Ungültiges Rechengerät.");
+    const integers = {
+      seed: [0, 2147483647],
+      samples_per_class: [12, 1000],
+      epochs: [1, 100],
+      segment_length: [256, 65536],
+      batch_size: [4, 256],
+    };
+    for (const [key, [minimum, maximum]] of Object.entries(integers))
+      if (
+        c[key] !== undefined &&
+        (!Number.isInteger(c[key]) || c[key] < minimum || c[key] > maximum)
+      )
+        throw new Error(
+          `${key}: Ganzzahl zwischen ${minimum} und ${maximum} erforderlich.`,
+        );
+    if (
+      c.name !== undefined &&
+      (typeof c.name !== "string" || c.name.length > 200)
+    )
+      throw new Error("Ungültiger Experimentname.");
+    if (c.use_priors !== undefined && typeof c.use_priors !== "boolean")
+      throw new Error("Vorwissen muss als boolescher Wert gespeichert sein.");
+    const listBounds = {
+      segment_lengths: [256, 65536, 4, true],
+      snr_db: [-30, 80, 12, false],
+      jitter: [0, 2, 8, false],
+      learning_rates: [0.00001, 0.1, 4, false],
+      batch_sizes: [4, 256, 4, true],
+    };
+    for (const [key, [minimum, maximum, limit, integer]] of Object.entries(
+      listBounds,
+    )) {
+      const values = c[key];
+      if (
+        values !== undefined &&
+        (!Array.isArray(values) ||
+          values.length < 1 ||
+          values.length > limit ||
+          values.some(
+            (v) =>
+              typeof v !== "number" ||
+              !Number.isFinite(v) ||
+              v < minimum ||
+              v > maximum ||
+              (integer && !Number.isInteger(v)),
+          ))
+      )
+        throw new Error(
+          `${key}: 1–${limit} gültige Zahlen zwischen ${minimum} und ${maximum} erforderlich.`,
+        );
+    }
+    if (
+      c.learning_rate !== undefined &&
+      (typeof c.learning_rate !== "number" ||
+        !Number.isFinite(c.learning_rate) ||
+        c.learning_rate < 0.00001 ||
+        c.learning_rate > 0.1)
+    )
+      throw new Error("Ungültige Lernrate.");
+    const augmentationLimits = {
+      frequency_offset_hz: 1000000,
+      sample_clock_ppm: 1000,
+      iq_gain_db: 12,
+      iq_phase_deg: 45,
+      dc_offset: 1,
+      clip_level: 10,
+      echo_amplitude: 0.95,
+      echo_delay_samples: 128,
+    };
+    if (
+      c.augmentation !== undefined &&
+      (!c.augmentation ||
+        typeof c.augmentation !== "object" ||
+        Array.isArray(c.augmentation))
+    )
+      throw new Error("Ungültige Kanalparameter.");
+    for (const [key, value] of Object.entries(c.augmentation || {}))
+      if (
+        !(key in augmentationLimits) ||
+        typeof value !== "number" ||
+        !Number.isFinite(value) ||
+        value < 0 ||
+        value > augmentationLimits[key]
+      )
+        throw new Error(`Ungültiger Kanalparameter: ${key}`);
+    const ids = c.recording_ids === undefined ? [] : c.recording_ids;
+    if (
+      !Array.isArray(ids) ||
+      ids.length > 1000 ||
+      ids.some((id) => typeof id !== "string" || !id)
+    )
+      throw new Error(
+        "Höchstens 1000 gültige Aufnahme-IDs in einer Konfiguration zulässig.",
+      );
+    const available = new Set(availableRecordings);
+    return {
+      config: c,
+      topologyIds,
+      recordingIds: [...new Set(ids)].filter((id) => available.has(id)),
+      missingRecordingIds: [...new Set(ids)].filter((id) => !available.has(id)),
+    };
+  }
   async function importExperimentConfig(file) {
     if (!file) return;
     if (file.size > 1048576)
       throw new Error("Die Konfigurationsdatei ist zu groß.");
     const payload = JSON.parse(await file.text());
-    const c = payload.config || payload.report?.config || payload;
-    if (!c || typeof c !== "object" || Array.isArray(c))
-      throw new Error(
-        "Eine Versuchskonfiguration als JSON-Objekt ist erforderlich.",
-      );
     const form = $("#experiment-form");
-    const allowed = [
+    const prepared = prepareExperimentDraft(
+      payload?.config || payload?.report?.config || payload,
+      state.topologies,
+      $$("#experiment-recordings input").map((input) => input.value),
+      state.status.hardware?.torch_available,
+    );
+    const c = prepared.config;
+    // All validation above completes before any form field or selection changes.
+    for (const key of [
       "name",
       "source",
       "evaluation_mode",
@@ -3956,54 +4427,15 @@
       "samples_per_class",
       "epochs",
       "device",
-    ];
-    const topologyIds =
-      c.topology_ids !== undefined
-        ? c.topology_ids
-        : c.topology_id
-          ? [c.topology_id]
-          : selectedTopologyIds();
-    if (
-      !Array.isArray(topologyIds) ||
-      topologyIds.length < 1 ||
-      topologyIds.length > 50 ||
-      topologyIds.some((id) => typeof id !== "string")
-    )
-      throw new Error("Die Konfiguration benötigt 1–50 Topologie-IDs.");
-    if (topologyIds.some((id) => !state.topologies.some((t) => t.id === id)))
-      throw new Error(
-        "Die Topologien dieser Konfiguration zuerst im Tab Topologien laden.",
-      );
-    if (
-      c.evaluation_mode &&
-      !["independent", "training_only"].includes(c.evaluation_mode)
-    )
-      throw new Error("Ungültiger Bewertungsmodus.");
-    if (c.source && !["synthetic", "recordings"].includes(c.source))
-      throw new Error("Ungültige Datenquelle.");
-    for (const key of [
-      "segment_lengths",
-      "snr_db",
-      "jitter",
-      "learning_rates",
-      "batch_sizes",
     ])
-      if (
-        c[key] !== undefined &&
-        (!Array.isArray(c[key]) ||
-          c[key].some((v) => typeof v !== "number" || !Number.isFinite(v)))
-      )
-        throw new Error(`${key} muss eine Liste endlicher Zahlen sein.`);
-    for (const key of allowed) {
       if (c[key] !== undefined && form.elements[key])
         form.elements[key].value = String(c[key]);
-    }
-    setTopologySelection(topologyIds);
+    setTopologySelection(prepared.topologyIds);
     form.elements.segment_lengths.value = arr(c.segment_lengths).length
       ? c.segment_lengths.join(", ")
       : String(c.segment_length || 2048);
-    if (c.snr_db) form.elements.snr_db.value = c.snr_db.join(", ");
-    if (c.jitter) form.elements.jitter.value = c.jitter.join(", ");
+    form.elements.snr_db.value = (c.snr_db || [0, 10, 20]).join(", ");
+    form.elements.jitter.value = (c.jitter || [0, 0.05]).join(", ");
     form.elements.learning_rates.value = arr(c.learning_rates).length
       ? c.learning_rates.join(", ")
       : String(c.learning_rate || 0.001);
@@ -4019,27 +4451,41 @@
       "clip_level",
       "echo_amplitude",
       "echo_delay_samples",
-    ]) {
-      const value = c.augmentation?.[key];
-      if (value !== undefined) {
-        if (typeof value !== "number" || !Number.isFinite(value))
-          throw new Error("Ungültiger Kanalparameter.");
-        form.elements[key].value = String(value);
-      }
-    }
+    ])
+      form.elements[key].value = String(
+        c.augmentation?.[key] ?? (key === "echo_delay_samples" ? 8 : 0),
+      );
     form.elements.use_priors.checked = c.use_priors === true;
-    const selected = new Set(arr(c.recording_ids));
-    $$("#experiment-recordings input").forEach((input) => {
-      input.checked = selected.has(input.value);
-    });
+    setExperimentRecordingSelection(prepared.recordingIds);
     $("#experiment-recordings-field").hidden =
       form.elements.source.value !== "recordings";
     scheduleReadiness();
     toast(
-      "Versuchskonfiguration geladen. Der Versuch wurde noch nicht gestartet.",
+      prepared.missingRecordingIds.length
+        ? `Konfiguration geladen. ${prepared.missingRecordingIds.length} Aufnahmen sind hier nicht verfügbar oder nicht bestätigt und wurden nicht ausgewählt.`
+        : "Versuchskonfiguration geladen. Der Versuch wurde noch nicht gestartet.",
     );
   }
   function setupEvents() {
+    $("#recording-cleanup-open").addEventListener("click", () =>
+      action(openCleanupDialog),
+    );
+    $("#recording-cleanup-refresh").addEventListener("click", () =>
+      action(loadCleanupPreview),
+    );
+    $("#recording-cleanup-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitCleanupDeletion();
+    });
+    $("#recording-cleanup-dialog").addEventListener("cancel", (event) => {
+      if (state.cleanupBusy) event.preventDefault();
+    });
+    $("#recording-cleanup-dialog").addEventListener("close", () => {
+      ++state.cleanupSequence;
+      state.cleanupPlan = null;
+      updateCleanupControls();
+    });
+
     $("#models-live-start").addEventListener("click", () =>
       action(() => configureLiveComparison([...state.checkedLiveModels], true)),
     );
@@ -4230,6 +4676,18 @@
       event.preventDefault();
       action(submitBatchLabels, event.currentTarget);
     });
+    $("#experiment-recordings-all").addEventListener("click", () =>
+      setExperimentRecordingSelection(
+        $$("#experiment-recordings input").map((input) => input.value),
+      ),
+    );
+    $("#experiment-recordings-none").addEventListener("click", () =>
+      setExperimentRecordingSelection([]),
+    );
+    $("#experiment-recordings").addEventListener(
+      "change",
+      updateExperimentRecordingSelection,
+    );
     $("#experiment-form").addEventListener("input", scheduleReadiness);
     $("#experiment-form").addEventListener("change", scheduleReadiness);
     $("#emitter-filter").addEventListener("input", renderEmitters);
@@ -4305,9 +4763,7 @@
     });
     $("#topology-select-all").addEventListener("click", () =>
       setTopologySelection(
-        state.topologies
-          .filter((t) => t.status !== "requires_torch")
-          .map((t) => t.id),
+        state.topologies.filter((t) => topologyAvailable(t)).map((t) => t.id),
       ),
     );
     $("#topology-select-none").addEventListener("click", () =>

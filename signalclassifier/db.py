@@ -59,3 +59,7 @@ class Store:
     def delete(self, kind: str, identifier: str):
         with self.lock, self.connect() as conn:
             conn.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, identifier))
+
+    def delete_many(self, kind: str, identifiers: list[str]):
+        with self.lock, self.connect() as conn:
+            conn.executemany("DELETE FROM records WHERE kind=? AND id=?", [(kind, identifier) for identifier in identifiers])

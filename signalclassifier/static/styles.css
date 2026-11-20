@@ -3423,3 +3423,79 @@ html[data-theme="light"] {
     padding-right: 16px;
   }
 }
+
+/* Explicit experiment selection and reviewed deletion of closed short files. */
+.experiment-selection-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 13px;
+  margin: 10px 0;
+}
+.experiment-selection-actions > .secondary {
+  font-size: 0.75rem;
+  flex-basis: 100%;
+}
+.experiment-selection-actions .text-button {
+  font-size: 0.75rem;
+}
+#experiment-topology option:disabled {
+  color: var(--faint);
+  opacity: 0.6;
+}
+.button-danger {
+  background: var(--red);
+  border-color: var(--red);
+  color: #301918;
+}
+.button-danger:hover {
+  background: var(--red);
+  border-color: var(--text);
+  color: #301918;
+}
+.cleanup-preview-scroll {
+  max-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.cleanup-preview-scroll td:first-child {
+  max-width: 310px;
+  overflow-wrap: anywhere;
+}
+.cleanup-preview-scroll td.mono {
+  white-space: nowrap;
+}
+.cleanup-skipped {
+  padding: 0 20px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+#recording-cleanup-result {
+  overflow-wrap: anywhere;
+}
+#recording-cleanup-summary {
+  line-height: 1.65;
+}
+#recording-cleanup-dialog .dialog-body > .secondary {
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+@media (max-width: 600px) {
+  .cleanup-preview-scroll {
+    max-height: 300px;
+  }
+  .experiment-selection-actions {
+    gap: 9px 12px;
+  }
+  #recording-cleanup-dialog .dialog-actions .button {
+    white-space: normal;
+    min-width: 140px;
+  }
+  .cleanup-skipped {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}

@@ -501,6 +501,8 @@ class CaptureManager:
     def status(self) -> dict:
         with self._lock:
             return {"state": self._state, "running": self._state == "running",
+                    "busy": self._state in ("starting", "running") or any(
+                        worker is not None and worker.is_alive() for worker in (self._thread, self._reader_thread)),
                     "source": self._config.get("source"), "mode": self._config.get("mode", "monitor"),
                     "error": self._error, "reason": self._reason,
                     "config": {k: v for k, v in self._config.items() if k != "recording_path"},

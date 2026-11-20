@@ -33,6 +33,8 @@ Ein Experiment kann **1–50 unterschiedliche Topologien** umfassen. Alle ausgew
 
 Jeder Ansatz erhält eigene Modelle, Konfigurationen und einen vollständigen Bericht. Der gemeinsame Bericht enthält eine Vergleichstabelle mit Metriken, Validierung und Links auf alle Modellartefakte. Topologieauswahl, Konfiguration und Fortschritt gehören zu einem gemeinsamen Experiment; es ist kein manuelles Anlegen eines separaten Experiments pro Netz erforderlich.
 
+Im Setup lassen sich alle bestätigten verfügbaren Aufnahmen beziehungsweise alle verfügbaren Topologien gemeinsam auswählen und wieder abwählen. Die API und der Loader erlauben bis zu 1000 Aufnahmen; das 128-MiB-IQ-Budget und maximal 4096 Segmente je Split bleiben bestehen. Eine Sammelauswahl schneidet keine Dateien stillschweigend ab. Die Vorprüfung zeigt überschrittene Grenzen vor dem Start.
+
 Im Modus **Unabhängig auswerten** entscheidet das Validierungs-Macro-F1 über die vorgeschlagene Auswahl; bei Gleichstand gewinnt das kleinere Modell. Testgenauigkeit oder Test-F1 werden dafür **nicht** benutzt. Auch innerhalb einer Topologie wird eine Hyperparameterkombination nur nach Validierung ausgewählt. Sämtliche anderen Netze bleiben gespeichert und können separat geladen werden.
 
 Im Modus **Nur trainieren** werden ebenfalls alle ausgewählten Netze trainiert und gespeichert. Es gibt dabei keine Qualitätsrangfolge und keinen Gewinner. Das erste Netz bleibt lediglich eine technische Standardreferenz für kompatible Modelloperationen; daraus folgt keine Empfehlung. Rechenzeiten und Modellgrößen können verglichen werden, während Genauigkeit und F1 unbekannt bleiben.

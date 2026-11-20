@@ -169,6 +169,75 @@ class ModulationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "genau eine Kombination"):
                 ml.run_experiment(config, Path(directory) / "sweep")
 
+    def test_more_than_128_short_recordings_are_all_used_within_iq_budget(self):
+        from signalclassifier.sigmf import write_recording
+        with tempfile.TemporaryDirectory() as directory:
+            entries = []
+            for index in range(130):
+                label = "AM" if index % 2 == 0 else "FM"
+                path = write_recording(Path(directory) / f"clip-{index}", ml.generate_signal(label, 256, seed=index), 256000, 100e6)
+                entries.append({"path": str(path), "label": label, "verified": True, "group_id": f"session-{index}"})
+            config = {"source": "recordings", "recordings": entries, "segment_length": 256,
+                      "snr_db": [20], "jitter": [0], "samples_per_class": 12}
+            readiness = ml.dataset_readiness(config)
+            self.assertTrue(readiness["ready"], readiness["errors"])
+            self.assertEqual(readiness["group_count"], 130)
+            self.assertEqual(sum(row["recordings"] for row in readiness["classes"]), 130)
+            report = ml.run_experiment(config, Path(directory) / "run")
+            used_groups = set().union(*(set(groups) for groups in report["split_groups"].values()))
+            self.assertEqual(used_groups, {entry["group_id"] for entry in entries})
+
+    def test_recording_limit_1000_is_shared_by_readiness_and_loader(self):
+        entries = [{"label": "AM" if index % 2 == 0 else "FM", "verified": True} for index in range(1001)]
+        config = {"source": "recordings", "recordings": entries}
+        self.assertEqual(ml.MAX_RECORDINGS, 1000)
+        with mock.patch.object(ml, "_recording_inventory", side_effect=AssertionError("oversized file list must be rejected before inspection")):
+            readiness = ml.dataset_readiness(config)
+            self.assertFalse(readiness["ready"])
+            self.assertTrue(any("1000" in error for error in readiness["errors"]))
+            with self.assertRaisesRegex(ValueError, "1000"):
+                ml._recording_groups(config, 256)
+
+    def test_recording_iq_budget_still_refuses_instead_of_dropping_files(self):
+        entries = [{"label": "AM" if index % 2 == 0 else "FM", "verified": True, "group_id": f"session-{index}",
+                    "path": f"/unused/clip-{index}.sigmf-meta"} for index in range(5)]
+        config = ml._validate_config({"source": "recordings", "recordings": entries, "evaluation_mode": "training_only",
+                                      "segment_length": 65536, "samples_per_class": 64})
+        def inventory(entry):
+            return {**entry, "metadata_path": entry["path"], "sample_count": 4_194_304, "sample_rate": 256000}
+        # Represent 32 MiB blocks virtually so the budget check itself is tested
+        # without allocating the 128 MiB retained by the production loader.
+        virtual_iq = mock.MagicMock()
+        virtual_iq.__len__.return_value = 4_194_304
+        virtual_iq.__getitem__.return_value.copy.return_value = np.zeros(1, dtype=np.complex64)
+        with mock.patch.object(ml, "_recording_inventory", side_effect=inventory):
+            readiness = ml.dataset_readiness(config)
+            self.assertFalse(readiness["ready"])
+            self.assertTrue(any("128-MiB-IQ-Budget" in error for error in readiness["errors"]))
+            with mock.patch("signalclassifier.sigmf.read_recording", return_value=(virtual_iq, {"global": {"core:sample_rate": 256000}})) as read:
+                with self.assertRaisesRegex(ValueError, "128-MiB-IQ-Budget"):
+                    ml._recording_groups(config, 65536)
+                self.assertEqual(read.call_count, 4, "must reject before reading the fifth file, never silently omit it")
+
+    def test_readiness_checks_split_segment_cap_from_metadata_without_iq_reads(self):
+        entries = [{"label": "AM" if index % 2 == 0 else "FM", "verified": True,
+                    "group_id": f"session-{index}", "path": f"/unused/clip-{index}.sigmf-meta"} for index in range(130)]
+        def inventory(entry):
+            return {**entry, "metadata_path": entry["path"], "sample_count": 16384, "sample_rate": 256000}
+        config = {"source": "recordings", "recordings": entries, "segment_length": 256,
+                  "samples_per_class": 64, "seed": 42}
+        with mock.patch.object(ml, "_recording_inventory", side_effect=inventory), \
+             mock.patch("signalclassifier.sigmf.read_recording", side_effect=AssertionError("preflight must not read IQ")):
+            strict = ml.dataset_readiness(config)
+            self.assertFalse(strict["ready"])
+            self.assertTrue(any("Training: 4992 Segmente" in error and "4096" in error for error in strict["errors"]))
+            self.assertTrue(any("Weniger Aufnahmen" in error and "größere Segmentlänge" in error for error in strict["errors"]))
+            training = ml.dataset_readiness({**config, "evaluation_mode": "training_only"})
+            self.assertFalse(training["ready"])
+            self.assertTrue(any("Training: 8320 Segmente" in error for error in training["errors"]))
+            boundary = ml.dataset_readiness({**config, "evaluation_mode": "training_only", "recordings": entries[:64]})
+            self.assertTrue(boundary["ready"], boundary["errors"])
+
     def test_comparison_selects_validation_instead_of_test_accuracy(self):
         catalog = list_topologies()
         baseline = next(topology for topology in catalog if topology["id"] == "feature-lda")

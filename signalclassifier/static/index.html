@@ -713,10 +713,26 @@
               IQ-Daten und Metadaten im SigMF-Format. Für Training nach Aufnahme
               getrennt.
             </p>
-            <button class="button" data-open="recording-import-dialog">
-              <svg class="icon"><use href="#i-upload" /></svg>SigMF importieren
-            </button>
+            <div class="button-group">
+              <button
+                type="button"
+                class="button button-quiet"
+                id="recording-cleanup-open"
+              >
+                <svg class="icon"><use href="#i-close" /></svg>Kurzaufnahmen
+                bereinigen</button
+              ><button class="button" data-open="recording-import-dialog">
+                <svg class="icon"><use href="#i-upload" /></svg>SigMF
+                importieren
+              </button>
+            </div>
           </div>
+          <div
+            class="notice"
+            id="recording-cleanup-result"
+            role="status"
+            hidden
+          ></div>
           <div class="panel">
             <div class="panel-heading">
               <div>
@@ -984,20 +1000,21 @@
                         id="topology-select-all"
                         class="text-button"
                       >
-                        Verfügbare auswählen</button
+                        Alle auswählen</button
                       ><button
                         type="button"
                         id="topology-select-none"
                         class="text-button"
                       >
-                        Leeren
+                        Auswahl aufheben
                       </button>
                     </div>
                     <p class="field-help" id="topology-selection-help">
                       Ein oder mehrere Modelle gemeinsam trainieren und
                       vergleichen. Mit Strg / ⌘ einzelne Einträge wählen; Shift
                       wählt einen Bereich. Alle Modelle verwenden dieselbe
-                      Datenaufteilung.
+                      Datenaufteilung. Ohne PyTorch bleiben neuronale Ansätze
+                      gesperrt.
                     </p>
                   </div>
                   <label
@@ -1024,7 +1041,28 @@
                         </option>
                       </select></label
                     >
-                    <span class="field-label">Aufnahmen auswählen</span>
+                    <span class="field-label"
+                      >Bestätigte Aufnahmen auswählen</span
+                    >
+                    <div class="experiment-selection-actions">
+                      <span
+                        class="secondary"
+                        id="experiment-recording-selection-count"
+                        >0 / 1000 ausgewählt</span
+                      ><button
+                        type="button"
+                        class="text-button"
+                        id="experiment-recordings-all"
+                      >
+                        Alle auswählen</button
+                      ><button
+                        type="button"
+                        class="text-button"
+                        id="experiment-recordings-none"
+                      >
+                        Auswahl aufheben
+                      </button>
+                    </div>
                     <div
                       id="experiment-recordings"
                       class="recording-checklist"
@@ -1692,6 +1730,85 @@
             id="batch-label-submit"
           >
             Labels bestätigen
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="recording-cleanup-dialog" class="wide-dialog">
+      <form id="recording-cleanup-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="panel-kicker">GESCHLOSSENE KURZAUFNAHMEN</span>
+            <h2>Aufnahmen unter 0,5 Sekunden löschen</h2>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            data-close
+            aria-label="Dialog schließen"
+          >
+            <svg class="icon"><use href="#i-close" /></svg>
+          </button>
+        </div>
+        <div class="dialog-body">
+          <p class="secondary">
+            Diese Vorschau umfasst ausschließlich geschlossene Aufnahmen mit
+            einer Dauer strikt unter 0,5 Sekunden. Beim Bestätigen werden die
+            aufgeführten IQ- und Metadatendateien sowie zugehörige Labels
+            gelöscht, auch bereits bestätigte Labels. Damit entfällt auch die
+            Datengrundlage früherer Experimente; ihre Berichte und trainierten
+            Modelle bleiben erhalten.
+          </p>
+          <div class="notice" id="recording-cleanup-summary" role="status">
+            Vorschau wird geladen …
+          </div>
+          <div
+            class="notice error"
+            id="recording-cleanup-blocked"
+            role="status"
+            hidden
+          ></div>
+          <div class="table-scroll cleanup-preview-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Dateiname</th>
+                  <th>Dauer</th>
+                  <th>IQ + Metadaten</th>
+                  <th>Label</th>
+                </tr>
+              </thead>
+              <tbody id="recording-cleanup-preview"></tbody>
+            </table>
+          </div>
+          <details id="recording-cleanup-skipped-details" hidden>
+            <summary id="recording-cleanup-skipped-count">
+              Geschützte oder übersprungene Aufnahmen
+            </summary>
+            <div id="recording-cleanup-skipped" class="cleanup-skipped"></div>
+          </details>
+          <p class="field-help">
+            Die Bestätigung gilt nur für diese Vorschau. Eine zwischenzeitlich
+            veränderte oder geschützte Datei wird vom Backend erneut geprüft.
+            Eine laufende Empfangs- oder Replay-Sitzung blockiert das Löschen.
+          </p>
+        </div>
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="button button-quiet"
+            id="recording-cleanup-refresh"
+          >
+            Vorschau aktualisieren</button
+          ><button type="button" class="button button-quiet" data-close>
+            Abbrechen</button
+          ><button
+            type="submit"
+            class="button button-danger"
+            id="recording-cleanup-confirm"
+            disabled
+          >
+            Aufnahmen endgültig löschen
           </button>
         </div>
       </form>

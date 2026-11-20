@@ -25,7 +25,8 @@ const source = original.replace(
   state, paletteRGB, averagePowerBins, associatedDetectionIndex, classifiedDetections,
   frequencyBox, frameFromSnapshot, addWaterfall, waterfallGeometry, observationCell,
   observationTrack, captureBudgetEstimate, stopReasonText, trainingOnly,
-  rankedComparisonEntries, liveModelRecommendations, liveSampleMetrics, recordingSelectionWithAdditions
+  rankedComparisonEntries, liveModelRecommendations, liveSampleMetrics, recordingSelectionWithAdditions,
+  topologyAvailable, validateTopologyIds, selectedTopologyIds, prepareExperimentDraft, cleanupDeletionPlan
 };`,
 );
 const sandbox = { Intl, console, Set, Map, Date, window: {}, document: {} };
@@ -347,6 +348,190 @@ assert.equal(
   null,
 );
 
+// Select-all uses only actually available topologies; disabled ANN cannot leak
+// back into an experiment through selected options or an imported draft.
+const catalog = [
+  { id: "baseline", name: "LDA", family: "feature_lda", status: "available" },
+  { id: "ann", name: "CNN", family: "iq_cnn", status: "requires_torch" },
+  { id: "custom-ann", name: "Custom CNN", family: "iq_cnn" },
+];
+assert.equal(f.topologyAvailable(catalog[0], false), true);
+assert.equal(f.topologyAvailable(catalog[1], false), false);
+assert.equal(f.topologyAvailable(catalog[2], false), false);
+assert.deepEqual(
+  Array.from(f.validateTopologyIds(["baseline"], catalog, false)),
+  ["baseline"],
+);
+assert.throws(() => f.validateTopologyIds(["ann"], catalog, false), /PyTorch/);
+assert.throws(
+  () =>
+    f.validateTopologyIds(
+      Array.from({ length: 51 }, (_, i) => String(i)),
+      catalog,
+      false,
+    ),
+  /50/,
+);
+const options = [
+  { value: "baseline", selected: true, disabled: false },
+  { value: "ann", selected: true, disabled: true },
+];
+sandbox.document.querySelector = (selector) =>
+  selector === "#experiment-topology" ? { options } : null;
+assert.deepEqual(Array.from(f.selectedTopologyIds()), ["baseline"]);
+options.forEach((option) => {
+  option.selected = false;
+});
+assert.deepEqual(
+  Array.from(f.selectedTopologyIds()),
+  [],
+  "Clear selection must stay intentionally empty",
+);
+const draft = {
+  source: "recordings",
+  topology_ids: ["baseline"],
+  recording_ids: ["available-a", "missing-b"],
+  segment_lengths: [2048],
+  augmentation: { frequency_offset_hz: 50 },
+};
+const prepared = f.prepareExperimentDraft(
+  draft,
+  catalog,
+  ["available-a"],
+  false,
+);
+assert.deepEqual(Array.from(prepared.recordingIds), ["available-a"]);
+assert.deepEqual(Array.from(prepared.missingRecordingIds), ["missing-b"]);
+assert.deepEqual(
+  Array.from(
+    f.prepareExperimentDraft(
+      { ...draft, topology_ids: [] },
+      catalog,
+      ["available-a"],
+      false,
+    ).topologyIds,
+  ),
+  [],
+  "Drafts preserve a deliberately cleared topology selection",
+);
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      { ...draft, topology_ids: ["ann"] },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /PyTorch/,
+);
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      { ...draft, augmentation: { frequency_offset_hz: NaN } },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /Kanalparameter/,
+);
+assert.equal(
+  draft.augmentation.frequency_offset_hz,
+  50,
+  "Validation must not partially mutate the draft",
+);
+
+// Cleanup sends exactly the reviewed immutable file identities, including labels.
+const preview = {
+  max_duration_seconds: 0.5,
+  recordings: [
+    {
+      id: "short-a",
+      filename: "short-a.sigmf-meta",
+      duration_seconds: 0.4999,
+      bytes: 100,
+      verified: true,
+      label: "AM",
+      fingerprint: "fp-a",
+    },
+    {
+      id: "short-b",
+      filename: "short-b.sigmf-meta",
+      duration_seconds: 0.02,
+      bytes: 20,
+      fingerprint: "fp-b",
+    },
+  ],
+  count: 2,
+  total_bytes: 120,
+  expected_files: { "short-a": "fp-a", "short-b": "fp-b" },
+  skipped: [{ id: "protected", reason: "Experiment" }],
+  blocked_reason: null,
+};
+const plan = f.cleanupDeletionPlan(preview);
+assert.deepEqual(Array.from(plan.recording_ids), ["short-a", "short-b"]);
+assert.equal(plan.max_duration_seconds, 0.5);
+assert.equal(plan.expected_files["short-a"], "fp-a");
+assert.ok(
+  Object.isFrozen(plan) &&
+    Object.isFrozen(plan.recording_ids) &&
+    Object.isFrozen(plan.expected_files),
+);
+preview.recordings.push({
+  id: "newly-closed",
+  duration_seconds: 0.1,
+  fingerprint: "fp-new",
+});
+assert.equal(
+  plan.recording_ids.length,
+  2,
+  "A library refresh cannot add newly closed files to an existing confirmation",
+);
+preview.recordings.pop();
+for (const invalid of [0.5, 0.5001, -0.1, NaN, undefined, "0.4"]) {
+  assert.throws(
+    () =>
+      f.cleanupDeletionPlan({
+        ...preview,
+        recordings: [{ ...preview.recordings[0], duration_seconds: invalid }],
+        count: 1,
+      }),
+    /Vorschau/,
+  );
+}
+assert.throws(
+  () => f.cleanupDeletionPlan({ ...preview, blocked_reason: "Empfang läuft" }),
+  /Empfang/,
+);
+assert.throws(
+  () => f.cleanupDeletionPlan({ ...preview, expected_files: {} }),
+  /Dateiabgleich/,
+);
+assert.throws(
+  () =>
+    f.cleanupDeletionPlan({
+      ...preview,
+      expected_files: { "short-a": "changed", "short-b": "fp-b" },
+    }),
+  /Dateiabgleich/,
+);
+assert.throws(
+  () => f.cleanupDeletionPlan({ ...preview, count: 3 }),
+  /unvollständig/,
+);
+assert.throws(
+  () => f.cleanupDeletionPlan({ ...preview, max_duration_seconds: 1 }),
+  /ungültig/,
+);
+assert.equal(
+  f.cleanupDeletionPlan({
+    ...preview,
+    recordings: [],
+    count: 0,
+    expected_files: {},
+  }).recording_ids.length,
+  0,
+);
+
 console.log(
-  "Frontend pure-logic regressions passed: waterfall, channel association, clipping, capture budget, validation rankings and live warmup.",
+  "Frontend pure-logic regressions passed: waterfall, selection/drafts, reviewed cleanup, capture budget, validation rankings and live warmup.",
 );

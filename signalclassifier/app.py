@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import threading
 import uuid
@@ -94,6 +95,13 @@ class BatchLabelInput(BaseModel):
     overwrite_confirmed: bool = False
     notes: str = Field(default="", max_length=4000)
     expected_labels: dict[str, str] | None = Field(default=None, max_length=1000)
+
+
+class DeleteRecordingsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recording_ids: list[str] = Field(min_length=1, max_length=10000)
+    max_duration_seconds: float = Field(default=0.5, gt=0, le=0.5, allow_inf_nan=False)
+    expected_files: dict[str, str] = Field(min_length=1, max_length=10000)
 
 
 class LiveComparisonInput(BaseModel):
@@ -270,6 +278,126 @@ class Runtime:
         if not path.resolve().is_relative_to((self.data_dir / "recordings").resolve()):
             raise HTTPException(400, "Aufnahme liegt außerhalb der Bibliothek")
         return path
+
+    @staticmethod
+    def recording_fingerprint(paths: tuple[Path, Path]) -> str:
+        """Cheap identity/change check; never hash multi-megabyte IQ payloads."""
+        states = []
+        for path in paths:
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("Nur reguläre SigMF-Dateipaare dürfen gelöscht werden")
+            stat = path.stat()
+            states.append((path.name, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        return hashlib.sha256(json.dumps(states).encode()).hexdigest()
+
+    def cleanup_preview(self, max_duration_seconds: float = 0.5) -> dict:
+        if not math.isfinite(max_duration_seconds) or not 0 < max_duration_seconds <= 0.5:
+            raise ValueError("Bereinigungsgrenze muss größer als 0 und höchstens 0,5 Sekunden sein")
+        with self.lock:
+            status = self.capture.status()
+            blocked = ("Zuerst Empfang beziehungsweise Replay stoppen; währenddessen werden keine Aufnahmen gelöscht."
+                       if status.get("busy") else None)
+            protected, references = set(), {}
+            for experiment in self.store.all("experiment"):
+                config = experiment.get("config") or {}
+                identifiers = set(config.get("recording_ids") or [])
+                identifiers.update(entry.get("id") for entry in config.get("recordings", []) if isinstance(entry, dict) and entry.get("id"))
+                for identifier in identifiers:
+                    references[identifier] = references.get(identifier, 0) + 1
+                if experiment.get("status") in ("queued", "running", "cancelling"):
+                    protected.update(identifiers)
+            annotations = {row["id"]: row for row in self.store.all("label")}
+            selected, skipped = [], []
+            for recording in self.capture.list_recordings():
+                identifier = recording["id"]
+                duration = recording.get("duration_seconds")
+                if recording.get("error") or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
+                    skipped.append({"id": identifier, "reason": "Dauer unbekannt oder SigMF-Dateipaar ungültig"})
+                    continue
+                if duration >= max_duration_seconds:
+                    continue
+                if identifier in protected:
+                    skipped.append({"id": identifier, "reason": "Aufnahme wird von einem laufenden oder vorgemerkten Experiment verwendet"})
+                    continue
+                try:
+                    path = self.recording_path(recording)
+                    paths = (path, path.with_suffix(".sigmf-data"))
+                    fingerprint = self.recording_fingerprint(paths)
+                    size = sum(file.stat().st_size for file in paths)
+                except (ValueError, OSError, HTTPException) as exc:
+                    skipped.append({"id": identifier, "reason": str(getattr(exc, "detail", exc))})
+                    continue
+                annotation = self.annotated_recording(recording, annotations, with_suggestions=False).get("annotation") or {}
+                selected.append({"id": identifier, "filename": path.name, "name": recording.get("name", identifier),
+                                 "duration_seconds": duration, "bytes": size,
+                                 "label": annotation.get("label"), "verified": annotation.get("verified") is True,
+                                 "experiment_count": references.get(identifier, 0), "fingerprint": fingerprint})
+            if len(selected) > 10000:
+                blocked = "Mehr als 10000 kurze Aufnahmen gefunden; Bibliothek für eine Bereinigung in kleinere Teile aufteilen."
+            return {"max_duration_seconds": max_duration_seconds, "recordings": selected, "count": len(selected),
+                    "total_bytes": sum(row["bytes"] for row in selected), "skipped": skipped, "blocked_reason": blocked,
+                    "expected_files": {row["id"]: row["fingerprint"] for row in selected}}
+
+    def delete_recordings(self, payload: DeleteRecordingsInput) -> dict:
+        """Remove only reviewed, unchanged short pairs; stage before DB commit."""
+        with self.lock:
+            preview = self.cleanup_preview(payload.max_duration_seconds)
+            if preview["blocked_reason"]:
+                raise HTTPException(409, preview["blocked_reason"])
+            identifiers = list(dict.fromkeys(payload.recording_ids))
+            catalogue = {recording["id"]: recording for recording in self.capture.list_recordings()}
+            for identifier in identifiers:
+                clean_id(identifier)
+                if identifier not in catalogue:
+                    raise HTTPException(404, f"Aufnahme nicht gefunden: {identifier}; Vorschau erneut öffnen")
+            candidates = {row["id"]: row for row in preview["recordings"]}
+            reasons = {row["id"]: row["reason"] for row in preview["skipped"]}
+            selected, skipped = [], []
+            for identifier in identifiers:
+                row = candidates.get(identifier)
+                if row is None:
+                    skipped.append({"id": identifier, "reason": reasons.get(identifier, "Aufnahme ist nicht kürzer als die gewählte Grenze")})
+                elif payload.expected_files.get(identifier) != row["fingerprint"]:
+                    skipped.append({"id": identifier, "reason": "Dateien wurden seit der Vorschau geändert; bitte erneut prüfen"})
+                else:
+                    selected.append(row)
+            result = {"deleted": [], "count": 0, "bytes_deleted": 0, "skipped": skipped, "cleanup_warning": None}
+            if not selected:
+                return result
+            staging = Path(tempfile.mkdtemp(prefix=".delete-", dir=self.data_dir / "recordings"))
+            moved = []
+            try:
+                try:
+                    for row in selected:
+                        path = self.recording_path(catalogue[row["id"]])
+                        paths = (path, path.with_suffix(".sigmf-data"))
+                        if self.recording_fingerprint(paths) != row["fingerprint"]:
+                            raise ValueError("Aufnahmedateien wurden während der Bereinigung geändert; Vorschau erneut öffnen")
+                        # Metadata is the publication marker: hide it first and restore it last.
+                        for original in paths:
+                            staged = staging / original.name
+                            original.replace(staged)
+                            moved.append((original, staged))
+                    self.store.delete_many("label", [row["id"] for row in selected])
+                except Exception:
+                    for original, staged in reversed(moved):
+                        staged.replace(original)
+                    raise
+                result.update(deleted=[row["id"] for row in selected], count=len(selected))
+                for _, staged in moved:
+                    try:
+                        size = staged.stat().st_size
+                        staged.unlink()
+                        result["bytes_deleted"] += size
+                    except OSError:
+                        LOG.exception("Aufnahme aus Bibliothek entfernt, temporäre Datei bleibt erhalten: %s", staged)
+                        result["cleanup_warning"] = f"Aus der Bibliothek entfernt; temporäre Dateien in {staging.name} konnten nicht vollständig gelöscht werden."
+                return result
+            finally:
+                try:
+                    staging.rmdir()
+                except OSError:
+                    LOG.warning("Bereinigungsordner blieb erhalten: %s", staging)
 
     def model(self, identifier: str) -> dict:
         value = self.store.get("model", clean_id(identifier))
@@ -536,6 +664,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         LOG.error("Dateizugriff fehlgeschlagen: %s", exc)
         return JSONResponse({"detail": f"Dateizugriff fehlgeschlagen: {exc}"}, status_code=503)
 
+    @app.exception_handler(sqlite3.Error)
+    async def database_error(request, exc):
+        LOG.error("Bibliotheksdatenbank nicht verfügbar: %s", exc)
+        return JSONResponse({"detail": f"Bibliotheksdatenbank nicht verfügbar: {exc}"}, status_code=503)
+
     @app.get("/api/status")
     def status():
         recordings = runtime.capture.list_recordings()
@@ -552,11 +685,12 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/receiver/start")
     def receiver_start(config: dict):
-        config = dict(config)
-        config.pop("recording_path", None)
-        if config.get("source") == "recording":
-            config["recording_path"] = str(runtime.recording_path(runtime.recording(config.get("recording_id", ""))))
-        return finite_json(runtime.capture.start(config))
+        with runtime.lock:
+            config = dict(config)
+            config.pop("recording_path", None)
+            if config.get("source") == "recording":
+                config["recording_path"] = str(runtime.recording_path(runtime.recording(config.get("recording_id", ""))))
+            return finite_json(runtime.capture.start(config))
 
     @app.post("/api/receiver/stop")
     def receiver_stop():
@@ -602,6 +736,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.post("/api/recordings/labels/batch")
     def batch_labels(payload: BatchLabelInput):
         return finite_json(runtime.batch_labels(payload))
+
+    @app.get("/api/recordings/cleanup-preview")
+    def cleanup_recordings_preview(max_duration_seconds: float = 0.5):
+        return finite_json(runtime.cleanup_preview(max_duration_seconds))
+
+    @app.post("/api/recordings/delete-batch")
+    def delete_short_recordings(payload: DeleteRecordingsInput):
+        return finite_json(runtime.delete_recordings(payload))
 
     @app.post("/api/recordings/import")
     async def import_recording(metadata: UploadFile = File(...), data: UploadFile = File(...)):
@@ -723,11 +865,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/experiments")
     def start_experiment(payload: dict):
-        config = validate_experiment(payload, runtime)
-        readiness = ml.dataset_readiness(config)
-        if not readiness["ready"]:
-            raise ValueError("; ".join(readiness["errors"]))
         with runtime.lock:
+            config = validate_experiment(payload, runtime)
+            readiness = ml.dataset_readiness(config)
+            if not readiness["ready"]:
+                raise ValueError("; ".join(readiness["errors"]))
             if any(e.get("status") in ("queued", "running", "cancelling") for e in runtime.store.all("experiment")):
                 raise HTTPException(409, "Es läuft bereits ein Experiment")
             identifier = uuid.uuid4().hex

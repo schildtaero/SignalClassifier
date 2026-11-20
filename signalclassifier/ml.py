@@ -27,6 +27,8 @@ FEATURE_NAMES = ["amplitude_cv", "amplitude_kurtosis", "phase_std", "phase_dispe
                  "spectral_flatness", "spectral_entropy", "occupied_bandwidth_fraction",
                  "spectral_kurtosis", "fourth_cumulant", "envelope_correlation"]
 _SCHEMA = 1
+MAX_RECORDINGS = 1000
+MAX_SEGMENTS_PER_SPLIT = 4096
 
 
 def _json(path, value):
@@ -402,10 +404,11 @@ def dataset_readiness(config: dict) -> dict:
         errors.append("Datengrundlage muss synthetic oder recordings sein.")
         return result
     entries = config.get("recordings", [])
-    if not isinstance(entries, list) or len(entries) > 128:
-        errors.append("1–128 Aufnahmen auswählen.")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_RECORDINGS:
+        errors.append(f"1–{MAX_RECORDINGS} Aufnahmen auswählen.")
         return result
     stats, membership = {}, {}
+    group_segment_counts = {candidate_length: {} for candidate_length in set(lengths)}
     samples_cap = config.get("samples_per_class", 64)
     samples_cap = min(64, samples_cap) if type(samples_cap) is int and samples_cap > 0 else 64
     retained_samples = 0
@@ -439,6 +442,9 @@ def dataset_readiness(config: dict) -> dict:
                 continue
             state["groups"].add(info["group_id"])
             membership.setdefault(info["group_id"], set()).add(label)
+            for candidate_length, per_group in group_segment_counts.items():
+                used_samples = min(count, 4_194_304, candidate_length * samples_cap)
+                per_group[info["group_id"]] = per_group.get(info["group_id"], 0) + used_samples // candidate_length
             retained_samples += min(count, length * samples_cap, 4_194_304)
         except (OSError, ValueError, UnicodeError) as exc:
             errors.append(f"{label}, Aufnahme {index + 1}: nicht lesbar ({exc}). SigMF-Metadaten und zugehörige IQ-Datei prüfen.")
@@ -457,9 +463,17 @@ def dataset_readiness(config: dict) -> dict:
     result["group_count"] = len(membership)
     if retained_samples > 16_777_216:
         errors.append("Aufnahmedatensatz überschreitet das 128-MiB-IQ-Budget; weniger Aufnahmen oder Segmente wählen.")
-    if not errors and mode == "independent":
+    if not errors:
         try:
-            _assign_groups(membership, classes, config.get("seed", 42))
+            assignments = _assign_groups(membership, classes, config.get("seed", 42), mode == "training_only")
+            for candidate_length, per_group in sorted(group_segment_counts.items()):
+                split_counts = {split: 0 for split in ("train", "validation", "test")}
+                for group_id, count in per_group.items():
+                    split_counts[assignments[group_id]] += count
+                for split, count in split_counts.items():
+                    if count > MAX_SEGMENTS_PER_SPLIT:
+                        label = {"train": "Training", "validation": "Validierung", "test": "Test"}[split]
+                        errors.append(f"{label}: {count} Segmente bei {candidate_length} Samples pro Segment; maximal {MAX_SEGMENTS_PER_SPLIT} je Split. Weniger Aufnahmen oder Segmente pro Datei auswählen oder eine größere Segmentlänge wählen.")
         except ValueError as exc:
             errors.append(str(exc))
     if mode == "independent" and any(state["recordings"] > len(state["groups"]) for state in stats.values()):
@@ -540,8 +554,8 @@ def _recording_groups(config, length):
     from .sigmf import read_recording
     items = config["recordings"]
     assignments, groups = {}, {"train": [], "validation": [], "test": []}
-    if len(items) > 128:
-        raise ValueError("Maximal 128 Aufnahmen pro Experiment; größere Datensätze in getrennten Experimenten prüfen.")
+    if len(items) > MAX_RECORDINGS:
+        raise ValueError(f"Maximal {MAX_RECORDINGS} Aufnahmen pro Experiment; größere Datensätze in getrennten Experimenten prüfen.")
     classes = config["classes"]
     eligible = [_recording_inventory(x) for x in items if x.get("label") in classes and x.get("verified") is not False]
     training_only = config.get("evaluation_mode") == "training_only"
@@ -582,8 +596,8 @@ def _recording_groups(config, length):
         for label in range(len(classes)):
             if not any(x["label"] == label for x in entries):
                 raise ValueError(f"{split}: kein vollständiges Segment für {classes[label]}; längere Aufnahmen oder kürzere Segmente wählen.")
-        if len(entries) > 4096:
-            raise ValueError("Zu viele Aufnahmesegmente; pro Experiment maximal 4096 je Split.")
+        if len(entries) > MAX_SEGMENTS_PER_SPLIT:
+            raise ValueError(f"Zu viele Aufnahmesegmente; pro Experiment maximal {MAX_SEGMENTS_PER_SPLIT} je Split.")
     return groups
 
 
