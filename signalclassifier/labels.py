@@ -1,7 +1,11 @@
 """Auditable band hints. These are never ground-truth transmitter identities."""
 from __future__ import annotations
 
-from .db import Store, utcnow
+import math
+import re
+from numbers import Real
+
+from .db import Store
 
 SEED_VERSION = "DE-regional-hints-2026-11-v1"
 BANDPLAN_SOURCE = "https://www.bundesnetzagentur.de/DE/Fachthemen/Telekommunikation/Frequenzen/Grundlagen/Frequenzplan/frequenzplan-node.html"
@@ -50,3 +54,182 @@ def suggest(store: Store, frequency: float) -> list[dict]:
             matches.append({**entry, "label_status": "suggested", "requires_confirmation": True,
                             "reason": "Frequenz im Suchbereich; Modulation und Emitter sind unbestätigt."})
     return sorted(matches, key=lambda item: item.get("confidence", 0), reverse=True)
+
+
+# Explicit mappings retain existing seed records and their editable source
+# metadata. Broad/mixed entries deliberately provide alternatives rather than
+# suggesting that a frequency proves one modulation or protocol.
+_SEED_LABELS = {
+    "fm-broadcast": ("FM",), "airband": ("AM",),
+    "adsb": ("ADS-B", "Mode S"), "dab": ("DAB+",), "dvbt": ("DVB-T2",),
+    "pocsag": ("POCSAG",), "ais": ("AIS",), "acars": ("ACARS",), "vdl2": ("VDL2",),
+    "pmr446": ("FM", "dPMR", "DMR"), "dmr": ("DMR",), "tetra": ("TETRA",),
+    "lora433": ("LoRa",), "lora868": ("LoRa",), "aprs": ("APRS",),
+    "amateur2m": ("AM", "FM", "SSB", "Digital"),
+    "amateur70cm": ("FM", "SSB", "Digital"), "srd-ook": ("OOK", "FSK"),
+    "remote-id": ("Remote ID", "Wi-Fi", "Bluetooth"),
+    "video58": ("Analoges FPV", "Digitaler Videolink"),
+}
+_KNOWN_LABELS = {
+    "am": "AM", "fm": "FM", "wfm": "FM", "nfm": "FM", "ssb": "SSB", "usb": "SSB", "lsb": "SSB",
+    "pocsag": "POCSAG", "lora": "LoRa", "lorawan": "LoRa", "lora / lorawan": "LoRa",
+    "ais": "AIS", "acars": "ACARS", "vdl2": "VDL2", "vdl mode 2": "VDL2", "aprs": "APRS",
+    "dmr": "DMR", "dpmr": "dPMR", "tetra": "TETRA", "dab": "DAB+", "dab+": "DAB+", "dvb-t2": "DVB-T2",
+    "fsk": "FSK", "2fsk": "2FSK", "4fsk": "4FSK", "gmsk": "GMSK", "ook": "OOK", "css": "CSS", "ofdm": "OFDM",
+    "bpsk": "BPSK", "qpsk": "QPSK", "8psk": "8PSK", "qam": "QAM",
+}
+
+
+def _number(value):
+    if not isinstance(value, Real) or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _entry_labels(entry):
+    # Recognise specific documented standards first for user-created entries;
+    # mixed or unknown names do not become arbitrary training class names.
+    if entry.get("id") in _SEED_LABELS:
+        return _SEED_LABELS[entry["id"]], False
+    standard = str(entry.get("standard", "")).strip().casefold()
+    modulation = str(entry.get("modulation", "")).strip().casefold()
+    if standard in _KNOWN_LABELS:
+        return (_KNOWN_LABELS[standard],), False
+    if modulation in _KNOWN_LABELS:
+        return (_KNOWN_LABELS[modulation],), False
+    parts = re.split(r"\s*[/,|]\s*", modulation)
+    return tuple(dict.fromkeys(_KNOWN_LABELS[part] for part in parts if part in _KNOWN_LABELS)), any(part not in _KNOWN_LABELS for part in parts)
+
+
+def _region_code(value):
+    match = re.match(r"^([A-Z]{2}(?:-[A-Z0-9]+)?)(?:\s|$|·)", str(value or "").strip().upper())
+    return match[1] if match else None
+
+
+def _in_region(entry, region):
+    code = _region_code(entry.get("region"))
+    if not code or not region:
+        return True
+    return code == region or code.startswith(region + "-") or region.startswith(code + "-")
+
+
+def _windows(recording):
+    if not isinstance(recording, dict) or recording.get("error"):
+        raise ValueError("Aufnahme-Metadaten fehlen oder sind ungültig.")
+    meta = recording.get("metadata", recording if "global" in recording else {})
+    if not isinstance(meta, dict) or ("global" in meta and not isinstance(meta["global"], dict)):
+        raise ValueError("Aufnahme-Metadaten sind ungültig.")
+    glob = meta.get("global", {})
+    rate = _number(glob.get("core:sample_rate", recording.get("sample_rate")))
+    if rate is None or not 0 < rate <= 1e9:
+        raise ValueError("Die aufgezeichnete Bandbreite/Abtastrate fehlt oder ist ungültig.")
+    centers = []
+    if "captures" in meta:
+        captures = meta["captures"]
+        if not isinstance(captures, list) or not 1 <= len(captures) <= 10000:
+            raise ValueError("Capture-Metadaten fehlen oder sind ungültig.")
+        previous_start = -1
+        for capture in captures:
+            if not isinstance(capture, dict):
+                raise ValueError("Ein Capture besitzt ungültige Metadaten.")
+            if "core:sample_rate" in capture:
+                raise ValueError("Wechselnde Capture-Abtastraten benötigen eine getrennte Vorlabel-Prüfung.")
+            if "core:sample_start" in capture:
+                start = capture["core:sample_start"]
+                if isinstance(start, bool) or not isinstance(start, int) or start < 0 or start <= previous_start:
+                    raise ValueError("Capture-Sampleindizes sind ungültig.")
+                previous_start = start
+            frequency = _number(capture.get("core:frequency"))
+            if frequency is None:
+                raise ValueError("Eine absolute Capture-Frequenz fehlt oder ist ungültig.")
+            centers.append(frequency)
+    else:
+        centers.append(_number(recording.get("center_frequency_hz")))
+    if any(center is None or not 0 < center <= 100e9 for center in centers):
+        raise ValueError("Die absolute Empfangsfrequenz fehlt oder ist ungültig.")
+    centers = list(dict.fromkeys(centers))
+    windows = [(center - rate / 2, center + rate / 2) for center in centers]
+    region = _region_code(recording.get("region") or glob.get("signalclassifier:region") or glob.get("sc:region") or "DE")
+    return windows, len(centers) > 1, region
+
+
+def _covered(window, intervals):
+    low, high = window
+    end = low
+    for left, right in sorted(intervals):
+        if right <= end:
+            continue
+        if left > end:
+            return False
+        end = right
+        if end >= high:
+            return True
+    return False
+
+
+def recording_suggestions(store: Store, recording: dict, entries=None) -> dict:
+    """Pure provisional labels for the entire recorded RF window, never writes.
+
+    ``entries`` allows an API caller to reuse one emitter snapshot for an entire
+    recording list. Frequency hints are independent of classification priors and
+    human annotations. They are not evidence that one clean signal was received.
+    """
+    empty = {"label_suggestion": None, "label_suggestions": []}
+    try:
+        windows, retuned, region = _windows(recording)
+    except ValueError as exc:
+        return {**empty, "label_suggestion_reason": str(exc)}
+    matches = {}
+    intervals = [[] for _ in windows]
+    unresolved = False
+    for entry in store.all("emitter") if entries is None else entries:
+        if not isinstance(entry, dict) or not _in_region(entry, region):
+            continue
+        low, high = _number(entry.get("frequency_min_hz")), _number(entry.get("frequency_max_hz"))
+        if low is None or high is None or not 0 <= low <= high:
+            continue
+        overlap = [(i, (max(low, a), min(high, b))) for i, (a, b) in enumerate(windows) if low < b and high > a]
+        if not overlap:
+            continue
+        labels, incomplete = _entry_labels(entry)
+        unresolved |= not labels or incomplete
+        for index, interval in overlap:
+            intervals[index].append(interval)
+        confidence = _number(entry.get("confidence"))
+        confidence = min(1., max(0., confidence)) if confidence is not None else 0.
+        for label in labels:
+            item = matches.setdefault(label, {"label": label, "confidence": 0., "emitter_ids": [], "names": [], "sources": []})
+            item["confidence"] = max(item["confidence"], confidence)
+            for key, value in (("emitter_ids", entry.get("id")), ("names", entry.get("name")), ("sources", entry.get("source"))):
+                if value and str(value) not in item[key]:
+                    item[key].append(str(value))
+    coverage = all(_covered(window, intervals[i]) for i, window in enumerate(windows))
+    ambiguous = len(matches) != 1 or retuned or not coverage or unresolved
+    reasons = []
+    if retuned:
+        reasons.append("Die Aufnahme enthält mehrere Abstimmfrequenzen; globales Vorlabel gesperrt.")
+    if not coverage:
+        reasons.append("Das gesamte Aufnahmefenster liegt nicht innerhalb bekannter Suchbereiche.")
+    if unresolved:
+        reasons.append("Ein überlappender Datenbankeintrag hat keine eindeutige unterstützte Klassenabbildung.")
+    if len(matches) > 1:
+        reasons.append("Mehrere Klassen sind im vollständigen Aufnahmefenster möglich.")
+    if not matches:
+        reasons.append("Kein zugeordneter Klassenhinweis für diesen Frequenzbereich.")
+    suggestions = []
+    for item in matches.values():
+        names = ", ".join(item.pop("names"))
+        sources = item.pop("sources")
+        item.update(source="; ".join(sources), ambiguous=ambiguous, requires_confirmation=True, label_status="suggested",
+                    reason=f"Frequenz-/Bandhinweis aus {names or 'Emitter-Datenbank'}; die volle IQ-Bandbreite wurde berücksichtigt. "
+                           "Kein Signal- oder Identitätsnachweis; mehrere Sender und andere Modulationen bleiben möglich."
+                           + (" " + " ".join(reasons) if ambiguous else ""))
+        suggestions.append(item)
+    suggestions.sort(key=lambda item: (-item["confidence"], item["label"]))
+    return {"label_suggestion": suggestions[0] if suggestions and not ambiguous else None,
+            "label_suggestions": suggestions,
+            "label_suggestion_reason": " ".join(reasons) if reasons else "Unbestätigter Frequenzhinweis; vor dem Training prüfen und bestätigen."}

@@ -229,6 +229,39 @@
               </button>
             </div>
           </div>
+          <section
+            class="panel capture-health-panel"
+            aria-label="Aufnahmequalität und Durchsatz"
+          >
+            <div class="capture-health-grid" id="capture-health-grid">
+              <div>
+                <span class="metric-label">IQ-DURCHSATZ</span
+                ><strong id="capture-throughput">—</strong
+                ><small id="capture-queue">Warte auf Stream-Telemetrie</small>
+              </div>
+              <div>
+                <span class="metric-label">VERARBEITUNGSBUDGET</span
+                ><strong id="capture-budget">—</strong
+                ><small id="capture-stage"
+                  >Noch keine Verarbeitung gemessen</small
+                >
+              </div>
+              <div>
+                <span class="metric-label">DATENKONTINUITÄT</span
+                ><strong id="capture-gaps">Nicht verifiziert</strong
+                ><small id="capture-gap-detail"
+                  >Treiber- und Warteschlangentelemetrie werden getrennt
+                  ausgewiesen.</small
+                >
+              </div>
+            </div>
+            <div
+              class="notice error"
+              id="capture-quality-warning"
+              role="status"
+              hidden
+            ></div>
+          </section>
           <div class="receive-grid">
             <article class="panel spectrum-panel">
               <div class="panel-heading">
@@ -266,12 +299,114 @@
                 <span class="plot-corner" id="spectrum-state">STANDBY</span
                 ><span class="plot-unit">dBFS</span>
               </div>
-              <div class="waterfall-stage">
-                <canvas
-                  id="waterfall-canvas"
-                  aria-label="Zeitlicher Verlauf des Spektrums"
-                  role="img"
-                ></canvas>
+              <div id="waterfall-section" class="waterfall-section">
+                <div class="waterfall-toolbar">
+                  <div>
+                    <span class="panel-kicker">ZEIT / FREQUENZ</span>
+                    <h3>
+                      Wasserfall
+                      <span id="waterfall-frame-count" class="secondary"
+                        >0 Stichproben</span
+                      >
+                    </h3>
+                  </div>
+                  <div class="waterfall-tools">
+                    <label class="checkbox"
+                      ><input
+                        type="checkbox"
+                        id="detection-overlay-toggle"
+                        checked
+                      />Detektionsrahmen</label
+                    ><button
+                      type="button"
+                      class="icon-button"
+                      id="waterfall-expand"
+                      aria-label="Spektrum und Wasserfall vergrößern"
+                      title="RF-Monitor vergrößern"
+                    >
+                      <svg class="icon"><use href="#i-chart" /></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="waterfall-stage">
+                  <canvas
+                    id="waterfall-canvas"
+                    aria-label="Wasserfall: Frequenz horizontal, Alter der empfangenen Stichproben vertikal. Leere Zeitbereiche enthalten keine Messung."
+                    role="img"
+                    aria-describedby="waterfall-sampling-note waterfall-readout"
+                  ></canvas>
+                </div>
+                <div
+                  class="waterfall-readout"
+                  id="waterfall-readout"
+                  role="status"
+                >
+                  Frequenz und Messwert mit dem Zeiger ablesen.
+                </div>
+                <div class="waterfall-scale-controls">
+                  <label
+                    >Farbskala<select id="waterfall-palette">
+                      <option value="viridis">Viridis</option>
+                      <option value="cividis">Cividis</option>
+                      <option value="inferno">Inferno</option>
+                    </select></label
+                  >
+                  <label
+                    >Minimum <em>dBFS</em
+                    ><input
+                      id="waterfall-min"
+                      type="number"
+                      min="-200"
+                      max="20"
+                      step="5"
+                      value="-120"
+                  /></label>
+                  <label
+                    >Maximum <em>dBFS</em
+                    ><input
+                      id="waterfall-max"
+                      type="number"
+                      min="-190"
+                      max="30"
+                      step="5"
+                      value="-20"
+                  /></label>
+                  <label
+                    >Zeitfenster<select id="waterfall-window">
+                      <option value="60">60 Sekunden</option>
+                      <option value="180" selected>3 Minuten</option>
+                      <option value="600">10 Minuten</option>
+                    </select></label
+                  >
+                </div>
+                <div class="waterfall-legend">
+                  <span id="waterfall-scale-low">−120 dBFS</span
+                  ><canvas
+                    id="waterfall-scale-canvas"
+                    height="14"
+                    aria-label="Leistungsskala: dunkle Farben für niedrige, helle Farben für hohe Leistung"
+                    role="img"
+                  ></canvas
+                  ><span id="waterfall-scale-high">−20 dBFS</span>
+                </div>
+                <div class="waterfall-detection-legend">
+                  <span><i class="detection-swatch am"></i>AM</span
+                  ><span><i class="detection-swatch fm"></i>FM</span
+                  ><span
+                    ><i class="detection-swatch unknown"></i>Andere /
+                    unbekannt</span
+                  ><span class="secondary"
+                    >Modulation nur für den ausgewerteten Kanal</span
+                  >
+                </div>
+                <p class="waterfall-sampling-note" id="waterfall-sampling-note">
+                  Jede Messzeile ist eine empfangene Spektrum-Stichprobe. Freie
+                  Zeitbereiche bleiben leer. Gestrichelte Rahmen fassen
+                  beobachtete Stichproben zusammen; sie belegen keine
+                  durchgehende Signaldauer. Zeitmarken beruhen auf der
+                  Host-Empfangszeit und sind ohne bestätigten
+                  Hardware-Zeitstempel nur eine zeitliche Schätzung.
+                </p>
               </div>
               <div class="plot-footer">
                 <span
@@ -370,6 +505,11 @@
                         max="65536"
                     /></label>
                   </div>
+                  <p
+                    class="capture-size-estimate field-help"
+                    id="capture-size-estimate"
+                    hidden
+                  ></p>
                   <label id="threshold-field" hidden
                     >Schwelle über FFT-Median <em>dB</em
                     ><input
@@ -385,6 +525,62 @@
                       <option value="FM">FM · Frequenzmodulation</option>
                     </select></label
                   >
+                  <details class="capture-performance-controls">
+                    <summary>Aufnahmeleistung einstellen</summary>
+                    <div class="form-pair">
+                      <label
+                        >Max. Signalkanäle<input
+                          name="max_channels"
+                          type="number"
+                          min="1"
+                          max="8"
+                          step="1"
+                          value="8"
+                          required
+                      /></label>
+                      <label
+                        >Eingangspuffer <em>MiB</em
+                        ><input
+                          name="queue_mib"
+                          type="number"
+                          min="8"
+                          max="256"
+                          step="8"
+                          value="64"
+                          required
+                      /></label>
+                    </div>
+                    <div class="form-pair">
+                      <label
+                        >Spektrumanzeige <em>Hz</em
+                        ><input
+                          name="spectrum_refresh_hz"
+                          type="number"
+                          min="1"
+                          max="30"
+                          step="1"
+                          value="8"
+                          required
+                      /></label>
+                      <label
+                        >Signalsuche, Intervall <em>ms</em
+                        ><input
+                          name="detection_interval_ms"
+                          type="number"
+                          min="0"
+                          max="1000"
+                          step="1"
+                          value="0"
+                          required
+                      /></label>
+                    </div>
+                    <p class="field-help">
+                      Weniger gleichzeitige Kanäle senken die Rechenlast. Der
+                      Puffer fängt kurze Lastspitzen auf. Suchintervall 0 prüft
+                      jeden IQ-Block; größere Intervalle können kurze Signale
+                      übersehen.
+                    </p>
+                  </details>
                   <p class="field-help" id="source-help">
                     RSP1A benötigt SDRplay API und SoapySDR. Ein Empfänger ist
                     gleichzeitig aktiv.
@@ -452,6 +648,45 @@
                 <div id="model-explanation" class="explanation-body"></div>
               </details>
             </article>
+            <article
+              class="panel live-comparison-panel"
+              id="live-comparison-panel"
+              aria-label="Mehrere Modelle an Live-Stichproben vergleichen"
+            >
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker"
+                    >NEUESTE IQ-STICHPROBEN / BIS ZU DREI MODELLE</span
+                  >
+                  <h2>Live-Stichproben</h2>
+                </div>
+                <div class="live-comparison-actions">
+                  <span class="pill" id="live-comparison-count"
+                    >0 / 3 Modelle</span
+                  ><button
+                    type="button"
+                    class="button button-quiet"
+                    id="live-comparison-stop"
+                    disabled
+                  >
+                    Vergleich beenden
+                  </button>
+                </div>
+              </div>
+              <p class="live-comparison-status" id="live-comparison-status">
+                Im Experiment bis zu drei trainierte Modelle für diesen
+                Vergleich auswählen.
+              </p>
+              <div class="live-comparison-cards" id="live-comparison-cards">
+                <div class="empty-state compact">
+                  Noch keine Modelle für Live-Stichproben ausgewählt.
+                </div>
+              </div>
+              <p class="panel-note" id="live-comparison-hardware">
+                Rechenzeit und Modellscore werden getrennt gezeigt. Eine
+                Genauigkeit setzt bekannte Referenzlabels voraus.
+              </p>
+            </article>
             <article class="panel detection-panel">
               <div class="panel-heading">
                 <div>
@@ -490,10 +725,61 @@
               </div>
               <span class="pill" id="recording-count">0 Aufnahmen</span>
             </div>
+            <div class="recording-selection-toolbar">
+              <label class="recording-filter"
+                ><span class="sr-only">Aufnahmen filtern</span
+                ><select id="recording-filter">
+                  <option value="all">Alle Aufnahmen</option>
+                  <option value="unconfirmed">Ohne bestätigtes Label</option>
+                  <option value="confirmed">Bestätigte Labels</option>
+                </select></label
+              >
+              <button
+                type="button"
+                class="text-button"
+                id="recording-select-unconfirmed"
+              >
+                Unbestätigte auswählen
+              </button>
+              <button
+                type="button"
+                class="text-button"
+                id="recording-clear-selection"
+              >
+                Auswahl aufheben
+              </button>
+              <span id="recording-selection-count" class="secondary"
+                >0 / 1000 ausgewählt</span
+              >
+              <button
+                type="button"
+                class="button button-primary"
+                id="recording-batch-open"
+                disabled
+              >
+                Labels bestätigen
+              </button>
+            </div>
+            <div
+              class="notice"
+              id="batch-label-result"
+              role="status"
+              hidden
+            ></div>
             <div class="table-scroll">
               <table class="data-table">
                 <thead>
                   <tr>
+                    <th class="selection-cell">
+                      <label class="checkbox"
+                        ><input
+                          type="checkbox"
+                          id="recording-select-all"
+                          title="Höchstens 1000 Aufnahmen je Bestätigung"
+                          aria-label="Alle sichtbaren Aufnahmen auswählen"
+                        /><span class="sr-only">Auswahl</span></label
+                      >
+                    </th>
                     <th>Aufnahme / Quelle</th>
                     <th>Frequenz</th>
                     <th>Rate / Dauer</th>
@@ -670,16 +956,51 @@
                       name="name"
                       value="AM / FM · Erstversuch"
                       required
-                      maxlength="120" /></label
-                  ><label
-                    >Topologie<select
-                      id="experiment-topology"
-                      name="topology_id"
-                      required
+                      maxlength="120"
+                  /></label>
+                  <div class="topology-multi-control">
+                    <label
+                      >Topologien vergleichen<select
+                        id="experiment-topology"
+                        name="topology_id"
+                        multiple
+                        size="6"
+                        required
+                        aria-describedby="topology-selection-help"
+                      >
+                        <option value="" disabled>
+                          Topologien werden geladen …
+                        </option>
+                      </select></label
                     >
-                      <option value="">Topologien werden geladen …</option>
-                    </select></label
-                  ><label
+                    <div class="topology-multi-actions">
+                      <span
+                        id="topology-selection-count"
+                        class="secondary"
+                        aria-live="polite"
+                        >0 / 50 ausgewählt</span
+                      ><button
+                        type="button"
+                        id="topology-select-all"
+                        class="text-button"
+                      >
+                        Verfügbare auswählen</button
+                      ><button
+                        type="button"
+                        id="topology-select-none"
+                        class="text-button"
+                      >
+                        Leeren
+                      </button>
+                    </div>
+                    <p class="field-help" id="topology-selection-help">
+                      Ein oder mehrere Modelle gemeinsam trainieren und
+                      vergleichen. Mit Strg / ⌘ einzelne Einträge wählen; Shift
+                      wählt einen Bereich. Alle Modelle verwenden dieselbe
+                      Datenaufteilung.
+                    </p>
+                  </div>
+                  <label
                     >Datengrundlage<select name="source" id="experiment-source">
                       <option value="synthetic">
                         Synthetisch · kontrollierter AM/FM-Vergleich
@@ -690,15 +1011,29 @@
                     </select></label
                   >
                   <div id="experiment-recordings-field" hidden>
+                    <label
+                      >Bewertungsmodus<select
+                        name="evaluation_mode"
+                        id="experiment-evaluation-mode"
+                      >
+                        <option value="independent">
+                          Unabhängig bewerten · 3 Sitzungen je Klasse
+                        </option>
+                        <option value="training_only">
+                          Nur trainieren · ohne unabhängige Bewertung
+                        </option>
+                      </select></label
+                    >
                     <span class="field-label">Aufnahmen auswählen</span>
                     <div
                       id="experiment-recordings"
                       class="recording-checklist"
                     ></div>
                     <p class="field-help">
-                      Mindestens zwei Klassen mit unabhängigen Aufnahmen
-                      auswählen. Ganze Aufnahmesitzungen bleiben in genau einem
-                      Split.
+                      Unabhängige Bewertung benötigt je Klasse mindestens drei
+                      eigenständige Aufnahmesitzungen. Mehrere Clips derselben
+                      Sitzung zählen gemeinsam. „Nur trainieren“ erlaubt eine
+                      Sitzung je Klasse und liefert keine Testgenauigkeit.
                     </p>
                   </div>
                   <div class="form-pair">
@@ -878,6 +1213,17 @@
                     synthetischer Daten ersetzen keinen unabhängigen RF-Test.
                   </p>
                 </div>
+                <div
+                  class="dataset-readiness"
+                  id="dataset-readiness"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <p class="field-help">
+                    Datengrundlage wird geprüft, sobald bestätigte Aufnahmen
+                    ausgewählt sind.
+                  </p>
+                </div>
                 <div class="panel-actions">
                   <button
                     class="button button-primary"
@@ -955,6 +1301,46 @@
             <button class="button" data-open="model-import-dialog">
               <svg class="icon"><use href="#i-upload" /></svg>Modell importieren
             </button>
+          </div>
+          <div
+            class="panel models-live-toolbar"
+            aria-label="Gespeicherte und importierte Modelle für Live-Stichproben auswählen"
+          >
+            <div>
+              <span class="panel-kicker">LOKALE MODELLBIBLIOTHEK</span>
+              <h2>Modelle an Live-Stichproben vergleichen</h2>
+              <p>
+                Bis zu drei gespeicherte oder importierte Modelle wählen. Die
+                Auswahl startet keinen Empfänger und ändert das primäre Modell
+                nicht.
+              </p>
+            </div>
+            <div class="models-live-actions">
+              <span class="pill" id="models-live-count" aria-live="polite"
+                >0 / 3 Modelle ausgewählt</span
+              ><button
+                type="button"
+                class="button button-primary"
+                id="models-live-start"
+                disabled
+              >
+                Ausgewählte live vergleichen</button
+              ><button
+                type="button"
+                class="button button-quiet"
+                id="models-live-clear"
+                disabled
+              >
+                Auswahl leeren</button
+              ><button
+                type="button"
+                class="button button-quiet"
+                id="models-live-stop"
+                disabled
+              >
+                Live-Vergleich beenden
+              </button>
+            </div>
           </div>
           <div class="model-grid" id="model-grid"></div>
           <div class="panel empty-state" id="models-empty">
@@ -1197,6 +1583,7 @@
           </button>
         </div>
         <div class="dialog-body">
+          <div class="notice" id="label-suggestion-notice" hidden></div>
           <input type="hidden" name="recording_id" /><label
             >Modulation / Klasse<input
               name="label"
@@ -1228,6 +1615,83 @@
         <div class="dialog-actions">
           <button class="button button-primary" type="submit">
             Label speichern
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="batch-label-dialog" class="wide-dialog">
+      <form id="batch-label-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="panel-kicker">AUSGEWÄHLTE AUFNAHMEN</span>
+            <h2>Labels gemeinsam bestätigen</h2>
+          </div>
+          <button
+            type="button"
+            class="icon-button"
+            data-close
+            aria-label="Dialog schließen"
+          >
+            <svg class="icon"><use href="#i-close" /></svg>
+          </button>
+        </div>
+        <div class="dialog-body">
+          <label class="checkbox"
+            ><input
+              type="radio"
+              name="batch_mode"
+              value="suggestions"
+              checked
+            />Vorschläge bestätigen</label
+          >
+          <p class="field-help">
+            Die vorausgewählten Labels stammen aus Frequenzvorwissen.
+            Mehrdeutige oder fehlende Vorschläge werden übersprungen. Bestätigte
+            Labels bleiben erhalten.
+          </p>
+          <label class="checkbox"
+            ><input type="radio" name="batch_mode" value="label" />Allen
+            ausgewählten Aufnahmen dasselbe Label geben</label
+          >
+          <label id="batch-label-field" hidden
+            >Gemeinsame Klasse<input
+              name="label"
+              list="label-options"
+              placeholder="AM, FM oder eigene Klasse"
+              maxlength="80"
+          /></label>
+          <label
+            >Notizen<textarea
+              name="notes"
+              rows="2"
+              maxlength="4000"
+              placeholder="Optionale gemeinsame Notiz"
+            ></textarea>
+          </label>
+          <div class="notice" id="batch-label-summary"></div>
+          <div class="table-scroll">
+            <table class="data-table batch-preview-table">
+              <thead>
+                <tr>
+                  <th>Aufnahme</th>
+                  <th>Bisher</th>
+                  <th>Vorgesehenes Label</th>
+                  <th>Begründung</th>
+                </tr>
+              </thead>
+              <tbody id="batch-label-preview"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" class="button button-quiet" data-close>
+            Abbrechen</button
+          ><button
+            type="submit"
+            class="button button-primary"
+            id="batch-label-submit"
+          >
+            Labels bestätigen
           </button>
         </div>
       </form>

@@ -231,7 +231,16 @@ class SigMFWriter:
         data = np.asarray(iq, dtype="<c8")
         if data.ndim != 1 or not np.isfinite(data).all():
             raise ValueError("IQ-Daten müssen ein endliches eindimensionales komplexes Array sein.")
-        data.tofile(self._handle)
+        try:
+            data.tofile(self._handle)
+        except OSError:
+            # A failed write can leave a partial IQ sample/block. Preserve only
+            # the last successfully committed numeric prefix before publishing
+            # metadata; a failed truncate/flush is itself propagated.
+            self._handle.flush()
+            self._handle.truncate(self.samples * 8)
+            self._handle.seek(self.samples * 8)
+            raise
         self.samples += len(data)
         return data.nbytes
 

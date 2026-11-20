@@ -71,6 +71,59 @@ Der Adapter kann Pluto-Zeitstempellücken ohne zusätzliche Hardwaretelemetrie n
 
 Für die Live-Klassifikation werden bis zu 65.536 zusammenhängende Samples desselben Signalkanals gesammelt. Der Puffer startet bei Kanal-, Frequenz-, Abtastraten- oder Quellenwechsel neu. Ein trainiertes Modell erhält die zuletzt verfügbaren Samples in seiner gespeicherten Segmentlänge; reicht der aktuelle Kontext noch nicht aus, wird die Inferenz mit einer sichtbaren Begründung übersprungen. IQ und zugehörige Abtastrate/Frequenz werden gemeinsam gelesen.
 
+## Hohe Sample-Raten, Warteschlange und Diagnose
+
+Der Hardware-Lesepfad läuft unabhängig von Spektrumanalyse, Kanalfiltern und Datenträgerzugriffen in einem eigenen Thread. Zwischen Empfänger und Verarbeitung liegt eine **begrenzte IQ-Warteschlange**, standardmäßig 64 MiB. Bei 5 MS/s und `cf32_le` entspricht das ungefähr 1,68 Sekunden RF-Daten. Das ist zusätzlich zum aktuellen Empfangs-/Verarbeitungsblock und den begrenzten DSP-Arbeitspuffern; es ist keine Angabe des gesamten Prozess-RAMs. `queue_capacity_bytes` erlaubt mindestens einen Empfangsblock bis maximal 256 MiB und wird auf ganze Blöcke abgerundet. Bibliotheken mit wiederverwendeten Empfangspuffern werden vor dem nächsten Lesezugriff kopiert. Die integrierten Pluto-/RSP-Adapter liefern bereits eigenständige Arrays.
+
+Diese Entkopplung puffert kurze Scheduling- und Schreibpausen. Sie kann eine **dauerhaft zu langsame Verarbeitung nicht ausgleichen**. Ist die Queue voll, endet die Aufnahme am ersten nicht aufgenommenen Block mit einem sichtbaren `queue_overflow`. Bereits zugelassene, zusammenhängende Blöcke werden noch in Reihenfolge verarbeitet und gespeichert. Der Fehler bleibt im Status und in den Metadaten erhalten. Die Anwendung wirft keine mittleren Blöcke weg, um danach scheinbar lückenlos weiterzuschreiben. Ein vom RSP-Treiber gemeldeter Overflow/Corruption wird ebenfalls als Fehler übernommen. Ein gewollter Stop oder das Erreichen des Speicherlimits kann einen noch wartenden **Endabschnitt** verwerfen; `discarded_after_stop_samples` zählt ihn und der Stopgrund bleibt erhalten.
+
+Die Kanäle verwenden weiterhin denselben kausalen FIR und eine kontinuierliche Dezimierungsphase. Seine Umsetzung hält Filter-FFT und Oszillator im Cache, rechnet mit komplexen 32-Bit-Werten und berechnet über Frequenzfaltung direkt die kurze, dezimierte inverse FFT. Das vermeidet einen vollständigen inversen FFT-Schritt für Samples, die anschließend verworfen würden. Der stärkste Aufnahmekanal wird für die Inferenz wiederverwendet. Er wird nicht ein zweites Mal mit voller Eingangsrate gefiltert. Ein Vergleich gegen vollständige FIR-Faltung und gegen beliebig geschnittene Streaming-Blöcke ist Teil der Softwaretests.
+
+Monitor und Breitbandmodus aktualisieren die Spektrumanalyse standardmäßig mit **8 Hz** (`spectrum_refresh_hz`, 1–30 Hz). Der Inferenzkanal verarbeitet trotzdem aufeinanderfolgende Blöcke, damit seine Samples zusammenhängend bleiben. Im selektiven Modus erfolgt die Energieentscheidung standardmäßig **für jeden RF-Block**. Bei 131072 Samples und 5 MS/s sind das 26,2144 ms pro Entscheidung; die FFT betrachtet bis zu 32 Fenster innerhalb dieses Blocks. Ein größeres `detection_interval_seconds` (0–1 s; 0 bedeutet jeder Block) senkt den Aufwand für die Energieentscheidung, kann jedoch kurze Signale verpassen. `max_channels` begrenzt die gleichzeitig gespeicherten Kanäle auf 1–8. Die Spektrumveröffentlichung bleibt auch im selektiven Modus bei der eingestellten Bildrate.
+
+Die FFT analysiert dabei höchstens die ersten 65536 Samples eines RF-Blocks. Bei einem 131072-Sample-Block ist daher nur die erste Hälfte durch diese Energiebeobachtung abgedeckt; kurze Signale im übrigen Abschnitt können unentdeckt bleiben. `analysis_sample_count`, `analysis_sample_offset` und `analysis_duration_seconds` beschreiben den tatsächlich analysierten Abschnitt. Die Wasserfall-Zeitsegmente verwenden diese Dauer, nicht die größere `block_duration_seconds`. `analysis_timestamp` beziehungsweise `timestamp` bezeichnen das geschätzte Ende dieses FFT-Abschnitts: Host-Empfangszeit des ganzen Blocks minus Dauer seines nicht analysierten Endabschnitts. `block_received_at` erhält die ursprüngliche Host-Empfangszeit. Das sind Host-Zeitbezüge; `rf_timestamp_verified` bleibt falsch. Unbeobachtete Zeitbereiche werden dadurch nicht als durchgängig gemessen dargestellt.
+
+`receiver.performance` im Status und `global.sc:performance` in einer abgeschlossenen Aufnahme enthalten:
+
+| Feld | Bedeutung |
+| --- | --- |
+| `actual_sample_rate` | Vom Adapter zurückgelesene Sample-Rate in S/s, kein gemessener Host-Datendurchsatz |
+| `reader_ms` | Dauer des letzten Lesezugriffs einschließlich Warten auf Hardwaredaten |
+| `processing_ms` | Dauer des letzten verarbeiteten Blocks einschließlich dessen IQ-Schreibzugriffen |
+| `writer_ms` | Summe der IQ-Schreibzeiten dieses Blocks; Metadatenabschluss ist nicht enthalten |
+| `processing_rtf` | Geglättetes Verhältnis Verarbeitungszeit / RF-Blockdauer; dauerhaft > 1 bedeutet, dass die Verarbeitung zurückfällt |
+| `processing_rtf_mean` | Dasselbe Verhältnis aus kumulierter Verarbeitungs- und RF-Dauer |
+| `queue_blocks`, `queue_bytes` | Aktuelle wartende Blöcke bzw. deren tatsächliche IQ-Bytes |
+| `queue_capacity_blocks`, `queue_capacity_bytes` | Harte Aufnahmegrenzen der Warteschlange |
+| `queue_high_water_blocks`, `queue_high_water_bytes` | Höchste erreichte Belegung dieses Laufs |
+| `read_blocks`, `processed_blocks` | Gelesene beziehungsweise fertig verarbeitete Blöcke |
+| `source_samples_read`, `source_samples_processed` | Zugehörige ursprüngliche IQ-Samplezähler |
+| `overflows`, `gaps` | Anzahl gemeldeter Overflow-/Unterbrechungsereignisse, keine Anzahl verlorener Samples |
+| `capture_error` | Konkreter Aufnahmefehler oder `null` |
+| `detection_interval_seconds`, `publication_hz` | Konfigurierte/effektive Entscheidungstaktung und Spektrumbildrate |
+| `gap_free_verified` | Bleibt ohne unabhängigen Nachweis `false`, auch wenn kein Fehler gemeldet wurde |
+
+Zusätzlich enthält `global.sc:integrity` die gemeldeten Ereignisse, den Fehler, Stopgrund und Samplezähler. Damit bleiben Qualitätsprobleme auch nach dem Transfer auf die Workstation sichtbar. Eine Anzahl von **0 gemeldeten Lücken ist kein Nachweis lückenlosen HF-Empfangs**.
+
+### Reproduzierbarer Softwarebenchmark
+
+```bash
+.venv/bin/python scripts/benchmark_capture.py --rate 5000000 --blocks 24 --channels 8
+.venv/bin/python scripts/benchmark_capture.py --mode energy --blocks 24 --channels 8 --hardware-queue
+```
+
+Das Skript erzeugt dieselben deterministischen acht schmalen Töne mit Rauschen, jeweils 24 Blöcke à 131072 Samples bei 5 MS/s (0,6291456 s RF-Zeit). Es misst Monitor, Breitband und selektive Aufnahme mit tatsächlichen temporären IQ-Dateien. Die zweite Variante übt die Hardware-Queue mit einem ungebremsten **numerischen** Datenstoß; sie greift nicht auf ein Gerät zu. Das JSON enthält Umgebung, Parameter und Messwerte. Ein Lauf sollte für belastbare lokale Vergleiche mehrfach unter vergleichbarer Rechnerlast durchgeführt werden.
+
+Ein Vorher-/Nachher-Profil mit identischen 5-MS/s-Daten auf dem Entwicklungsrechner ergab folgende Gesamtzeiten; der Profiling-Aufwand war in beiden Messungen enthalten:
+
+| Modus | Vorher | Nachher | Verhältnis zur RF-Dauer vorher / nachher |
+| --- | --- | --- | --- |
+| Monitor | 0,384 s | 0,095 s | 0,61 / 0,15 |
+| Breitband | 0,439 s | 0,201 s | 0,70 / 0,32 |
+| Selektiv, 8 Kanäle | 2,570 s | 0,524 s | 4,09 / 0,83 |
+
+Die ursprüngliche selektive Verarbeitung war in diesem Versuch also rund viermal langsamer als die RF-Zeit, obwohl der Monitor noch mithalten konnte. Die optimierte Variante war bei diesem Datensatz rund fünfmal schneller. Das erklärt einen möglichen Softwareengpass, bestätigt aber weder eine konkrete USB-Datenlücke am Benutzergerät noch garantiert es lückenlosen 5-MS/s-Betrieb auf jedem Laptop. Anzahl/Bandbreite der Signale, Treiber, Filesystem und paralleles Training beeinflussen die tatsächliche Reserve. Unter WSL sind Aufnahmen im Linux-Dateisystem normalerweise günstiger als Schreibzugriffe auf eingebundene Windows-Laufwerke; der lokale `writer_ms`- und Queue-Verlauf liefert dafür die konkrete Messung.
+
 ## Unterstützter SigMF-Ausschnitt
 
 Unterstützt werden einkanalige komplexe `cf32_le`- und `ci16_le`-Datasets, gleichnamig mit `.sigmf-meta` und `.sigmf-data`, kontinuierlich und ohne eingebettete Capture-Header. JSON-Metadaten sind auf 4 MiB begrenzt. Ein direkter Lesezugriff ist auf 16 Mi komplexe Samples begrenzt; Replay und große Aufnahmen werden segmentweise verarbeitet. Annotationen und Sampleindizes werden auf den tatsächlichen Datenumfang geprüft. Nicht endliche IQ-Daten, Datenreste innerhalb eines Samples, Mehrkanalformate, externe Dataset-Pfade, Symlinks und Abtastratenwechsel innerhalb einer Datei werden sichtbar abgelehnt. Es wird nichts als ausführbarer Python-Inhalt geladen.

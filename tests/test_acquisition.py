@@ -6,9 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+from scipy import signal
+import threading
+from datetime import datetime
 
-from signalclassifier.receivers import CaptureManager, _Channelizer, spectrum_and_detections, validate_config
-from signalclassifier.sigmf import read_metadata, read_recording, recording_info, write_recording
+from signalclassifier.receivers import CaptureManager, _CaptureFailure, _Channelizer, spectrum_and_detections, validate_config
+from signalclassifier.sigmf import SigMFWriter, read_metadata, read_recording, recording_info, write_recording
 
 
 class SigMFTests(unittest.TestCase):
@@ -57,6 +60,18 @@ class SigMFTests(unittest.TestCase):
 
 
 class SpectrumAndChannelTests(unittest.TestCase):
+    def test_fast_decimated_fft_matches_full_rate_fir_reference(self):
+        rng = np.random.default_rng(681)
+        iq = (rng.standard_normal(16387) + 1j * rng.standard_normal(16387)).astype(np.complex64)
+        for bandwidth in (150000, 23000, 1000):
+            with self.subTest(bandwidth=bandwidth):
+                extractor = _Channelizer(200000, 43123.5, bandwidth)
+                pieces = [iq[:7001], iq[7001:12003], iq[12003:]]
+                actual = np.concatenate([extractor.process(piece) for piece in pieces])
+                mixed = iq * np.exp(-2j * np.pi * 43123.5 / 200000 * np.arange(len(iq)))
+                expected = signal.fftconvolve(mixed, extractor.taps, mode="full")[:len(iq)][::extractor.decimation]
+                np.testing.assert_allclose(actual, expected, atol=2e-6, rtol=2e-5)
+
     def test_spectrum_tone_reference_and_frequency(self):
         rate = 256000
         t = np.arange(16384) / rate
@@ -86,6 +101,21 @@ class SpectrumAndChannelTests(unittest.TestCase):
 
 
 class CaptureTests(unittest.TestCase):
+    class ArraySource:
+        center_frequency = 433e6
+        paced = False
+
+        def __init__(self, iq, rate):
+            self.iq, self.sample_rate, self.position = iq, rate, 0
+
+        def read(self, count):
+            block = self.iq[self.position:self.position + count].copy()
+            self.position += len(block)
+            return block
+
+        def close(self):
+            pass
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -97,6 +127,186 @@ class CaptureTests(unittest.TestCase):
         while self.manager.status()["running"] and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertFalse(self.manager.status()["running"], "capture did not finish")
+
+    class FakeHardware:
+        sample_rate = 100000.0
+        center_frequency = 433e6
+        paced = False
+        owns_read_buffers = False
+
+        def __init__(self, blocks=6, delay=0.001, failure=None):
+            self.blocks = blocks
+            self.delay = delay
+            self.failure = failure
+            self.index = 0
+            self.buffer = np.empty(4096, np.complex64)
+            self.closed = False
+
+        def read(self, count):
+            if self.index == self.blocks:
+                if self.failure:
+                    raise self.failure
+                return np.empty(0, np.complex64)
+            time.sleep(self.delay)
+            self.index += 1
+            self.buffer[:] = self.index / 100
+            return self.buffer
+
+        def close(self):
+            self.closed = True
+
+    def start_hardware(self, source, **config):
+        with patch("signalclassifier.receivers._RSP1A", return_value=source):
+            self.manager.start({"source": "rsp1a", "mode": "wideband", "sample_rate": 100000,
+                                "center_frequency_hz": 433e6, "block_size": 4096,
+                                "duration_seconds": 10, **config})
+
+    def test_hardware_queue_owns_borrowed_buffers_and_preserves_order(self):
+        source = self.FakeHardware(blocks=6)
+        original = SigMFWriter.append
+
+        def slow_write(writer, iq):
+            time.sleep(0.01)
+            return original(writer, iq)
+
+        with patch.object(SigMFWriter, "append", slow_write):
+            self.start_hardware(source, queue_capacity_bytes=8 * 4096 * 8)
+            self.finish()
+        status = self.manager.status()
+        self.assertEqual(status["state"], "completed")
+        self.assertTrue(source.closed)
+        performance = status["performance"]
+        self.assertTrue(performance["reader_queue_enabled"])
+        self.assertEqual(performance["read_blocks"], 6)
+        self.assertEqual(performance["processed_blocks"], 6)
+        self.assertGreater(performance["queue_high_water_blocks"], 0)
+        self.assertEqual(performance["gaps"], 0)
+        self.assertFalse(performance["gap_free_verified"])
+        self.assertGreaterEqual(performance["writer_ms"], 5)
+        self.assertGreater(performance["processing_rtf"], 0)
+        snapshot = self.manager.snapshot()
+        self.assertEqual(snapshot["block_sample_count"], 4096)
+        self.assertAlmostEqual(snapshot["block_duration_seconds"], 4096 / 100000)
+        self.assertEqual(snapshot["timestamp_source"], "host_receive_end_utc")
+        self.assertFalse(snapshot["rf_timestamp_verified"])
+        self.assertGreater(snapshot["classification_channel"]["bandwidth_hz"], 0)
+        recording = self.manager.list_recordings()[0]
+        iq, metadata = read_recording(recording["metadata_path"])
+        expected = np.repeat(np.arange(1, 7, dtype=np.float32) / 100, 4096).astype(np.complex64)
+        np.testing.assert_array_equal(iq, expected)
+        self.assertEqual(metadata["global"]["sc:integrity"]["reported_gaps"], 0)
+
+    def test_queue_overflow_is_visible_and_saves_only_admitted_continuous_prefix(self):
+        source = self.FakeHardware(blocks=30, delay=0.003)
+        entered, release = threading.Event(), threading.Event()
+        original = SigMFWriter.append
+
+        def blocked_write(writer, iq):
+            entered.set()
+            release.wait(timeout=2)
+            return original(writer, iq)
+
+        with patch.object(SigMFWriter, "append", blocked_write):
+            self.start_hardware(source, queue_capacity_bytes=2 * 4096 * 8)
+            self.assertTrue(entered.wait(timeout=2))
+            deadline = time.monotonic() + 2
+            while self.manager.status()["performance"]["overflows"] == 0 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            release.set()
+            self.finish()
+        status = self.manager.status()
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(status["reason"], "queue_overflow")
+        performance = status["performance"]
+        self.assertEqual(performance["overflows"], 1)
+        self.assertEqual(performance["gaps"], 1)
+        self.assertEqual(performance["queue_high_water_blocks"], 2)
+        self.assertLessEqual(performance["queue_high_water_bytes"], performance["queue_capacity_bytes"])
+        self.assertEqual(performance["queue_blocks"], 0)
+        self.assertIsNotNone(performance["capture_error"])
+        recording = self.manager.list_recordings()[0]
+        iq, metadata = read_recording(recording["metadata_path"])
+        blocks = len(iq) // 4096
+        self.assertEqual(blocks, 3)
+        expected = np.repeat(np.arange(1, blocks + 1, dtype=np.float32) / 100, 4096).astype(np.complex64)
+        np.testing.assert_array_equal(iq, expected)
+        integrity = metadata["global"]["sc:integrity"]
+        self.assertEqual(integrity["reported_gaps"], 1)
+        self.assertEqual(integrity["stop_reason"], "queue_overflow")
+        self.assertEqual(integrity["source_samples_processed"], len(iq))
+        self.assertGreater(integrity["source_samples_read"], len(iq))
+
+    def test_reported_hardware_overflow_survives_in_recording_integrity(self):
+        source = self.FakeHardware(blocks=2, failure=_CaptureFailure("SDR overflow", reason="receiver_overflow",
+                                                                  reported_gap=True, overflow=True))
+        self.start_hardware(source)
+        self.finish()
+        status = self.manager.status()
+        self.assertEqual(status["reason"], "receiver_overflow")
+        self.assertEqual(status["performance"]["gaps"], 1)
+        recording = self.manager.list_recordings()[0]
+        self.assertEqual(recording["samples"], 8192)
+        integrity = recording["metadata"]["global"]["sc:integrity"]
+        self.assertEqual(integrity["overflows"], 1)
+        self.assertEqual(integrity["capture_error"], "SDR overflow")
+
+    def test_write_failure_stops_stream_and_persists_error_with_numeric_prefix(self):
+        source = self.FakeHardware(blocks=6)
+        original = SigMFWriter.append
+        writes = 0
+
+        def failing_write(writer, iq):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError("disk full")
+            return original(writer, iq)
+
+        with patch.object(SigMFWriter, "append", failing_write):
+            self.start_hardware(source)
+            self.finish()
+        self.assertEqual(self.manager.status()["reason"], "writer_error")
+        self.assertIn("disk full", self.manager.status()["error"])
+        recording = self.manager.list_recordings()[0]
+        self.assertEqual(recording["samples"], 4096)
+        self.assertEqual(recording["metadata"]["global"]["sc:integrity"]["stop_reason"], "writer_error")
+
+    def test_gate_close_metadata_includes_current_stored_block(self):
+        rng = np.random.default_rng(93)
+        iq = (0.001 * (rng.standard_normal(80000) + 1j * rng.standard_normal(80000))).astype(np.complex64)
+        iq[:10000] += np.exp(2j * np.pi * .125 * np.arange(10000)).astype(np.complex64)
+        with patch("signalclassifier.receivers._Synthetic", return_value=self.ArraySource(iq, 100000)):
+            self.manager.start({"source": "synthetic", "mode": "energy", "sample_rate": 100000,
+                                "block_size": 4096, "duration_seconds": 2})
+            self.finish()
+        closed = [r for r in self.manager.list_recordings()
+                  if r["metadata"]["global"]["sc:stop_reason"] == "energy_gate_closed"]
+        self.assertTrue(closed)
+        for recording in closed:
+            meta = recording["metadata"]["global"]
+            self.assertGreaterEqual(meta["sc:integrity"]["source_samples_processed"], meta["sc:source_sample_stop"])
+            self.assertEqual(meta["sc:performance"]["source_samples_processed"], meta["sc:integrity"]["source_samples_processed"])
+            self.assertGreaterEqual(meta["sc:integrity"]["source_samples_read"], meta["sc:integrity"]["source_samples_processed"])
+
+    def test_waterfall_timestamp_and_span_exclude_unanalyzed_rf_tail(self):
+        rate, count = 5_000_000, 131072
+        iq = np.exp(2j * np.pi * .125 * np.arange(count)).astype(np.complex64)
+        with patch("signalclassifier.receivers._Synthetic", return_value=self.ArraySource(iq, rate)):
+            self.manager.start({"source": "synthetic", "mode": "monitor", "sample_rate": rate,
+                                "block_size": count, "duration_seconds": 1})
+            self.finish()
+        snapshot = self.manager.snapshot()
+        self.assertEqual(snapshot["block_sample_count"], count)
+        self.assertEqual(snapshot["analysis_sample_count"], 65536)
+        self.assertEqual(snapshot["analysis_sample_offset"], 0)
+        self.assertAlmostEqual(snapshot["analysis_duration_seconds"], 65536 / rate)
+        self.assertAlmostEqual(snapshot["block_duration_seconds"], count / rate)
+        self.assertEqual(snapshot["timestamp"], snapshot["analysis_timestamp"])
+        self.assertEqual(snapshot["timestamp_source"], "host_receive_end_minus_unanalyzed_tail")
+        received = datetime.fromisoformat(snapshot["block_received_at"])
+        analyzed = datetime.fromisoformat(snapshot["analysis_timestamp"])
+        self.assertAlmostEqual((received - analyzed).total_seconds(), 65536 / rate, places=5)
+        self.assertFalse(snapshot["rf_timestamp_verified"])
 
     def test_wideband_capture_honors_storage_limit_and_metadata(self):
         self.manager.start({"source": "synthetic", "mode": "wideband", "sample_rate": 100000,
@@ -208,7 +418,7 @@ class CaptureTests(unittest.TestCase):
         receiver = ScriptedReceiver(script)
         with patch("signalclassifier.receivers._Synthetic", return_value=receiver):
             manager.start({"source": "synthetic", "mode": "monitor", "sample_rate": 100000,
-                           "block_size": 4096, "duration_seconds": 60})
+                           "block_size": 4096, "duration_seconds": 60, "spectrum_refresh_hz": 30})
             self.finish()
         self.assertIsNone(manager.status()["error"])
         a_observations = [value for value in receiver.observations if value[0] == "channel-a"]
@@ -231,7 +441,7 @@ class CaptureTests(unittest.TestCase):
         restarted = ScriptedReceiver([("new-session", 100e6, 12500, 100000)])
         with patch("signalclassifier.receivers._Synthetic", return_value=restarted):
             manager.start({"source": "synthetic", "mode": "monitor", "sample_rate": 100000,
-                           "block_size": 4096, "duration_seconds": 1})
+                           "block_size": 4096, "duration_seconds": 1, "spectrum_refresh_hz": 30})
             self.finish()
         self.assertEqual(len(manager.inference_segment()[0]), 1024)
 

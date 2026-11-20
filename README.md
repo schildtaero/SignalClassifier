@@ -1,8 +1,8 @@
-# SignalClassifier 0.1.1
+# SignalClassifier 0.2.0
 
 Lokales SDR-Labor für **Linux und Windows mit WSL2**: Breitband-IQ aufnehmen, belegte Kanäle selektiv speichern, Daten labeln und reproduzierbare Klassifikationsexperimente durchführen. Die deutsche Weboberfläche übernimmt die dunkle/cyanfarbene technische Gestaltung und den hellen Modus aus [KrakenDF](https://github.com/schildtaero/krakensdr), mit lokal ausgelieferten Assets.
 
-Zentrales Repository: [schildtaero/SignalClassifier](https://github.com/schildtaero/SignalClassifier). Erste Version mit funktionalen Softwarepfaden; eine Abnahme an physischem PlutoSDR/RSP1A, der Windows-/WSL-Installation und einer CUDA-GPU steht aus. Synthetische Ergebnisse sind ausdrücklich gekennzeichnet.
+Zentrales Repository: [schildtaero/SignalClassifier](https://github.com/schildtaero/SignalClassifier). Version 0.2.0 ergänzt Batchlabels, Datensatzprüfung, Mehrmodellvergleich mit Score und Live-Stichproben, einen beschrifteten Wasserfall und eine optimierte Aufnahmeverarbeitung. Eine Abnahme an physischem PlutoSDR/RSP1A, der Windows-/WSL-Installation und einer CUDA-GPU steht aus. Synthetische Ergebnisse sind ausdrücklich gekennzeichnet.
 
 ## Start
 
@@ -56,16 +56,22 @@ USB unter WSL wird mit [usbipd-win](https://learn.microsoft.com/windows/wsl/conn
 
 1. Im Tab **Empfang** Quelle, Mittenfrequenz, Sample-Rate und Gain einstellen. Zum Softwaretest ausdrücklich „Synthetisch“ wählen.
 2. **Breitband** zeichnet das gesamte eingestellte IQ-Fenster auf; **Nur Signale** filtert und dezimiert erkannte Kanäle in eigene SigMF-Aufnahmen. Zeit- und Bytegrenze setzen. Bei 2 MS/s benötigt `cf32_le` ungefähr 16 MB/s.
-3. Unter **Aufnahmen** die gespeicherten Kanäle prüfen und unabhängig als `AM` oder `FM` bestätigen. Bandplanvorschläge sind keine bestätigten Labels. Für breite Recordings können per Replay im Modus „Nur Signale“ schmalbandige Trainingsclips erzeugt werden.
-4. Unter **Experimente** entweder den klar gekennzeichneten synthetischen AM/FM-Versuch wählen oder bestätigte Recordings verwenden. Für reale Daten mindestens drei **unabhängige Aufnahmegruppen je Klasse** vorsehen. Mehrere Clips derselben Session zählen zusammen als eine Gruppe.
-5. Mit **Feature-LDA** beginnen, anschließend kleine CNNs und die Promotionsadaptionen vergleichen. Konfiguration, Seed, Gruppenaufteilung, Vorverarbeitung, Hardware und Ergebnisse werden gespeichert.
-6. Das Modell aktivieren und neue Aufnahmen oder den Live-Signalkanal prüfen. „Unbekannt“ ist eine heuristische Ablehnung, kein Nachweis eines umfassend validierten Open-Set-Klassifikators.
+3. Unter **Aufnahmen** die gespeicherten Kanäle prüfen. Für typische Frequenzfenster werden `AM`, `FM` oder andere Klassen vorgeschlagen. Zeilen auswählen, gegebenenfalls **Alle sichtbaren auswählen**, dann **Labels bestätigen**: entweder die individuellen eindeutigen Vorschläge übernehmen oder ein gemeinsames Label ausdrücklich angeben. Die Vorschau nennt die betroffenen Dateien. Bereits bestätigte und mehrdeutige Vorschläge werden standardmäßig übersprungen. Für breite Recordings können per Replay im Modus „Nur Signale“ schmalbandige Trainingsclips erzeugt werden.
+4. Unter **Experimente** bestätigte Recordings auswählen. Die Vorprüfung zeigt Dateien, unabhängige Sitzungen und verwendbare Segmente je Klasse. **Mit unabhängiger Bewertung** braucht drei Aufnahmegruppen je Klasse; mehrere Clips derselben Session zählen zusammen als eine Gruppe. Für den Einstieg reicht im ausdrücklich gewählten Modus **Nur trainieren** eine Gruppe je Klasse. Solche Modelle bleiben unbewertet und bekommen keine Genauigkeit oder Qualitätsrangfolge.
+5. Mehrere Topologien auswählen und mit denselben Daten, Gruppen und Einstellungen vergleichen. Mit **Feature-LDA**, einem kleinen CNN und einer Promotionsadaption beginnen. Konfiguration, Seed, Gruppenaufteilung, Vorverarbeitung, Hardware, sämtliche Modelle und Ergebnisse werden gespeichert.
+6. Ergebnis nach Validierungsgenauigkeit oder Gesamtscore sortieren, **Top 3 live testen** wählen oder selbst bis zu drei Modelle markieren. Der Empfang wird separat gestartet. Live-Stichproben zeigen Vorhersagen und auf diesem Rechner gemessene Laufzeiten; ohne Referenzlabel gibt es keine Live-Genauigkeit. „Unbekannt“ ist eine heuristische Ablehnung, kein Nachweis eines umfassend validierten Open-Set-Klassifikators.
 
 Für den ersten realen Vergleich Inhalte, Pegel und Empfangsbedingungen variieren. Ganze Sessions, Empfangstage und Frequenzbereiche zurückhalten. Flugfunk-Sprachpausen und UKW-Musik sind zusätzliche Einflussfaktoren; der Klassifikator soll Modulation lernen und keine Frequenz-/Nutzinhaltsabkürzung.
+
+**5 MS/s und längere Aufnahmen:** Breitband benötigt 40 MB/s, für drei Minuten also rund 7,2 GB. Das voreingestellte UI-Dateibudget von 512 MiB ist dann nach ungefähr 13,4 s erreicht. Die Oberfläche zeigt Größenabschätzung und Budget-/Zeitstopps ausdrücklich an. Selektive Aufnahmen hängen von Anzahl und Ausgangsrate der Kanäle ab. Der Hardwareleser arbeitet über eine begrenzte Queue unabhängig von DSP und Schreiben; tatsächliche Überläufe, Verarbeitung/RF-Zeit und Schreibzeiten bleiben sichtbar. Unter **Aufnahmeleistung einstellen** lassen sich Kanalzahl, Puffer, Anzeigerate und Signalsuchintervall ändern. Größere Suchintervalle können kurze Signale übersehen. Ein numerischer Vergleich mit acht Kanälen bei 5 MS/s ergab beim selektiven Pfad RTF 4,09 → 0,83; das ist ein Softwarebenchmark, keine Empfangszusage für den Zielrechner. [Messung und Grenzen](docs/aufnahme.md#hohe-sample-raten-warteschlange-und-diagnose).
+
+**Wasserfall:** Viridis, Cividis oder Inferno mit beschrifteter dBFS-Skala, einstellbarem Pegelbereich und 60/180/600-s-Zeitfenster. Detektionsrahmen zeigen geschätzte Bandbreite, Mittenfrequenz und die für den betreffenden Kanal berechnete Modulation. Andere Detektionen bleiben „unbekannt“. Zwischen nicht beobachteten Zeitpunkten werden keine kontinuierlich empfangenen Signale erfunden. Host-Empfangszeit ist kein kalibrierter RF-Zeitstempel.
 
 ## Laptop → Workstation → Laptop
 
 Auf dem Laptop aufzeichnen und Labels bestätigen. Die Aufnahme als SigMF-ZIP exportieren; auf der Workstation Metadaten und IQ-Datei aus dem ZIP gemeinsam importieren. Labels und ursprüngliche Aufnahmegruppen bleiben in den Metadaten erhalten. Dort trainieren, das **Modellpaket** exportieren, auf dem Laptop importieren und aktivieren. Das Paket enthält Topologie, Gewichte, Trainingsnormalisierung, Klassenreihenfolge, Vorverarbeitung und Bericht. CUDA-trainierte Gewichte werden CPU-portabel gespeichert.
+
+Auch importierte Modelle können im Tab **Modelle** für einen Vergleich von bis zu drei Live-Stichproben ausgewählt werden. Der gespeicherte Score und dessen Hardwareprofil gehören zum ursprünglichen Bewertungsrechner; neue Live-Laufzeiten werden auf dem aktuellen Laptop gemessen.
 
 Der Austausch ist dateibasiert. Es gibt keinen automatisch synchronisierenden Dienst und keinen Remote-GPU-Scheduler. Die komplette Oberfläche kann auf beiden Rechnern lokal laufen.
 
@@ -76,6 +82,8 @@ Der Topologiekatalog enthält **34 Vorschläge** aus zehn Familien: Feature-LDA,
 Experimentparameter umfassen Lernrate, Batchgröße, Epochen, Segmentlänge, SNR und Timing-Jitter in **RMS-Samples**. Mehrere Segmentlängen, Lernraten und Batchgrößen bilden eine begrenzte Versuchsreihe. Optional variieren zufällige Kanaleffekte innerhalb dokumentierter Grenzen: Frequenzversatz, Sampletaktfehler, IQ-Amplituden-/Phasenfehler, DC-Offset, Clipping und ein verzögertes Echo. Eigene bestätigte Aufnahmen können 2–64 frei benannte Klassen enthalten; die synthetische Quelle bleibt AM/FM. Train/Validation/Test werden nach Ursprungsgruppen getrennt, Normalisierung wird nur auf Training angepasst; die Auswahl erfolgt über Validierung. SNR bei realen Aufnahmen bezeichnet zusätzlich injiziertes Rauschen relativ zur vorhandenen Gesamtleistung, keinen gemessenen ursprünglichen RF-SNR.
 
 Ergebnisse enthalten Konfusionsmatrix, Accuracy/Balanced Accuracy/Macro-F1, Recall, Brier/ECE, Trainings- und Vorverarbeitungszeit, p50/p95-Inferenzlatenz, Echtzeitfaktor, Modellgröße, Parameterzahl und SNR-Kurve. Die Laufzeit relativ zu einer festen Referenzlast unterstützt Gerätevergleiche, ist aber keine exakte Hardwareprognose. Fehlalarmrate, Open-Set-Güte und kalibrierte Empfindlichkeit in dBm benötigen eigene Negativ-/Kalibrierdatensätze; fehlende Messwerte bleiben offen.
+
+Der **100-Punkte-Score** gewichtet Validierungs-Balanced-Accuracy mit 45, Robustheit im Validierungs-SNR-/Jitter-Raster mit 35, Echtzeitreserve mit 15 und Trainingszeit mit 5 Punkten. Qualitätswerte werden um das Zufallstrefferniveau der Klassen bereinigt. Robustheit kombiniert 70 % Mittelwert und 30 % schlechtesten Rasterwert. Geschwindigkeit erhält ab **5-facher Echtzeit** die vollen Punkte; darüber steigt dieser Anteil nicht weiter. Maßgeblich ist der gemessene CPU-p95-Echtzeitfaktor, passend zum aktuellen Live-Inferenzpfad. Der Trainingsanteil ist `5 / (1 + Trainingssekunden / 300)`. Für die Top-3-Live-Empfehlung muss die CPU-p95-Verarbeitung außerdem innerhalb der Signaldauer liegen. Die separate Genauigkeitsrangliste und der Score verwenden keine abschließenden Testwerte. Fehlende Bewertung erzeugt keinen erfundenen Score. [Formeln, Messbedingungen und Grenzen](docs/topologien.md).
 
 Der Entscheidungsweg zeigt Merkmale, Vorwissen, gewähltes Modell und Ablehnung. Für LDA werden additive Merkmalsbeiträge angegeben; die Aufnahmeprüfung neuronaler Netze kann lokale Gradient×Input-Sensitivität darstellen. Diese Beiträge sind Hinweise zur Modellentscheidung und keine physikalischen Kausalitätsbeweise. Frequenzvorwissen kann optional als erklärender Bandhinweis zugeschaltet werden; es ändert in dieser Version keine Modellwerte. Weitere experimentelle Variationen und die Quellen der Promotionsansätze: [Methodik](docs/quellen-und-methodik.md), [Topologien](docs/topologien.md).
 
@@ -93,6 +101,7 @@ Der Drohnen-Tab enthält einen **OpenDroneID-v2-Payloaddecoder**, eine explizite
 .venv/bin/python -m pip install -e '.[test]'
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v
 node --check signalclassifier/static/app.js
+node tests/test_frontend.js
 bash -n start.sh setup.sh install_driver.sh
 ```
 

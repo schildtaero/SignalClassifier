@@ -14,6 +14,12 @@
     drones: [],
     selectedExperiment: null,
     selectedTopology: null,
+    topologySelectionInitialized: false,
+    comparisonInspection: null,
+    comparisonRankingMode: "score",
+    checkedLiveModels: new Set(),
+    liveComparisonSelection: { model_ids: [], models: [], active: false },
+    liveSelectionLoaded: false,
     spectrum: null,
     waterfall: [],
     map: null,
@@ -23,6 +29,10 @@
     mapFitted: false,
     polling: false,
     experimentPolling: false,
+    selectedRecordings: new Set(),
+    datasetReadiness: null,
+    readinessSequence: 0,
+    wasReceiving: false,
   };
   const titles = {
     empfang: [
@@ -59,6 +69,7 @@
     maximumFractionDigits: 6,
   });
   let toastTimer;
+  let readinessTimer;
   function text(value, fallback = "—") {
     return value === null || value === undefined || value === ""
       ? fallback
@@ -346,6 +357,63 @@
       }[source] || text(source, "Keine Quelle")
     );
   }
+  function stopReasonText(reason) {
+    return (
+      {
+        storage_limit: "Dateibudget erreicht · Aufnahme beendet",
+        duration_limit: "Eingestellte Betriebsdauer erreicht",
+        end_of_recording: "Recording vollständig wiedergegeben",
+        user_stop: "Empfang durch Benutzer gestoppt",
+        receiver_error: "Empfängerfehler",
+        writer_error: "Schreibfehler",
+      }[reason] || (reason ? `Empfang beendet: ${reason}` : "")
+    );
+  }
+  function captureBudgetEstimate(sampleRate, seconds, budgetBytes) {
+    if (
+      ![sampleRate, seconds, budgetBytes].every(
+        (v) => Number.isFinite(v) && v > 0,
+      )
+    )
+      return null;
+    const bytesPerSecond = sampleRate * 8;
+    return {
+      bytesPerSecond,
+      requestedBytes: bytesPerSecond * seconds,
+      budgetSeconds: budgetBytes / bytesPerSecond,
+    };
+  }
+  function updateCaptureSizeEstimate() {
+    const form = $("#receiver-form"),
+      mode = form.elements.mode.value,
+      holder = $("#capture-size-estimate");
+    holder.hidden = mode === "monitor";
+    if (holder.hidden) return;
+    let rate = Number(form.elements.sample_rate_msps.value) * 1e6;
+    if (form.elements.source.value === "recording") {
+      const recording = state.recordings.find(
+        (r) => r.id === form.elements.recording_id.value,
+      );
+      rate = recording ? Number(recordingMeta(recording).sample_rate) : NaN;
+    }
+    const seconds = Number(form.elements.duration_seconds.value),
+      budget = Number(form.elements.max_mib.value) * 1048576,
+      estimate = captureBudgetEstimate(rate, seconds, budget);
+    if (!estimate) {
+      holder.textContent =
+        "Für die Größenabschätzung Abtastrate, Betriebsdauer und Dateibudget angeben.";
+      return;
+    }
+    const reference = `${num(rate / 1e6, 3)} MS/s entsprechen bei cf32_le ${num(estimate.bytesPerSecond / 1e6, 2)} MB/s`;
+    holder.textContent =
+      mode === "energy"
+        ? `Signalaufnahme: Die Datenmenge hängt von Kanalzahl und Kanalbandbreiten ab. Weitbandreferenz: ${reference}; dies ist keine Größenprognose für die Signalaufnahme. Dateibudget ${bytes(budget)}.`
+        : `${reference}. ${num(seconds, 1)} s benötigen etwa ${num(estimate.requestedBytes / 1e9, 2)} GB IQ (${bytes(estimate.requestedBytes)}). Das Dateibudget von ${bytes(budget)} reicht für etwa ${num(estimate.budgetSeconds, 1)} s. Betriebsdauer oder Dateibudget beenden die Aufnahme, je nachdem welcher Grenzwert zuerst erreicht wird.`;
+    holder.classList.toggle(
+      "budget-short",
+      mode === "wideband" && estimate.budgetSeconds < seconds,
+    );
+  }
   function renderStatus() {
     const status = state.status;
     const rx = status.receiver || {};
@@ -353,7 +421,8 @@
     const running = receiverRunning(rx);
     const hasError =
       !!rx.error || rx.status === "error" || rx.state === "error";
-    if (hasError) resetReceiverDisplay("Empfangsfehler · keine aktuelle Entscheidung");
+    if (hasError)
+      resetReceiverDisplay("Empfangsfehler · keine aktuelle Entscheidung");
     $("#connection-dot").className = "status-dot online";
     $("#connection-state").textContent = running
       ? config.source === "synthetic"
@@ -362,17 +431,26 @@
       : "Lokales Backend verbunden";
     $("#rx-source-label").textContent = running
       ? sourceLabel(config.source)
-      : "Kein Empfang aktiv";
+      : rx.reason
+        ? `${sourceLabel(config.source)} · beendet`
+        : "Kein Empfang aktiv";
     $("#rx-detail").textContent = hasError
       ? text(rx.error)
       : running
         ? `${text(config.mode, "monitor") === "energy" ? "Signalaufnahme" : config.mode === "wideband" ? "Weitbandaufnahme" : "Beobachtung"} · ${mhz(config.center_frequency_hz ?? rx.center_frequency_hz)}`
-        : "Live, Recording oder synthetische Quelle wählen";
+        : stopReasonText(rx.reason) ||
+          "Live, Recording oder synthetische Quelle wählen";
     $("#receiver-state").textContent = hasError
       ? "Fehler"
       : running
         ? "Aktiv"
-        : "Gestoppt";
+        : rx.reason === "storage_limit"
+          ? "Budget-Stopp"
+          : rx.reason === "duration_limit"
+            ? "Zeitlimit erreicht"
+            : rx.reason === "end_of_recording"
+              ? "Replay beendet"
+              : "Gestoppt";
     $("#receiver-state").className =
       `pill ${hasError ? "red" : running ? "cyan" : ""}`;
     $("#rx-start").disabled = running;
@@ -398,6 +476,8 @@
         : running
           ? "Empfang läuft"
           : "Warte auf IQ-Daten";
+    renderCapturePerformance(rx);
+    renderLiveComparison(state.spectrum);
     const active = status.active_model;
     $("#active-model-label").textContent =
       active?.name ||
@@ -420,9 +500,66 @@
       );
     }
   }
+  function renderCapturePerformance(receiver) {
+    const p = receiver.performance || {};
+    const rate = p.actual_sample_rate ?? receiver.sample_rate;
+    $("#capture-throughput").textContent = rate
+      ? `${num(rate / 1e6, 3)} MS/s · IQ-Takt`
+      : "—";
+    $("#capture-queue").textContent =
+      p.queue_blocks !== undefined
+        ? `Puffer ${num(p.queue_blocks, 0)} / ${num(p.queue_capacity_blocks, 0)} Blöcke · ${bytes(p.queue_bytes)} / ${bytes(p.queue_capacity_bytes)}`
+        : "Warte auf Stream-Telemetrie";
+    const ratio = p.processing_rtf;
+    $("#capture-budget").textContent =
+      ratio === undefined || ratio === null
+        ? "—"
+        : `${num(ratio * 100, 1)} % der IQ-Zeit`;
+    $("#capture-stage").textContent =
+      p.processing_ms !== undefined
+        ? `Lesen ${num(p.reader_ms, 1)} ms · Verarbeitung ${num(p.processing_ms, 1)} ms · davon Schreiben ${num(p.writer_ms, 1)} ms`
+        : "Noch keine Verarbeitung gemessen";
+    const gaps = p.gaps,
+      overflows = p.overflows;
+    $("#capture-gaps").textContent =
+      gaps === undefined || gaps === null
+        ? "Nicht verifiziert"
+        : `${num(gaps, 0)} gemeldete Lücken`;
+    $("#capture-gap-detail").textContent =
+      overflows === undefined
+        ? "Treiber- und Warteschlangentelemetrie werden getrennt ausgewiesen."
+        : `${num(overflows, 0)} Pufferüberläufe · HF-/USB-Lückenfreiheit nicht verifiziert`;
+    const warnings = [];
+    if (p.capture_error) warnings.push(text(p.capture_error));
+    if (Number(overflows) > 0)
+      warnings.push(
+        "IQ-Pufferüberlauf gemeldet. Die betroffene Aufnahme auf Datenlücken prüfen.",
+      );
+    if (Number(gaps) > 0)
+      warnings.push("Der Empfänger meldet Unterbrechungen im IQ-Strom.");
+    if (Number(ratio) > 1)
+      warnings.push(
+        "Die Verarbeitung benötigt mehr Zeit als die IQ-Blöcke enthalten. Pufferfüllstand und Durchsatz beobachten.",
+      );
+    const alert = $("#capture-quality-warning");
+    alert.hidden = warnings.length === 0;
+    alert.textContent = warnings.join(" ");
+  }
+  function trainingOnly(value) {
+    return (
+      value?.evaluation_available === false ||
+      value?.evaluation_mode === "training_only" ||
+      value?.config?.evaluation_mode === "training_only" ||
+      value?.validation_status === "unvalidated"
+    );
+  }
   function resetReceiverDisplay(message = "Warte auf neue IQ-Daten") {
     state.spectrum = null;
     state.waterfall = [];
+    state.waterfallSourceKey = null;
+    state.waterfallGeometry = null;
+    $("#waterfall-readout").textContent =
+      "Frequenz und Messwert mit dem Zeiger ablesen.";
     $("#spectrum-empty").hidden = false;
     $("#spectrum-center").textContent = "—";
     $("#spectrum-bandwidth").textContent = "Keine Daten";
@@ -434,6 +571,7 @@
     $("#model-explanation-details").hidden = true;
     $("#model-explanation").replaceChildren();
     renderDetections([]);
+    renderLiveComparison(null);
     drawSpectrum();
     drawWaterfall();
   }
@@ -473,6 +611,7 @@
     ).forEach((n) => {
       n.disabled = source === "recording";
     });
+    updateCaptureSizeEstimate();
   }
   async function startReceiver() {
     const form = $("#receiver-form");
@@ -489,6 +628,10 @@
       threshold_db: Number(f.get("threshold_db")),
       duration_seconds: Number(f.get("duration_seconds")),
       max_bytes: Number(f.get("max_mib")) * 1048576,
+      max_channels: Number(f.get("max_channels")),
+      queue_capacity_bytes: Number(f.get("queue_mib")) * 1048576,
+      spectrum_refresh_hz: Number(f.get("spectrum_refresh_hz")),
+      detection_interval_seconds: Number(f.get("detection_interval_ms")) / 1000,
       synthetic_modulation: f.get("synthetic_modulation"),
     };
     if (config.source === "recording") {
@@ -606,65 +749,723 @@
     gradient.addColorStop(1, "rgba(109,214,220,.01)");
     ctx.fillStyle = gradient;
     ctx.fill();
+    drawSpectrumDetections(ctx, { left, top, width: pw, height: ph });
+  }
+  const WATERFALL_PALETTES = {
+    viridis: [
+      [68, 1, 84],
+      [72, 40, 120],
+      [62, 73, 137],
+      [49, 104, 142],
+      [38, 130, 142],
+      [31, 158, 137],
+      [53, 183, 121],
+      [110, 206, 88],
+      [181, 222, 43],
+      [253, 231, 37],
+    ],
+    cividis: [
+      [0, 34, 78],
+      [0, 53, 111],
+      [40, 69, 111],
+      [72, 85, 109],
+      [99, 102, 111],
+      [124, 123, 120],
+      [151, 145, 119],
+      [181, 169, 110],
+      [213, 195, 86],
+      [253, 231, 55],
+    ],
+    inferno: [
+      [0, 0, 4],
+      [26, 12, 65],
+      [74, 12, 107],
+      [120, 28, 109],
+      [165, 44, 96],
+      [207, 68, 70],
+      [237, 105, 37],
+      [251, 155, 6],
+      [247, 209, 61],
+      [252, 255, 164],
+    ],
+  };
+  function paletteRGB(name, value) {
+    const anchors = WATERFALL_PALETTES[name] || WATERFALL_PALETTES.viridis;
+    const scaled =
+      Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)) *
+      (anchors.length - 1);
+    const low = Math.min(anchors.length - 2, Math.floor(scaled)),
+      fraction = scaled - low;
+    return anchors[low].map((v, c) =>
+      Math.round(v + (anchors[low + 1][c] - v) * fraction),
+    );
+  }
+  function averagePowerBins(power, maximum = 512) {
+    const count = Math.min(maximum, power.length),
+      output = [];
+    for (let i = 0; i < count; i++) {
+      const begin = Math.floor((i * power.length) / count),
+        end = Math.max(begin + 1, Math.floor(((i + 1) * power.length) / count));
+      let linear = 0,
+        valid = 0;
+      for (let j = begin; j < end; j++)
+        if (power[j] !== null && Number.isFinite(Number(power[j]))) {
+          linear += 10 ** (Math.max(-200, Math.min(60, Number(power[j]))) / 10);
+          valid++;
+        }
+      output.push(
+        valid ? 10 * Math.log10(Math.max(1e-20, linear / valid)) : null,
+      );
+    }
+    return output;
+  }
+  function finiteNumber(value) {
+    return value !== null &&
+      value !== undefined &&
+      value !== "" &&
+      Number.isFinite(Number(value))
+      ? Number(value)
+      : null;
+  }
+  function detectionBounds(detection) {
+    let center = finiteNumber(
+      detection.center_frequency_hz ??
+        detection.frequency_hz ??
+        detection.center_hz,
+    );
+    const bandwidth = finiteNumber(
+      detection.bandwidth_hz ?? detection.bandwidth,
+    );
+    let low = finiteNumber(detection.frequency_min_hz),
+      high = finiteNumber(detection.frequency_max_hz);
+    if (low === null || high === null) {
+      if (center === null || bandwidth === null || bandwidth <= 0) return null;
+      low = center - bandwidth / 2;
+      high = center + bandwidth / 2;
+    }
+    if (high <= low) return null;
+    if (center === null) center = (low + high) / 2;
+    return {
+      low,
+      high,
+      center,
+      bandwidth: bandwidth > 0 ? bandwidth : high - low,
+    };
+  }
+  function associatedDetectionIndex(detections, classification) {
+    const label = String(classification?.label || "")
+      .trim()
+      .toLocaleLowerCase("de");
+    if (
+      !label ||
+      [
+        "unknown",
+        "unbekannt",
+        "no_signal",
+        "noise",
+        "kein signal",
+        "kein_signal",
+      ].includes(label)
+    )
+      return -1;
+    if (
+      ["feature_rejection_gate", "insufficient_segment"].includes(
+        classification.confidence_kind,
+      )
+    )
+      return -1;
+    const center = finiteNumber(classification.center_frequency_hz),
+      width = finiteNumber(
+        classification.bandwidth_hz ?? classification.sample_rate,
+      );
+    if (center === null || width === null || width <= 0) return -1;
+    let chosen = -1,
+      distance = Infinity;
+    detections.forEach((raw, i) => {
+      const d = detectionBounds(raw);
+      if (!d) return;
+      const overlap =
+        Math.min(d.high, center + width / 2) -
+        Math.max(d.low, center - width / 2);
+      const delta = Math.abs(d.center - center);
+      if (overlap > 0 && delta < distance) {
+        chosen = i;
+        distance = delta;
+      }
+    });
+    return chosen;
+  }
+  function classifiedDetections(detections, classification) {
+    const index = associatedDetectionIndex(detections, classification);
+    return arr(detections).map((d, i) => ({
+      ...d,
+      detected_modulation:
+        i === index ? String(classification.label) : "unbekannt",
+      modulation_evaluated: i === index,
+    }));
+  }
+  function detectionTone(detection) {
+    const label = String(detection.detected_modulation || "").toUpperCase();
+    return label === "AM"
+      ? "am"
+      : ["FM", "NFM", "WFM"].includes(label)
+        ? "fm"
+        : "unknown";
+  }
+  function detectionColor(detection) {
+    const tone = detectionTone(detection);
+    return (
+      css(`--det-${tone}`) ||
+      { am: "#ffbf69", fm: "#67e8f9", unknown: "#c5cfda" }[tone]
+    );
+  }
+  function frequencyBox(detection, minimum, maximum, left, width) {
+    const bounds = detectionBounds(detection);
+    if (
+      !bounds ||
+      !Number.isFinite(minimum) ||
+      !Number.isFinite(maximum) ||
+      maximum <= minimum ||
+      width <= 0
+    )
+      return null;
+    const low = Math.max(minimum, bounds.low),
+      high = Math.min(maximum, bounds.high);
+    if (high <= low) return null;
+    const x = left + ((low - minimum) / (maximum - minimum)) * width;
+    return {
+      x,
+      width: Math.min(
+        left + width - x,
+        Math.max(1, ((high - low) / (maximum - minimum)) * width),
+      ),
+      center:
+        left +
+        Math.max(
+          0,
+          Math.min(1, (bounds.center - minimum) / (maximum - minimum)),
+        ) *
+          width,
+    };
+  }
+  function frameFromSnapshot(snapshot) {
+    const timeReference =
+      snapshot.analysis_timestamp || snapshot.timestamp || snapshot.captured_at;
+    const timestamp = Date.parse(timeReference || "");
+    const frequencies = arr(snapshot.frequencies_hz || snapshot.frequencies),
+      power = arr(
+        snapshot.power_dbfs || snapshot.spectrum_dbfs || snapshot.spectrum,
+      );
+    if (!Number.isFinite(timestamp) || frequencies.length < 2 || !power.length)
+      return null;
+    const step = Number(frequencies[1]) - Number(frequencies[0]);
+    const minimum = Number(frequencies[0]) - step / 2,
+      maximum = Number(frequencies[frequencies.length - 1]) + step / 2;
+    if (
+      !Number.isFinite(minimum) ||
+      !Number.isFinite(maximum) ||
+      maximum <= minimum
+    )
+      return null;
+    const rate = finiteNumber(
+      snapshot.sample_rate ?? snapshot.receiver?.sample_rate,
+    );
+    const center =
+      finiteNumber(
+        snapshot.center_frequency_hz ?? snapshot.receiver?.center_frequency_hz,
+      ) ?? (minimum + maximum) / 2;
+    const source = snapshot.source || snapshot.receiver?.source || "unknown";
+    const session =
+      snapshot.receiver?.session_id ||
+      snapshot.session_id ||
+      snapshot.receiver?.config?.recording_id ||
+      "";
+    const key = JSON.stringify([
+      source,
+      session,
+      center,
+      rate,
+      minimum,
+      maximum,
+    ]);
+    const analysisSamples = finiteNumber(snapshot.analysis_sample_count);
+    const blockSamples = finiteNumber(snapshot.block_sample_count);
+    const analysisDuration =
+      finiteNumber(snapshot.analysis_duration_seconds) ??
+      (rate > 0 && analysisSamples > 0 ? analysisSamples / rate : null);
+    const knownDuration =
+      analysisDuration ??
+      finiteNumber(snapshot.block_duration_seconds) ??
+      (rate > 0 && blockSamples > 0 ? blockSamples / rate : 0);
+    return {
+      id: String(timeReference),
+      key,
+      timeMs: timestamp,
+      duration: Math.max(0, knownDuration),
+      timestampVerified: snapshot.rf_timestamp_verified === true,
+      timestampSource: snapshot.timestamp_source || "host_timestamp",
+      minimum,
+      maximum,
+      rate,
+      center,
+      power: averagePowerBins(power),
+      detections: classifiedDetections(
+        arr(snapshot.detections),
+        snapshot.classification,
+      ),
+    };
+  }
+  function addWaterfall(snapshot) {
+    const frame = frameFromSnapshot(snapshot);
+    if (!frame) return false;
+    if (state.waterfallSourceKey !== frame.key) {
+      state.waterfall = [];
+      state.waterfallSourceKey = frame.key;
+    }
+    const previous = state.waterfall.find((row) => row.id === frame.id);
+    if (previous) {
+      previous.detections = frame.detections;
+      return false;
+    }
+    state.waterfall.push(frame);
+    state.waterfall.sort((a, b) => b.timeMs - a.timeMs);
+    state.waterfall.length = Math.min(240, state.waterfall.length);
+    return true;
+  }
+  function waterfallOptions() {
+    let minimum = finiteNumber($("#waterfall-min").value) ?? -120,
+      maximum = finiteNumber($("#waterfall-max").value) ?? -20;
+    if (maximum <= minimum) maximum = minimum + 5;
+    return {
+      palette: $("#waterfall-palette").value,
+      minimum,
+      maximum,
+      windowSeconds: Number($("#waterfall-window").value) || 180,
+      overlay: $("#detection-overlay-toggle").checked,
+    };
+  }
+  function waterfallGeometry(frame, rows, width, height, options) {
+    const left = 65,
+      right = 18,
+      plotWidth = Math.max(20, width - left - right);
+    const latest = arr(frame?.detections)
+      .slice()
+      .sort(
+        (a, b) => (Number(b.peak_dbfs) || -200) - (Number(a.peak_dbfs) || -200),
+      )
+      .slice(0, 4)
+      .sort(
+        (a, b) =>
+          (detectionBounds(a)?.center || 0) - (detectionBounds(b)?.center || 0),
+      );
+    const columns = Math.max(
+        1,
+        Math.min(latest.length || 1, Math.floor((plotWidth + 8) / 185)),
+      ),
+      badgeRows =
+        options.overlay && latest.length
+          ? Math.ceil(latest.length / columns)
+          : 0;
+    const top = badgeRows ? badgeRows * 39 + 23 : 26,
+      bottom = 34,
+      plotHeight = Math.max(30, height - top - bottom);
+    const badgeWidth = (plotWidth - 8 * (columns - 1)) / columns;
+    const badges = options.overlay
+      ? latest.map((d, i) => ({
+          detection: d,
+          x: left + (i % columns) * (badgeWidth + 8),
+          y: 8 + Math.floor(i / columns) * 39,
+          width: badgeWidth,
+          height: 33,
+        }))
+      : [];
+    return {
+      left,
+      right,
+      top,
+      bottom,
+      plotWidth,
+      plotHeight,
+      badges,
+      latestTime: frame?.timeMs ?? 0,
+      windowMs: options.windowSeconds * 1000,
+    };
+  }
+  function observationCell(frame, geometry) {
+    const age = geometry.latestTime - frame.timeMs;
+    if (age < 0 || age > geometry.windowMs) return null;
+    const y = geometry.top + (age / geometry.windowMs) * geometry.plotHeight;
+    const height = Math.min(
+      geometry.top + geometry.plotHeight - y,
+      Math.max(
+        1,
+        ((frame.duration * 1000) / geometry.windowMs) * geometry.plotHeight,
+      ),
+    );
+    return height > 0 ? { y, height } : null;
+  }
+  function observationTrack(detection, rows, geometry) {
+    const target = detectionBounds(detection);
+    if (!target) return [];
+    const observations = [];
+    let previous = rows[0]?.timeMs;
+    for (const row of rows) {
+      if (
+        geometry.latestTime - row.timeMs > 60000 ||
+        previous - row.timeMs > 6000
+      )
+        break;
+      const match = row.detections
+        .map((d) => ({ d, b: detectionBounds(d) }))
+        .filter(
+          (x) =>
+            x.b &&
+            Math.min(x.b.high, target.high) > Math.max(x.b.low, target.low),
+        )
+        .sort(
+          (a, b) =>
+            Math.abs(a.b.center - target.center) -
+            Math.abs(b.b.center - target.center),
+        )[0];
+      if (!match) break;
+      const cell = observationCell(row, geometry);
+      if (cell) observations.push({ frame: row, detection: match.d, cell });
+      previous = row.timeMs;
+    }
+    return observations;
+  }
+  function rowStrip(row, options) {
+    const key = `${options.palette}|${options.minimum}|${options.maximum}`;
+    if (row.strip && row.stripKey === key) return row.strip;
+    const strip = document.createElement("canvas");
+    strip.width = row.power.length;
+    strip.height = 1;
+    const ctx = strip.getContext("2d"),
+      pixels = ctx.createImageData(row.power.length, 1);
+    row.power.forEach((p, i) => {
+      if (p === null) return;
+      const color = paletteRGB(
+        options.palette,
+        (p - options.minimum) / (options.maximum - options.minimum),
+      );
+      pixels.data.set([...color, 255], i * 4);
+    });
+    ctx.putImageData(pixels, 0, 0);
+    row.strip = strip;
+    row.stripKey = key;
+    return strip;
+  }
+  function drawWaterfallScale(options) {
+    const canvas = $("#waterfall-scale-canvas"),
+      { ctx, width, height } = canvasSetup(canvas);
+    for (let x = 0; x < width; x++) {
+      const color = paletteRGB(options.palette, x / Math.max(1, width - 1));
+      ctx.fillStyle = `rgb(${color.join(",")})`;
+      ctx.fillRect(x, 0, 1, height);
+    }
+    $("#waterfall-scale-low").textContent = `${num(options.minimum, 0)} dBFS`;
+    $("#waterfall-scale-high").textContent = `${num(options.maximum, 0)} dBFS`;
   }
   function drawWaterfall() {
     const canvas = $("#waterfall-canvas");
     if (!canvas || state.view !== "empfang" || !$("#waterfall-toggle").checked)
       return;
-    const { ctx, width: w, height: h } = canvasSetup(canvas);
+    const { ctx, width: w, height: h } = canvasSetup(canvas),
+      options = waterfallOptions(),
+      rows = state.waterfall,
+      frame = rows[0],
+      geometry = waterfallGeometry(frame, rows, w, h, options);
+    state.waterfallGeometry = geometry;
     ctx.fillStyle = css("--plot");
     ctx.fillRect(0, 0, w, h);
-    const rows = state.waterfall;
-    if (!rows.length) {
-      ctx.strokeStyle = css("--grid");
-      ctx.lineWidth = 1;
-      for (let x = 45; x < w; x += (w - 62) / 6) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-        ctx.stroke();
-      }
-      return;
+    ctx.font = "11px Consolas,monospace";
+    ctx.fillStyle = css("--muted");
+    ctx.textAlign = "left";
+    const visible = rows.filter(
+      (row) => geometry.latestTime - row.timeMs <= geometry.windowMs,
+    );
+    $("#waterfall-frame-count").textContent =
+      `${visible.length} / ${rows.length} Stichproben`;
+    drawWaterfallScale(options);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(
+      geometry.left,
+      geometry.top,
+      geometry.plotWidth,
+      geometry.plotHeight,
+    );
+    ctx.clip();
+    ctx.imageSmoothingEnabled = false;
+    for (const row of visible) {
+      const cell = observationCell(row, geometry);
+      if (!cell) continue;
+      ctx.drawImage(
+        rowStrip(row, options),
+        geometry.left,
+        cell.y,
+        geometry.plotWidth,
+        cell.height,
+      );
     }
-    const bins = rows[0].length;
-    const pw = w - 62;
-    for (let r = 0; r < rows.length; r++) {
-      const y = h - ((r + 1) * h) / 100;
-      const row = rows[r];
-      for (let b = 0; b < bins; b++) {
-        const v = Math.max(0, Math.min(1, (Number(row[b]) + 115) / 85));
-        const red = Math.round(10 + v * 95),
-          green = Math.round(24 + v * 190),
-          blue = Math.round(35 + v * 185);
-        ctx.fillStyle = `rgb(${red},${green},${blue})`;
-        ctx.fillRect(
-          45 + (b * pw) / bins,
-          y,
-          Math.ceil(pw / bins) + 0.3,
-          Math.ceil(h / 100) + 0.3,
+    ctx.restore();
+    ctx.strokeStyle = css("--grid");
+    ctx.lineWidth = 0.7;
+    ctx.fillStyle = css("--faint");
+    for (let i = 0; i <= 4; i++) {
+      const y = geometry.top + (geometry.plotHeight * i) / 4;
+      ctx.beginPath();
+      ctx.moveTo(geometry.left, y + 0.5);
+      ctx.lineTo(w - geometry.right, y + 0.5);
+      ctx.stroke();
+      ctx.textAlign = "right";
+      ctx.fillText(
+        i ? `−${num((options.windowSeconds * i) / 4, 0)} s` : "0 s",
+        geometry.left - 9,
+        y + 4,
+      );
+    }
+    const ticks = Math.max(2, Math.min(6, Math.floor(geometry.plotWidth / 95)));
+    for (let i = 0; i <= ticks; i++) {
+      const x = geometry.left + (geometry.plotWidth * i) / ticks;
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5, geometry.top);
+      ctx.lineTo(x + 0.5, geometry.top + geometry.plotHeight);
+      ctx.stroke();
+      if (frame) {
+        ctx.textAlign = "center";
+        ctx.fillText(
+          num(
+            (frame.minimum + ((frame.maximum - frame.minimum) * i) / ticks) /
+              1e6,
+            3,
+          ),
+          x,
+          h - 12,
         );
       }
     }
-    ctx.fillStyle = css("--faint");
-    ctx.font = "9px Consolas,monospace";
-    ctx.fillText("ZEIT", 6, 14);
-  }
-  function addWaterfall(power) {
-    if (!power.length) return;
-    const bins = Math.min(256, power.length);
-    const row = [];
-    for (let i = 0; i < bins; i++) {
-      const a = Math.floor((i * power.length) / bins),
-        b = Math.max(a + 1, Math.floor(((i + 1) * power.length) / bins));
-      let sum = 0;
-      for (let j = a; j < b; j++) sum += Number(power[j]);
-      row.push(sum / (b - a));
+    ctx.textAlign = "left";
+    ctx.fillStyle = css("--muted");
+    ctx.font = "10px Consolas,monospace";
+    ctx.fillText(
+      frame
+        ? `${frame.timestampVerified ? "UTC" : "UTC ≈"} ${new Date(frame.timeMs).toISOString().slice(11, 19)} · Analyseende`
+        : "Warte auf Spektrum mit Zeitstempel",
+      geometry.left,
+      geometry.top - 7,
+    );
+    if (!frame) {
+      ctx.textAlign = "center";
+      ctx.font = "13px system-ui,sans-serif";
+      ctx.fillText(
+        "Noch keine Spektrum-Stichproben",
+        geometry.left + geometry.plotWidth / 2,
+        geometry.top + geometry.plotHeight / 2,
+      );
+      return;
     }
-    state.waterfall.unshift(row);
-    state.waterfall.length = Math.min(100, state.waterfall.length);
+    if (!options.overlay) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(
+      geometry.left,
+      geometry.top,
+      geometry.plotWidth,
+      geometry.plotHeight,
+    );
+    ctx.clip();
+    for (const badge of geometry.badges) {
+      const detection = badge.detection,
+        color = detectionColor(detection),
+        track = observationTrack(detection, visible, geometry),
+        box = frequencyBox(
+          detection,
+          frame.minimum,
+          frame.maximum,
+          geometry.left,
+          geometry.plotWidth,
+        );
+      if (!box) continue;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      for (const observation of track) {
+        const band = frequencyBox(
+          observation.detection,
+          frame.minimum,
+          frame.maximum,
+          geometry.left,
+          geometry.plotWidth,
+        );
+        if (!band) continue;
+        ctx.strokeStyle = detectionColor(observation.detection);
+        ctx.setLineDash([]);
+        ctx.strokeRect(
+          band.x,
+          observation.cell.y,
+          Math.max(1, band.width),
+          Math.max(1.5, observation.cell.height),
+        );
+      }
+      if (track.length > 1) {
+        const bottom =
+          track[track.length - 1].cell.y + track[track.length - 1].cell.height;
+        ctx.strokeStyle = css("--det-unknown");
+        ctx.globalAlpha = 0.7;
+        ctx.setLineDash([4, 4]);
+        ctx.strokeRect(
+          box.x,
+          geometry.top + 0.5,
+          box.width,
+          Math.max(1, bottom - geometry.top),
+        );
+        ctx.globalAlpha = 1;
+      }
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+    for (const badge of geometry.badges) {
+      const d = badge.detection,
+        bounds = detectionBounds(d),
+        box = frequencyBox(
+          d,
+          frame.minimum,
+          frame.maximum,
+          geometry.left,
+          geometry.plotWidth,
+        );
+      if (!bounds || !box) continue;
+      const color = detectionColor(d);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.7;
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(badge.x + badge.width / 2, badge.y + badge.height);
+      ctx.lineTo(box.center, geometry.top);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = css("--panel");
+      ctx.fillRect(badge.x, badge.y, badge.width, badge.height);
+      ctx.strokeStyle = color;
+      ctx.strokeRect(
+        badge.x + 0.5,
+        badge.y + 0.5,
+        badge.width - 1,
+        badge.height - 1,
+      );
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(badge.x + 5, badge.y + 2, badge.width - 10, badge.height - 4);
+      ctx.clip();
+      ctx.font = "11px Consolas,monospace";
+      ctx.textAlign = "left";
+      ctx.fillStyle = color;
+      ctx.fillText(
+        `${text(d.detected_modulation, "unbekannt")} · ${num(bounds.center / 1e6, 4)} MHz`,
+        badge.x + 7,
+        badge.y + 13,
+      );
+      ctx.font = "10px Consolas,monospace";
+      ctx.fillStyle = css("--muted");
+      ctx.fillText(
+        `BW ≈ ${num(bounds.bandwidth / 1e3, 1)} kHz · aktuell`,
+        badge.x + 7,
+        badge.y + 26,
+      );
+      ctx.restore();
+    }
   }
+  function drawSpectrumDetections(ctx, geometry) {
+    if (!$("#detection-overlay-toggle").checked) return;
+    const snapshot = state.spectrum || {},
+      freq = arr(snapshot.frequencies_hz || snapshot.frequencies);
+    if (freq.length < 2) return;
+    const step = Number(freq[1]) - Number(freq[0]),
+      minimum = Number(freq[0]) - step / 2,
+      maximum = Number(freq[freq.length - 1]) + step / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(geometry.left, geometry.top, geometry.width, geometry.height);
+    ctx.clip();
+    for (const d of classifiedDetections(
+      arr(snapshot.detections),
+      snapshot.classification,
+    )) {
+      const box = frequencyBox(
+        d,
+        minimum,
+        maximum,
+        geometry.left,
+        geometry.width,
+      );
+      if (!box) continue;
+      ctx.strokeStyle = detectionColor(d);
+      ctx.fillStyle = detectionColor(d);
+      ctx.globalAlpha = 0.055;
+      ctx.fillRect(box.x, geometry.top, box.width, geometry.height);
+      ctx.globalAlpha = 0.7;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.strokeRect(box.x, geometry.top, box.width, geometry.height);
+    }
+    ctx.restore();
+  }
+  function waterfallPointer(event) {
+    const canvas = $("#waterfall-canvas"),
+      geometry = state.waterfallGeometry,
+      frame = state.waterfall[0];
+    if (!geometry || !frame) return;
+    const rect = canvas.getBoundingClientRect(),
+      x = event.clientX - rect.left,
+      y = event.clientY - rect.top;
+    if (
+      x < geometry.left ||
+      x > geometry.left + geometry.plotWidth ||
+      y < geometry.top ||
+      y > geometry.top + geometry.plotHeight
+    )
+      return;
+    const frequency =
+        frame.minimum +
+        ((x - geometry.left) / geometry.plotWidth) *
+          (frame.maximum - frame.minimum),
+      time =
+        geometry.latestTime -
+        ((y - geometry.top) / geometry.plotHeight) * geometry.windowMs;
+    const nearest = state.waterfall.reduce(
+      (best, row) =>
+        !best || Math.abs(row.timeMs - time) < Math.abs(best.timeMs - time)
+          ? row
+          : best,
+      null,
+    );
+    const cell = nearest ? observationCell(nearest, geometry) : null;
+    if (!cell || Math.abs(y - cell.y) > Math.max(3, cell.height)) {
+      $("#waterfall-readout").textContent =
+        `${mhz(frequency)} · kein Spektrum an dieser Zeitposition erfasst`;
+      return;
+    }
+    const index = Math.max(
+        0,
+        Math.min(
+          nearest.power.length - 1,
+          Math.floor(
+            ((frequency - frame.minimum) / (frame.maximum - frame.minimum)) *
+              nearest.power.length,
+          ),
+        ),
+      ),
+      power = nearest.power[index];
+    $("#waterfall-readout").textContent =
+      `${mhz(frequency)} · ${power === null ? "kein Pegel" : `${num(power, 1)} dBFS`} · ${new Date(nearest.timeMs).toISOString().slice(11, 23)} UTC · Messstichprobe`;
+  }
+
   function classificationScore(result) {
-    if (["feature_rejection_gate", "insufficient_segment"].includes(result.confidence_kind))
+    if (
+      ["feature_rejection_gate", "insufficient_segment"].includes(
+        result.confidence_kind,
+      )
+    )
       return "Modellinferenz übersprungen";
     if (result.confidence === undefined) return "Kein Score angegeben";
     return `${percent(result.confidence)} · ${result.confidence_kind === "heuristic_score" ? "Heuristikwert" : "Unkalibrierter Modellscore"}`;
@@ -773,32 +1574,46 @@
     );
     return node;
   }
-  function renderDetections(detections) {
-    const rows = arr(detections);
+  function renderDetections(detections, classification = null) {
+    const rows = classifiedDetections(arr(detections), classification);
     $("#detection-count").textContent = String(rows.length);
     $("#detection-list").replaceChildren(
       ...(rows.length
-        ? rows.map((d) =>
-            el("div", { class: "detection-card" }, [
-              el("strong", {
-                text: mhz(
-                  d.center_frequency_hz ?? d.frequency_hz ?? d.center_hz,
-                ),
-              }),
-              el("span", {
-                text: `Bandbreite ${num((d.bandwidth_hz ?? d.bandwidth ?? 0) / 1e3)} kHz`,
-              }),
-              el("span", {
-                text: `${num(d.snr_db ?? d.excess_db ?? d.peak_above_noise_db)} dB über Rauschschätzung`,
-              }),
-            ]),
-          )
+        ? rows.map((d) => {
+            const bounds = detectionBounds(d);
+            return el(
+              "div",
+              { class: `detection-card detection-tone-${detectionTone(d)}` },
+              [
+                el("div", { class: "detection-card-heading" }, [
+                  el("strong", { text: mhz(bounds?.center) }),
+                  pill(
+                    text(d.detected_modulation, "unbekannt"),
+                    d.modulation_evaluated ? "cyan" : "",
+                  ),
+                ]),
+                el("span", {
+                  text: `Geschätzte Bandbreite ${num((bounds?.bandwidth ?? 0) / 1e3, 2)} kHz`,
+                }),
+                el("span", {
+                  text: `${num(d.excess_db ?? d.peak_above_noise_db)} dB über Rauschschätzung · ${num(d.peak_dbfs, 1)} dBFS Spitze`,
+                }),
+                el("span", {
+                  class: "detection-class-note",
+                  text: d.modulation_evaluated
+                    ? "Modulation für diesen Kanal ausgewertet · keine Emitterbestätigung"
+                    : "Modulation dieses Kanals noch nicht ausgewertet",
+                }),
+              ],
+            );
+          })
         : [empty("Detektionen erscheinen während des Empfangs.")]),
     );
   }
   async function loadSpectrum() {
     const snapshot = await api("/api/spectrum");
     state.spectrum = snapshot;
+    renderLiveComparison(snapshot);
     const { freq, power } = spectrumArrays();
     $("#spectrum-empty").hidden = power.length > 0;
     const center =
@@ -810,11 +1625,154 @@
     $("#spectrum-bandwidth").textContent = freq.length
       ? `${num((freq[freq.length - 1] - freq[0]) / 1e6, 3)} MHz · ${power.length} Bins`
       : "Keine Daten";
-    if (power.length) addWaterfall(power);
+    if (power.length) addWaterfall(snapshot);
     drawSpectrum();
     drawWaterfall();
-    renderDetections(snapshot.detections);
+    renderDetections(snapshot.detections, snapshot.classification);
     if (snapshot.classification) renderClassification(snapshot.classification);
+  }
+  async function loadLiveComparison() {
+    const selection = await api("/api/live/compare");
+    state.liveComparisonSelection = selection;
+    if (!state.liveSelectionLoaded) {
+      state.checkedLiveModels = new Set(arr(selection.model_ids));
+      state.liveSelectionLoaded = true;
+    }
+    renderLiveComparison(state.spectrum);
+    return selection;
+  }
+  async function configureLiveComparison(modelIds, showReception = false) {
+    const ids = [...new Set(modelIds)];
+    if (ids.length > 3)
+      throw new Error("Höchstens drei Modelle für Live-Stichproben auswählen.");
+    const selection = await api("/api/live/compare", {
+      method: "POST",
+      body: { model_ids: ids },
+    });
+    state.liveComparisonSelection = selection;
+    state.checkedLiveModels = new Set(arr(selection.model_ids));
+    state.liveSelectionLoaded = true;
+    if (showReception) await changeView("empfang");
+    if (receiverRunning() && ids.length) await loadSpectrum();
+    else renderLiveComparison(null);
+    if (!ids.length)
+      toast(
+        "Live-Vergleich beendet. Der Empfänger läuft unabhängig davon weiter.",
+      );
+    else
+      toast(
+        receiverRunning()
+          ? "Modelle für die nächsten Live-Stichproben gewählt."
+          : "Modelle gewählt. Zum Empfang eine Quelle auswählen und selbst starten.",
+      );
+  }
+  function liveSampleMetrics(item) {
+    const rolling = item.rolling || {};
+    const observations = Number(rolling.observations) || 0;
+    return {
+      observations,
+      p50: observations > 0 ? rolling.latency_ms_p50 : null,
+      p95: observations > 0 ? (rolling.latency_ms_p95 ?? rolling.p95) : null,
+      rtf: observations > 0 ? rolling.real_time_factor_p95 : null,
+      warmup: rolling.warmup === true || item.warmup === true,
+    };
+  }
+  function renderLiveComparison(snapshot) {
+    const holder = $("#live-comparison-cards");
+    if (!holder) return;
+    const selection = state.liveComparisonSelection || {};
+    const ids = arr(selection.model_ids);
+    $("#live-comparison-count").textContent = `${ids.length} / 3 Modelle`;
+    $("#live-comparison-stop").disabled = ids.length === 0;
+    const samples = arr(snapshot?.classification_comparison);
+    const byId = new Map(samples.map((item) => [item.model_id, item]));
+    const selected = new Map(
+      arr(selection.models).map((model) => [model.id, model]),
+    );
+    const running = receiverRunning();
+    $("#live-comparison-status").textContent = ids.length
+      ? running
+        ? "Neueste empfangene IQ-Stichproben werden verglichen."
+        : "Empfang gestoppt. Angezeigte Ergebnisse gehören zur letzten verfügbaren Stichprobe."
+      : "Im Experiment bis zu drei trainierte Modelle auswählen oder die Top-3-Empfehlung übernehmen.";
+    const cpu = state.status.hardware?.cpu || state.status.hardware?.processor;
+    $("#live-comparison-hardware").textContent =
+      `Aktuelle Inferenz: CPU${cpu ? ` · ${cpu}` : ""}. P50/P95: bis zu 30 vollständige Pipeline-Inferenzen nach 3 Aufwärmläufen. Keine Genauigkeit ohne Referenzlabel. Unterschiedliche Modelle können unterschiedliche Ausschnittlängen aus demselben IQ-Ring verwenden; dies ist keine lückenlose Echtzeitauswertung.`;
+    holder.replaceChildren(
+      ...(ids.length
+        ? ids.map((id) => {
+            const item = byId.get(id) || {};
+            const model = selected.get(id) || {};
+            const prediction = item.classification;
+            const values = liveSampleMetrics(item);
+            const hasResult = prediction && typeof prediction === "object";
+            const sampleRate = Number(item.sample_rate),
+              length = Number(item.model_segment_length);
+            const card = el("article", { class: "live-model-card" }, [
+              el("div", { class: "live-model-heading" }, [
+                el("h3", { text: item.name || model.name || id }),
+                model.evaluation_available === false
+                  ? pill("Unbewertet", "amber")
+                  : null,
+              ]),
+              el("div", { class: "live-model-decision" }, [
+                el("strong", {
+                  text: hasResult ? text(prediction.label) : "—",
+                }),
+                el("span", {
+                  text: item.error
+                    ? "Keine gültige Inferenz"
+                    : hasResult
+                      ? classificationScore(prediction)
+                      : "Warte auf passende IQ-Daten",
+                }),
+              ]),
+              item.error
+                ? el("p", { class: "live-model-error", text: text(item.error) })
+                : null,
+              el("div", { class: "live-model-metrics" }, [
+                el("div", {}, [
+                  el("span", { class: "metric-label", text: "AKTUELL" }),
+                  el("strong", { text: `${num(item.elapsed_ms, 3)} ms` }),
+                ]),
+                el("div", {}, [
+                  el("span", { class: "metric-label", text: "P50 / P95" }),
+                  el("strong", {
+                    text: values.observations
+                      ? `${num(values.p50, 3)} / ${num(values.p95, 3)} ms`
+                      : "—",
+                  }),
+                ]),
+                el("div", {}, [
+                  el("span", {
+                    class: "metric-label",
+                    text: "P95-ECHTZEITFAKTOR",
+                  }),
+                  el("strong", { text: num(values.rtf, 4) }),
+                ]),
+                el("div", {}, [
+                  el("span", { class: "metric-label", text: "MESSUNGEN" }),
+                  el("strong", {
+                    text: values.observations
+                      ? String(values.observations)
+                      : values.warmup
+                        ? "Aufwärmen"
+                        : "0",
+                  }),
+                ]),
+              ]),
+              el("p", {
+                class: "field-help",
+                text:
+                  Number.isFinite(length) && length > 0
+                    ? `${num(length, 0)} Samples${Number.isFinite(sampleRate) && sampleRate > 0 ? ` · ${num((length / sampleRate) * 1000, 3)} ms IQ bei ${num(sampleRate / 1e3, 3)} kS/s` : ""}`
+                    : "Die Eingangssegmentlänge erscheint mit der ersten Inferenz.",
+              }),
+            ]);
+            return card;
+          })
+        : [empty("Noch keine Modelle für Live-Stichproben ausgewählt.")]),
+    );
   }
   function recordingMeta(r) {
     const g = r.metadata?.global || r.global || {};
@@ -836,26 +1794,137 @@
         r.label_verified ??
         r.label?.verified,
       notes: r.annotation?.notes ?? r.notes ?? r.label?.notes,
+      suggestion: r.label_suggestion || null,
+      suggestions: arr(r.label_suggestions),
+      suggestion_reason:
+        r.label_suggestion_reason || r.label_suggestion?.reason,
+      group_id: r.group_id,
+      capture_quality:
+        r.capture_quality || r.metadata?.global?.["sc:capture_quality"],
     };
   }
   async function loadRecordings() {
     state.recordings = itemArray(await api("/api/recordings"), "recordings");
     renderRecordings();
   }
+  function visibleRecordings() {
+    const filter = $("#recording-filter").value;
+    return state.recordings
+      .map(recordingMeta)
+      .filter((r) =>
+        filter === "unconfirmed"
+          ? !r.verified
+          : filter === "confirmed"
+            ? !!r.verified
+            : true,
+      );
+  }
+  const MAX_BATCH_RECORDINGS = 1000;
+  function recordingSelectionWithAdditions(
+    current,
+    additions,
+    maximum = MAX_BATCH_RECORDINGS,
+  ) {
+    const selected = new Set([...current, ...additions]);
+    return selected.size <= maximum ? selected : null;
+  }
+  function addRecordingSelection(ids) {
+    const selected = recordingSelectionWithAdditions(
+      state.selectedRecordings,
+      ids,
+    );
+    if (!selected) {
+      showError(
+        new Error(
+          `Eine gemeinsame Bestätigung ist auf ${MAX_BATCH_RECORDINGS} Aufnahmen begrenzt. Die Auswahl wurde nicht erweitert; bitte weniger Aufnahmen auswählen.`,
+        ),
+      );
+      updateRecordingSelection();
+      return false;
+    }
+    state.selectedRecordings = selected;
+    updateRecordingSelection();
+    return true;
+  }
+  function updateRecordingSelection() {
+    const visible = visibleRecordings();
+    const selectedVisible = visible.filter((r) =>
+      state.selectedRecordings.has(r.id),
+    ).length;
+    $("#recording-select-all").checked =
+      visible.length > 0 && selectedVisible === visible.length;
+    $("#recording-select-all").indeterminate =
+      selectedVisible > 0 && selectedVisible < visible.length;
+    $("#recording-select-all").disabled = visible.length === 0;
+    $("#recording-selection-count").textContent =
+      `${state.selectedRecordings.size} / ${MAX_BATCH_RECORDINGS} ausgewählt`;
+    $("#recording-batch-open").disabled =
+      state.selectedRecordings.size === 0 ||
+      state.selectedRecordings.size > MAX_BATCH_RECORDINGS;
+    $$("#recordings-table input[data-recording-select]").forEach((input) => {
+      input.checked = state.selectedRecordings.has(input.value);
+      input.disabled =
+        !input.checked && state.selectedRecordings.size >= MAX_BATCH_RECORDINGS;
+    });
+  }
+  function suggestionLabel(recording) {
+    const suggestion = recording.suggestion;
+    return suggestion && !suggestion.ambiguous && suggestion.label
+      ? String(suggestion.label)
+      : "";
+  }
+  function openRecordingLabel(recording) {
+    const form = $("#label-form");
+    form.elements.recording_id.value = recording.id;
+    form.elements.label.value = recording.label || suggestionLabel(recording);
+    form.elements.notes.value = recording.notes || "";
+    form.elements.verified.checked = !!recording.verified;
+    const notice = $("#label-suggestion-notice");
+    notice.hidden = !recording.suggestion && !recording.suggestion_reason;
+    if (!notice.hidden)
+      notice.textContent = `${suggestionLabel(recording) ? `Vorausgewählt: ${suggestionLabel(recording)}. ` : "Kein eindeutiges Vorlabel. "}${text(recording.suggestion_reason || recording.suggestion?.source, "Frequenzvorwissen")} Vorschlag ist unbestätigt.`;
+    $("#label-dialog-title").textContent = recording.name;
+    openDialog("label-dialog");
+  }
   function renderRecordings() {
     const records = state.recordings.map(recordingMeta);
+    const known = new Set(records.map((r) => r.id));
+    state.selectedRecordings = new Set(
+      [...state.selectedRecordings].filter((id) => known.has(id)),
+    );
+    const visible = visibleRecordings();
     $("#recording-count").textContent =
-      `${records.length} ${records.length === 1 ? "Aufnahme" : "Aufnahmen"}`;
+      `${visible.length} / ${records.length} Aufnahmen`;
     $("#recordings-empty").hidden = records.length > 0;
-    const table = $("#recordings-table");
-    table.replaceChildren(
-      ...records.map((r) => {
+    $("#recordings-table").replaceChildren(
+      ...visible.map((r) => {
+        const suggested = suggestionLabel(r);
         const label = r.label
           ? pill(
-              `${r.label}${r.verified ? " · bestätigt" : " · Vorschlag"}`,
+              `${r.label}${r.verified ? " · bestätigt" : " · vorläufig"}`,
               r.verified ? "green" : "amber",
             )
-          : pill("Ohne Label");
+          : suggested
+            ? pill(`${suggested} · Frequenzvorschlag`, "amber")
+            : pill(
+                r.suggestion?.ambiguous
+                  ? "Mehrdeutiger Vorschlag"
+                  : "Ohne Label",
+              );
+        const checkbox = el("input", {
+          type: "checkbox",
+          value: r.id,
+          checked: state.selectedRecordings.has(r.id),
+          "data-recording-select": "",
+          "aria-label": `Aufnahme ${r.name} auswählen`,
+        });
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) addRecordingSelection([r.id]);
+          else {
+            state.selectedRecordings.delete(r.id);
+            updateRecordingSelection();
+          }
+        });
         const actions = el("div", { class: "table-actions" }, [
           button("Replay", () =>
             action(async () => {
@@ -866,15 +1935,7 @@
               await startReceiver();
             }),
           ),
-          button("Label", () => {
-            const form = $("#label-form");
-            form.elements.recording_id.value = r.id;
-            form.elements.label.value = r.label || "";
-            form.elements.notes.value = r.notes || "";
-            form.elements.verified.checked = !!r.verified;
-            $("#label-dialog-title").textContent = r.name;
-            openDialog("label-dialog");
-          }),
+          button("Label", () => openRecordingLabel(r)),
           button("Prüfen", () =>
             action(async () => {
               const result = await api(
@@ -895,6 +1956,7 @@
           ),
         ]);
         return el("tr", {}, [
+          el("td", { class: "selection-cell" }, [checkbox]),
           detailCell(r.name, sourceLabel(r.source)),
           el("td", { class: "mono", text: mhz(r.center_frequency_hz) }),
           detailCell(
@@ -902,11 +1964,19 @@
             duration(r.duration_seconds),
             "mono",
           ),
-          el("td", {}, [label]),
+          el("td", {}, [
+            label,
+            !r.verified && (r.suggestion_reason || r.suggestion?.source)
+              ? el("small", {
+                  text: text(r.suggestion_reason || r.suggestion.source),
+                })
+              : null,
+          ]),
           el("td", {}, [actions]),
         ]);
       }),
     );
+    updateRecordingSelection();
     const previous = $("#rx-recording").value;
     $("#rx-recording").replaceChildren(
       ...(records.length
@@ -923,25 +1993,24 @@
     const selected = new Set(
       $$("#experiment-recordings input:checked").map((n) => n.value),
     );
+    const verified = records.filter((r) => r.verified && r.label);
     $("#experiment-recordings").replaceChildren(
-      ...(records.filter((r) => r.verified && r.label).length
-        ? records
-            .filter((r) => r.verified && r.label)
-            .map((r) =>
-              el("label", { class: "checkbox" }, [
-                el("input", {
-                  type: "checkbox",
-                  value: r.id,
-                  checked: selected.has(r.id),
+      ...(verified.length
+        ? verified.map((r) =>
+            el("label", { class: "checkbox" }, [
+              el("input", {
+                type: "checkbox",
+                value: r.id,
+                checked: selected.has(r.id),
+              }),
+              el("span", {}, [
+                text(r.name),
+                el("small", {
+                  text: `${r.label} · ${duration(r.duration_seconds)} · Sitzung ${text(r.group_id, r.id).slice(0, 12)}`,
                 }),
-                el("span", {}, [
-                  text(r.name),
-                  el("small", {
-                    text: `${r.label} · ${duration(r.duration_seconds)}`,
-                  }),
-                ]),
               ]),
-            )
+            ]),
+          )
         : [
             el("p", {
               class: "field-help",
@@ -949,6 +2018,117 @@
             }),
           ]),
     );
+    scheduleReadiness();
+    updateCaptureSizeEstimate();
+  }
+  function batchLabelPreview() {
+    const form = $("#batch-label-form");
+    const useSuggestions = form.elements.batch_mode.value === "suggestions";
+    const sharedLabel = form.elements.label.value.trim();
+    $("#batch-label-field").hidden = useSuggestions;
+    form.elements.label.required = !useSuggestions;
+    const records = state.recordings
+      .map(recordingMeta)
+      .filter((r) => state.selectedRecordings.has(r.id));
+    const preview = records.map((r) => {
+      const label = useSuggestions ? suggestionLabel(r) : sharedLabel;
+      const reason = r.verified
+        ? "Bestätigtes Label bleibt erhalten"
+        : !label
+          ? useSuggestions
+            ? "Kein eindeutiger Vorschlag; wird übersprungen"
+            : "Gemeinsames Label fehlt"
+          : useSuggestions
+            ? text(
+                r.suggestion_reason || r.suggestion?.source,
+                "Frequenzvorschlag",
+              )
+            : "Gemeinsames Label aus deiner Auswahl";
+      return { recording: r, label, reason, update: !r.verified && !!label };
+    });
+    const updated = preview.filter((r) => r.update);
+    const summary = new Map();
+    updated.forEach((r) =>
+      summary.set(r.label, (summary.get(r.label) || 0) + 1),
+    );
+    $("#batch-label-summary").textContent =
+      `${updated.length} von ${records.length} Aufnahmen werden bestätigt${summary.size ? `: ${[...summary].map(([label, count]) => `${count} × ${label}`).join(", ")}` : ""}. ${records.length - updated.length} werden übersprungen.`;
+    $("#batch-label-submit").disabled = updated.length === 0;
+    $("#batch-label-submit").textContent =
+      `${updated.length} Labels bestätigen`;
+    $("#batch-label-preview").replaceChildren(
+      ...preview.map((row) =>
+        el("tr", {}, [
+          detailCell(
+            row.recording.name,
+            mhz(row.recording.center_frequency_hz),
+          ),
+          el("td", {}, [
+            pill(
+              row.recording.label || "Ohne Label",
+              row.recording.verified ? "green" : "",
+            ),
+          ]),
+          el("td", {}, [
+            pill(
+              row.update ? row.label : "Überspringen",
+              row.update ? "cyan" : "amber",
+            ),
+          ]),
+          el("td", { text: row.reason }),
+        ]),
+      ),
+    );
+    return {
+      recording_ids: records.map((r) => r.id),
+      use_suggestions: useSuggestions,
+      label: useSuggestions ? undefined : sharedLabel,
+      verified: true,
+      overwrite_confirmed: false,
+      notes: form.elements.notes.value,
+      expected_labels: useSuggestions
+        ? Object.fromEntries(
+            updated.map((row) => [row.recording.id, row.label]),
+          )
+        : undefined,
+    };
+  }
+  function openBatchLabels() {
+    if (state.selectedRecordings.size > MAX_BATCH_RECORDINGS) {
+      showError(
+        new Error(
+          `Bitte höchstens ${MAX_BATCH_RECORDINGS} Aufnahmen gemeinsam bestätigen.`,
+        ),
+      );
+      return;
+    }
+    const form = $("#batch-label-form");
+    form.reset();
+    batchLabelPreview();
+    openDialog("batch-label-dialog");
+  }
+  async function submitBatchLabels() {
+    const payload = batchLabelPreview();
+    if (payload.recording_ids.length > MAX_BATCH_RECORDINGS)
+      throw new Error(
+        `Bitte höchstens ${MAX_BATCH_RECORDINGS} Aufnahmen gemeinsam bestätigen.`,
+      );
+    $("#batch-label-submit").disabled = true;
+    const result = await api("/api/recordings/labels/batch", {
+      method: "POST",
+      body: payload,
+    });
+    const skipped = arr(result.skipped);
+    const updated = arr(result.updated);
+    updated.forEach((r) =>
+      state.selectedRecordings.delete(r.recording_id || r.id),
+    );
+    closeDialog($("#batch-label-dialog"));
+    await loadRecordings();
+    const notice = $("#batch-label-result");
+    notice.hidden = false;
+    notice.textContent = `${result.count ?? updated.length} Labels bestätigt.${skipped.length ? ` ${skipped.length} übersprungen: ${skipped.map((r) => `${r.id}: ${text(r.reason)}`).join("; ")}` : ""}`;
+    toast(`${result.count ?? updated.length} Aufnahmen bestätigt.`);
   }
   async function loadEmitters() {
     state.emitters = itemArray(await api("/api/emitters"), "emitters");
@@ -1004,22 +2184,49 @@
           ]),
     );
   }
+  function selectedTopologyIds() {
+    return [...$("#experiment-topology").options]
+      .filter((option) => option.selected && option.value)
+      .map((option) => option.value);
+  }
+  function updateTopologySelection() {
+    const count = selectedTopologyIds().length;
+    $("#topology-selection-count").textContent = `${count} / 50 ausgewählt`;
+    $("#topology-selection-count").classList.toggle(
+      "missing-count",
+      count === 0 || count > 50,
+    );
+  }
+  function setTopologySelection(ids) {
+    const selected = new Set(ids);
+    for (const option of $("#experiment-topology").options)
+      option.selected = selected.has(option.value);
+    state.topologySelectionInitialized = true;
+    updateTopologySelection();
+    scheduleReadiness();
+  }
   async function loadTopologies() {
+    const previous = new Set(selectedTopologyIds());
+    const needsDefault = !state.topologySelectionInitialized;
     state.topologies = itemArray(await api("/api/topologies"), "topologies");
     renderTopologies();
-    const previous = $("#experiment-topology").value;
+    if (needsDefault && previous.size === 0) {
+      const reference =
+        state.topologies.find((t) => t.id === "feature-lda") ||
+        state.topologies[0];
+      if (reference) previous.add(reference.id);
+    }
     $("#experiment-topology").replaceChildren(
       ...state.topologies.map((t) =>
         el("option", {
           value: t.id,
+          selected: previous.has(t.id),
           text: `${t.name} · ${t.family}${t.status === "requires_torch" ? " · PyTorch nötig" : ""}`,
         }),
       ),
     );
-    if (state.topologies.some((t) => t.id === previous))
-      $("#experiment-topology").value = previous;
-    else if (state.topologies.some((t) => t.id === "feature-lda"))
-      $("#experiment-topology").value = "feature-lda";
+    state.topologySelectionInitialized = true;
+    updateTopologySelection();
   }
   function renderTopologies() {
     const selected = $("#topology-family").value;
@@ -1123,9 +2330,11 @@
   async function selectTopology(id) {
     closeDialog($("#topology-dialog"));
     await changeView("experimente");
-    $("#experiment-topology").value = id;
+    const ids = selectedTopologyIds();
+    if (!ids.includes(id)) ids.push(id);
+    setTopologySelection(ids);
     $("#experiment-topology").focus();
-    toast("Topologie für das nächste Experiment gewählt.");
+    toast("Topologie zur Vergleichsauswahl hinzugefügt.");
   }
   async function loadExperiments() {
     state.experiments = itemArray(await api("/api/experiments"), "experiments");
@@ -1173,7 +2382,7 @@
                 el("div", { class: "experiment-row-main" }, [
                   el("strong", { text: e.name || e.config?.name || e.id }),
                   el("small", {
-                    text: `${e.config?.source === "synthetic" ? "Synthetisch · " : ""}${e.config?.topology_id || e.topology_id || ""} · ${date(e.created_at || e.started_at)}`,
+                    text: `${e.config?.source === "synthetic" ? "Synthetisch · " : ""}${e.config?.topology_id || e.topology_id || ""} · ${trainingOnly(e) ? "nur trainieren · unbewertet · " : ""}${date(e.created_at || e.started_at)}`,
                   }),
                   running
                     ? el("div", { class: "progress-bar" }, [
@@ -1241,10 +2450,18 @@
     const form = $("#experiment-form");
     const f = new FormData(form);
     const lengths = parseList(f.get("segment_lengths"), "Segmentlängen", true);
+    const topologyIds = selectedTopologyIds();
+    if (topologyIds.length < 1 || topologyIds.length > 50)
+      throw new Error("Bitte 1–50 Topologien für das Experiment auswählen.");
     const config = {
       name: f.get("name"),
       source: f.get("source"),
-      topology_id: f.get("topology_id"),
+      evaluation_mode:
+        f.get("source") === "recordings"
+          ? f.get("evaluation_mode")
+          : "independent",
+      topology_id: topologyIds[0],
+      topology_ids: topologyIds,
       samples_per_class: Number(f.get("samples_per_class")),
       seed: Number(f.get("seed")),
       segment_length: lengths[0],
@@ -1277,10 +2494,133 @@
       );
     return config;
   }
+  function scheduleReadiness() {
+    clearTimeout(readinessTimer);
+    readinessTimer = setTimeout(() => refreshReadiness(), 350);
+  }
+  async function refreshReadiness() {
+    const seq = ++state.readinessSequence;
+    let config;
+    try {
+      config = experimentConfig();
+      if (!config.topology_id) return;
+    } catch (e) {
+      $("#dataset-readiness").replaceChildren(
+        el("p", {
+          class: "field-help",
+          text: "Die Datengrundlage wird nach vollständiger Konfiguration geprüft.",
+        }),
+      );
+      return;
+    }
+    try {
+      const data = await api("/api/experiments/validate", {
+        method: "POST",
+        body: config,
+      });
+      if (seq === state.readinessSequence) renderReadiness(data);
+    } catch (e) {
+      if (seq === state.readinessSequence)
+        $("#dataset-readiness").replaceChildren(
+          el("p", { class: "readiness-error", text: errorMessage(e) }),
+        );
+    }
+  }
+  function renderReadiness(data) {
+    state.datasetReadiness = data;
+    const trainingOnly = data.evaluation_mode === "training_only";
+    const classes = arr(data.classes);
+    const body = el("div", { class: "readiness-body" }, [
+      el("div", { class: "readiness-heading" }, [
+        el("strong", {
+          text: trainingOnly
+            ? "Training ohne unabhängige Bewertung"
+            : "Datengrundlage für unabhängige Bewertung",
+        }),
+        pill(
+          data.ready ? "Bereit" : "Weitere Daten nötig",
+          data.ready ? "green" : "amber",
+        ),
+      ]),
+      classes.length
+        ? el("div", { class: "table-scroll" }, [
+            el("table", { class: "data-table readiness-table" }, [
+              el("thead", {}, [
+                el(
+                  "tr",
+                  {},
+                  ["Klasse", "Aufnahmen", "Sitzungen", "Segmente"].map((t) =>
+                    el("th", { text: t }),
+                  ),
+                ),
+              ]),
+              el(
+                "tbody",
+                {},
+                classes.map((c) =>
+                  el("tr", {}, [
+                    el("td", { text: c.label }),
+                    el("td", { text: num(c.recordings, 0) }),
+                    el("td", {
+                      class: c.ready ? "ready-count" : "missing-count",
+                      text: `${num(c.groups, 0)} / ${num(c.required_groups ?? (trainingOnly ? 1 : 3), 0)}`,
+                    }),
+                    el("td", {
+                      text:
+                        typeof c.segments === "object"
+                          ? Object.entries(c.segments || {})
+                              .map(([k, v]) => `${k}: ${v}`)
+                              .join(" · ")
+                          : num(c.segments, 0),
+                    }),
+                  ]),
+                ),
+              ),
+            ]),
+          ])
+        : null,
+      ...arr(data.errors).map((e) =>
+        el("p", {
+          class: "readiness-error",
+          text: typeof e === "string" ? e : JSON.stringify(e),
+        }),
+      ),
+      ...arr(data.warnings).map((e) =>
+        el("p", {
+          class: "field-help",
+          text: typeof e === "string" ? e : JSON.stringify(e),
+        }),
+      ),
+      trainingOnly
+        ? el("p", {
+            class: "field-help",
+            text: "Das Modell wird als unbewertet gespeichert. Keine Testgenauigkeit, kein unabhängiger Robustheitsnachweis und keine Verwechslungsmatrix.",
+          })
+        : el("p", {
+            class: "field-help",
+            text: "Erforderliche Sitzungen je Klasse: Training, Validierung und Test. Aus einer Sitzung erzeugte Clips bleiben zusammen.",
+          }),
+    ]);
+    $("#dataset-readiness").replaceChildren(body);
+  }
   async function startExperiment() {
     const form = $("#experiment-form");
     if (!form.reportValidity()) return;
     const config = experimentConfig();
+    const readiness = await api("/api/experiments/validate", {
+      method: "POST",
+      body: config,
+    });
+    renderReadiness(readiness);
+    if (!readiness.ready) {
+      $("#dataset-readiness").scrollIntoView({ block: "nearest" });
+      throw new Error(
+        arr(readiness.errors)
+          .map((v) => (typeof v === "string" ? v : JSON.stringify(v)))
+          .join(" · ") ||
+          "Die ausgewählten Daten reichen für diesen Bewertungsmodus noch nicht aus.",
+      );
+    }
     const result = await api("/api/experiments", {
       method: "POST",
       body: config,
@@ -1304,9 +2644,362 @@
       el("small", { text: note }),
     ]);
   }
+  function comparisonIsEvaluated(entry) {
+    return (
+      entry.evaluation_available !== false &&
+      !trainingOnly(entry.report || entry)
+    );
+  }
+  function rankedComparisonEntries(entries, report, mode) {
+    const key = mode === "accuracy" ? "accuracy" : "score";
+    const listed = arr(report.rankings?.[key]);
+    const rankById = new Map(listed.map((id, index) => [id, index + 1]));
+    return entries
+      .map((entry, index) => ({
+        entry,
+        index,
+        rank: comparisonIsEvaluated(entry)
+          ? (rankById.get(entry.topology_id) ??
+            (key === "accuracy" ? entry.accuracy_rank : entry.score_rank) ??
+            null)
+          : null,
+      }))
+      .sort(
+        (a, b) =>
+          (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.index - b.index,
+      );
+  }
+  function liveModelRecommendations(report, entries) {
+    const byId = new Map(entries.map((entry) => [entry.topology_id, entry]));
+    return [
+      ...new Set(
+        arr(report.recommended_topology_ids)
+          .map((id) => byId.get(id))
+          .filter(
+            (entry) =>
+              entry?.model_id && entry.score?.eligible_for_live === true,
+          )
+          .map((entry) => entry.model_id),
+      ),
+    ].slice(0, 3);
+  }
+  function scoreComponentsNode(entry) {
+    const score = entry.score || {};
+    const names = {
+      accuracy: "Validierungsgenauigkeit",
+      robustness: "Robustheit",
+      realtime: "Echtzeitreserve",
+      training: "Trainingsdauer",
+    };
+    return el("details", { class: "score-components" }, [
+      el("summary", { text: "Score-Anteile" }),
+      ...Object.entries(names).map(([key, label]) => {
+        const part = score.components?.[key] || {};
+        return el("div", {}, [
+          el("span", { text: label }),
+          el("strong", {
+            text: `${num(part.points, 1)} / ${num(part.weight ?? score.weights?.[key], 0)}`,
+          }),
+        ]);
+      }),
+      ...arr(score.reasons).map((reason) =>
+        el("p", { class: "field-help", text: text(reason) }),
+      ),
+    ]);
+  }
+  function comparisonTable(experiment, report, entries, inspectedIndex) {
+    const unvalidated =
+      trainingOnly(report) ||
+      entries.every((entry) => !comparisonIsEvaluated(entry));
+    const mode = state.comparisonRankingMode;
+    const recommended = liveModelRecommendations(report, entries);
+    const ranking = el(
+      "select",
+      { "aria-label": "Rangfolge wählen", disabled: unvalidated },
+      [
+        el("option", {
+          value: "score",
+          text: "Rang nach Gesamtscore",
+          selected: mode === "score",
+        }),
+        el("option", {
+          value: "accuracy",
+          text: "Rang nach Validierungsgenauigkeit",
+          selected: mode === "accuracy",
+        }),
+      ],
+    );
+    ranking.addEventListener("change", () => {
+      state.comparisonRankingMode = ranking.value;
+      renderExperimentResult(experiment);
+    });
+    const rows = rankedComparisonEntries(entries, report, mode).map(
+      ({ entry, index, rank }) => {
+        const metrics = entry.metrics || entry.report?.metrics || {};
+        const validation = entry.validation || entry.report?.validation || {};
+        const evaluated = comparisonIsEvaluated(entry);
+        const winner =
+          !unvalidated && report.selected_topology_id === entry.topology_id;
+        const inspect = () => {
+          state.comparisonInspection = {
+            experimentId: experiment.id || state.selectedExperiment,
+            topologyId: entry.topology_id,
+          };
+          renderExperimentResult(experiment);
+        };
+        const select = button(
+          entry.name || entry.topology_id,
+          (event) => {
+            event.stopPropagation();
+            inspect();
+          },
+          "comparison-select",
+        );
+        select.setAttribute("aria-pressed", String(index === inspectedIndex));
+        const checkbox = el("input", {
+          type: "checkbox",
+          checked: state.checkedLiveModels.has(entry.model_id),
+          disabled:
+            !entry.model_id ||
+            (!state.checkedLiveModels.has(entry.model_id) &&
+              state.checkedLiveModels.size >= 3),
+          "aria-label": `${entry.name || entry.topology_id} für Live-Stichproben auswählen`,
+        });
+        checkbox.addEventListener("click", (event) => event.stopPropagation());
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            if (state.checkedLiveModels.size >= 3) {
+              checkbox.checked = false;
+              toast("Für Live-Stichproben höchstens drei Modelle auswählen.");
+              return;
+            }
+            state.checkedLiveModels.add(entry.model_id);
+          } else state.checkedLiveModels.delete(entry.model_id);
+          renderExperimentResult(experiment);
+        });
+        const scored =
+          evaluated &&
+          entry.score?.quality_score_available !== false &&
+          Number.isFinite(entry.score?.total);
+        return el(
+          "tr",
+          {
+            class:
+              index === inspectedIndex
+                ? "comparison-row selected"
+                : "comparison-row",
+            onClick: inspect,
+          },
+          [
+            el("td", {
+              class: "mono comparison-rank",
+              text: rank === null ? "—" : String(rank),
+            }),
+            el("td", { class: "selection-cell live-selection-cell" }, [
+              checkbox,
+            ]),
+            el("td", {}, [
+              select,
+              el("small", { text: entry.family || entry.topology_id }),
+              winner
+                ? pill("Berichtsmodell · Val-F1", "cyan")
+                : !evaluated
+                  ? pill("Unbewertet", "amber")
+                  : null,
+            ]),
+            el("td", { class: "comparison-score-cell" }, [
+              el("strong", {
+                text: scored
+                  ? `${num(entry.score.total, 1)} / 100`
+                  : evaluated
+                    ? "—"
+                    : "Unbewertet",
+              }),
+              evaluated && entry.score ? scoreComponentsNode(entry) : null,
+            ]),
+            el("td", {
+              class: "mono",
+              text: evaluated
+                ? percent(
+                    validation.balanced_accuracy ??
+                      validation.metrics?.balanced_accuracy,
+                  )
+                : "Unbewertet",
+            }),
+            el("td", {
+              class: "mono",
+              text: evaluated
+                ? num(validation.macro_f1 ?? validation.metrics?.macro_f1, 3)
+                : "Unbewertet",
+            }),
+            el("td", { class: "mono" }, [
+              el("strong", {
+                text: evaluated ? num(metrics.macro_f1, 3) : "Unbewertet",
+              }),
+              evaluated
+                ? el("small", {
+                    text: `Genauigkeit ${percent(metrics.accuracy)}`,
+                  })
+                : null,
+            ]),
+            el("td", {
+              class: "mono",
+              text: duration(metrics.training_seconds),
+            }),
+            el("td", { class: "mono" }, [
+              el("strong", { text: `${num(metrics.latency_ms_p50, 3)} ms` }),
+              el("small", { text: `P95 ${num(metrics.latency_ms_p95, 3)} ms` }),
+            ]),
+            el("td", { class: "mono", text: bytes(metrics.model_bytes) }),
+            el("td", {
+              class: "mono",
+              text: num(metrics.real_time_factor_p95, 4),
+            }),
+            el("td", {}, [
+              el("strong", {
+                text: `Training: ${text(entry.report?.hardware?.training_device || entry.device || entry.report?.hardware?.device || report.hardware?.device)}`,
+              }),
+              el("small", {
+                text: `Inferenz: ${text(metrics.inference_device || entry.report?.hardware?.inference_device)}`,
+              }),
+            ]),
+          ],
+        );
+      },
+    );
+    const top3 = button(
+      "Top 3 live vergleichen",
+      () =>
+        action(async () => {
+          state.checkedLiveModels = new Set(recommended);
+          await configureLiveComparison(recommended, true);
+        }),
+      "button button-primary",
+    );
+    top3.disabled = recommended.length === 0;
+    const apply = button(
+      `${state.checkedLiveModels.size} gewählte Modelle live vergleichen`,
+      () =>
+        action(() =>
+          configureLiveComparison([...state.checkedLiveModels], true),
+        ),
+      "button",
+    );
+    apply.disabled = state.checkedLiveModels.size === 0;
+    const clear = button(
+      "Live-Vergleich beenden",
+      () =>
+        action(async () => {
+          await configureLiveComparison([], false);
+          renderExperimentResult(experiment);
+        }),
+      "button button-quiet",
+    );
+    clear.disabled =
+      !state.liveComparisonSelection.active &&
+      state.checkedLiveModels.size === 0;
+    return el(
+      "section",
+      { class: "comparison-panel", "aria-label": "Topologievergleich" },
+      [
+        el("div", { class: "comparison-heading" }, [
+          el("div", {}, [
+            el("span", {
+              class: "panel-kicker",
+              text: `${entries.length} TOPOLOGIEN / GLEICHE VERSUCHSBEDINGUNGEN`,
+            }),
+            el("h3", { text: "Modelle vergleichen" }),
+          ]),
+          unvalidated ? pill("Alle unbewertet", "amber") : null,
+        ]),
+        el("p", {
+          class: "field-help comparison-note",
+          text: unvalidated
+            ? "Nur trainiert: Es gibt keine unabhängigen Gütemetriken, Qualitätsscores oder Gewinner. Manuell ausgewählte Modelle lassen sich dennoch an Live-Stichproben erproben."
+            : "Die Rangfolge verwendet ausschließlich Validierungsdaten. Das Berichtsmodell folgt dem Validierungs-Macro-F1; die Top-3-Empfehlung folgt dem Gesamtscore. Finaltestwerte bestimmen weder Rang noch Empfehlung.",
+        }),
+        el("div", { class: "comparison-score-toolbar" }, [
+          el("label", {}, [
+            el("span", { class: "sr-only", text: "Rangfolge" }),
+            ranking,
+          ]),
+          el("span", {
+            class: "secondary",
+            text: `${state.checkedLiveModels.size} / 3 für Live-Stichproben ausgewählt`,
+          }),
+        ]),
+        el("div", { class: "table-scroll" }, [
+          el(
+            "table",
+            { class: "data-table comparison-table score-comparison-table" },
+            [
+              el("thead", {}, [
+                el(
+                  "tr",
+                  {},
+                  [
+                    "Rang",
+                    "Live",
+                    "Topologie",
+                    "Score",
+                    "Val. bal. Genauigkeit",
+                    "Val. F1",
+                    "Finaltest F1 / Genauigkeit",
+                    "Training",
+                    "P50 / P95",
+                    "Größe",
+                    "P95-Echtzeitfaktor",
+                    "Training / Inferenz",
+                  ].map((label) => el("th", { text: label })),
+                ),
+              ]),
+              el("tbody", {}, rows),
+            ],
+          ),
+        ]),
+        el("details", { class: "comparison-score-definition" }, [
+          el("summary", { text: "Wie setzt sich der Gesamtscore zusammen?" }),
+          el("p", {
+            class: "field-help",
+            text: "Bis zu 100 Punkte: 45 für zufallsbereinigte ausgewogene Validierungsgenauigkeit, 35 für Robustheit über Validierungs-SNR und Jitter (70 % Mittelwert, 30 % schlechtester Fall), 15 für die P95-Echtzeitreserve und 5 für kurze Trainingsdauer. Volle Echtzeitpunkte erfordern fünfmal schnellere Verarbeitung als das IQ-Zeitfenster. Trainingspunkte: 5 / (1 + Trainingssekunden / 300). Zeitpunkte gelten für die gemessene Hardware. Ohne unabhängige Bewertung gibt es keinen Qualitätsscore.",
+          }),
+          el("pre", {
+            text: JSON.stringify(report.score_definition || {}, null, 2),
+          }),
+        ]),
+        el("div", { class: "panel-actions comparison-live-actions" }, [
+          top3,
+          apply,
+          clear,
+        ]),
+      ],
+    );
+  }
   function renderExperimentResult(experiment) {
-    const report = experiment.report || experiment.result || experiment;
-    const metrics = report.metrics || {};
+    const fullReport = experiment.report || experiment.result || experiment;
+    const comparison = arr(fullReport.comparison);
+    const experimentId = experiment.id || state.selectedExperiment;
+    const rememberedIndex =
+      state.comparisonInspection?.experimentId === experimentId
+        ? comparison.findIndex(
+            (entry) =>
+              entry.topology_id === state.comparisonInspection.topologyId,
+          )
+        : -1;
+    const selectedIndex = Number.isInteger(fullReport.selected_comparison_index)
+      ? fullReport.selected_comparison_index
+      : comparison.findIndex(
+          (entry) => entry.topology_id === fullReport.selected_topology_id,
+        );
+    const inspectedIndex =
+      rememberedIndex >= 0
+        ? rememberedIndex
+        : selectedIndex >= 0 && selectedIndex < comparison.length
+          ? selectedIndex
+          : 0;
+    const inspected = comparison[inspectedIndex];
+    const report = inspected?.report || fullReport;
+    const metrics = inspected?.metrics || report.metrics || {};
     const source =
       report.source || report.config?.source || experiment.config?.source;
     const body = $("#experiment-result-body");
@@ -1369,6 +3062,75 @@
       return;
     }
     const n = el("div");
+    if (comparison.length) {
+      n.append(
+        comparisonTable(experiment, fullReport, comparison, inspectedIndex),
+      );
+      n.append(
+        el("div", { class: "comparison-inspection-heading" }, [
+          el("span", { class: "panel-kicker", text: "EINZELAUSWERTUNG" }),
+          el("h3", {
+            text: inspected?.name || inspected?.topology_id || "Modell",
+          }),
+        ]),
+      );
+    }
+    if (
+      trainingOnly(report) ||
+      trainingOnly(fullReport) ||
+      inspected?.evaluation_available === false ||
+      trainingOnly(experiment)
+    ) {
+      n.append(
+        el("div", { class: "result-training-only" }, [
+          pill("Unbewertet · nur trainiert", "amber"),
+          el("p", {
+            class: "result-notice",
+            text: "Dieses Modell wurde ohne unabhängigen Validierungs- und Testsatz trainiert. Eine Genauigkeit oder Verwechslungsmatrix wird deshalb nicht ausgewiesen. Für eine unabhängige Bewertung sind je Klasse mindestens drei getrennte Aufnahmesitzungen nötig.",
+          }),
+          el("div", { class: "result-metrics" }, [
+            metric(
+              "TRAININGSDAUER",
+              duration(metrics.training_seconds),
+              "Gemessene Wandzeit",
+            ),
+            metric(
+              "MODELLGRÖSSE",
+              bytes(metrics.model_bytes),
+              "Gespeichertes, unbewertetes Modell",
+            ),
+            metric(
+              "KLASSIFIKATION · P50",
+              `${num(metrics.latency_ms_p50, 3)} ms`,
+              "Rechenzeit, kein Gütenachweis",
+            ),
+          ]),
+          el("details", { class: "result-details" }, [
+            el("summary", {
+              text: "Trainingskonfiguration, Datenherkunft & Hardware",
+            }),
+            el("pre", {
+              text: JSON.stringify(
+                {
+                  evaluation_mode: report.evaluation_mode,
+                  evaluation_available: report.evaluation_available,
+                  validation_status: report.validation_status,
+                  classes: report.classes,
+                  split_groups: report.split_groups,
+                  config: report.config,
+                  hardware: report.hardware,
+                  limitations: report.limitations,
+                },
+                null,
+                2,
+              ),
+            }),
+          ]),
+        ]),
+      );
+      body.replaceChildren(n);
+      return;
+    }
     if (source === "synthetic" || report.synthetic)
       n.append(
         el("p", {
@@ -1634,79 +3396,178 @@
     state.models = itemArray(await api("/api/models"), "models");
     renderModels();
   }
+  function portableModelSummary(model) {
+    const meta = model.metadata || model;
+    const report = model.report || meta.report || {};
+    return {
+      meta,
+      report,
+      metrics: model.metrics || meta.metrics || report.metrics || {},
+      score: model.score || meta.score || report.score || null,
+      hardware:
+        model.assessment_hardware ||
+        meta.assessment_hardware ||
+        model.hardware ||
+        meta.hardware ||
+        report.hardware ||
+        {},
+      unvalidated:
+        trainingOnly(meta) ||
+        trainingOnly(report) ||
+        model.evaluation_available === false ||
+        report.evaluation_available === false,
+    };
+  }
+  function modelAssessmentHardware(hardware) {
+    const details = [];
+    if (hardware.cpu || hardware.processor)
+      details.push(String(hardware.cpu || hardware.processor));
+    if (hardware.gpu || hardware.gpu_name)
+      details.push(`GPU: ${text(hardware.gpu || hardware.gpu_name)}`);
+    if (hardware.device)
+      details.push(`Gerät im Trainingsbericht: ${text(hardware.device)}`);
+    return (
+      details.join(" · ") ||
+      "Die ursprüngliche Messhardware ist im Modellpaket nicht dokumentiert."
+    );
+  }
   function renderModels() {
+    const count = state.checkedLiveModels.size;
+    $("#models-live-count").textContent = `${count} / 3 Modelle ausgewählt`;
+    $("#models-live-start").disabled = count === 0 || count > 3;
+    $("#models-live-clear").disabled = count === 0;
+    $("#models-live-stop").disabled = !state.liveComparisonSelection?.active;
     $("#models-empty").hidden = state.models.length > 0;
     $("#model-grid").replaceChildren(
-      ...state.models.map((m) => {
-        const meta = m.metadata || m;
-        const metrics = meta.metrics || m.report?.metrics || {};
+      ...state.models.map((model) => {
+        const { meta, metrics, score, hardware, unvalidated } =
+          portableModelSummary(model);
         const active =
-          m.active ||
-          state.status.active_model?.model_id === m.id ||
-          state.status.active_model === m.id;
-        const card = el("article", { class: "panel model-card" }, [
-          el("div", { class: "panel-heading" }, [
-            el("div", {}, [
-              el("span", {
-                class: "panel-kicker",
-                text: text(
-                  meta.family || meta.topology_id || meta.topology?.family,
-                  "TRAINIERTES MODELL",
-                ),
-              }),
-              el("h2", { text: m.name || meta.name || m.id }),
-            ]),
-            pill(active ? "Aktiv" : "Gespeichert", active ? "cyan" : ""),
-          ]),
-          el(
-            "div",
-            { class: "model-stats" },
-            [
-              ["GENAUIGKEIT", percent(metrics.accuracy)],
-              ["GRÖSSE", bytes(metrics.model_bytes ?? m.size_bytes)],
-              ["KLASSEN", arr(meta.classes).join(" / ") || "AM / FM"],
-              ["ERSTELLT", date(m.created_at || meta.created_at)],
-            ].map(([k, v]) =>
+          model.active ||
+          state.status.active_model?.model_id === model.id ||
+          state.status.active_model === model.id;
+        const selected = state.checkedLiveModels.has(model.id);
+        const checkbox = el("input", {
+          type: "checkbox",
+          checked: selected,
+          disabled: !selected && count >= 3,
+          "aria-label": `${model.name || meta.name || model.id} für Live-Stichproben auswählen`,
+        });
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            if (state.checkedLiveModels.size >= 3) {
+              checkbox.checked = false;
+              toast("Höchstens drei Modelle für Live-Stichproben auswählen.");
+              return;
+            }
+            state.checkedLiveModels.add(model.id);
+          } else state.checkedLiveModels.delete(model.id);
+          renderModels();
+        });
+        const scored =
+          !unvalidated &&
+          score?.quality_score_available !== false &&
+          Number.isFinite(score?.total);
+        return el(
+          "article",
+          { class: `panel model-card${selected ? " live-selected" : ""}` },
+          [
+            el("div", { class: "panel-heading" }, [
               el("div", {}, [
-                el("span", { class: "metric-label", text: k }),
-                el("strong", { text: v }),
-              ]),
-            ),
-          ),
-          el("div", {
-            class: "panel-note",
-            text:
-              meta.source === "synthetic" ||
-              meta.config?.source === "synthetic" ||
-              meta.provenance?.synthetic ||
-              meta.synthetic
-                ? "Trainiert mit synthetischen Daten · Realempfang separat validieren."
-                : text(
-                    meta.description,
-                    "Vorverarbeitung und Topologie im Modellpaket enthalten.",
+                el("span", {
+                  class: "panel-kicker",
+                  text: text(
+                    meta.family || meta.topology_id || meta.topology?.family,
+                    "TRAINIERTES MODELL",
                   ),
-          }),
-          el("div", { class: "panel-actions" }, [
-            button(
-              active ? "Aktiv" : "Für Klassifikation aktivieren",
-              () =>
-                action(async () => {
-                  await api(
-                    `/api/models/${encodeURIComponent(m.id)}/activate`,
-                    { method: "POST" },
-                  );
-                  await Promise.all([loadStatus(), loadModels()]);
-                  toast("Modell aktiviert.");
                 }),
-              active ? "button button-quiet" : "button button-primary",
+                el("h2", { text: model.name || meta.name || model.id }),
+              ]),
+              el("div", { class: "model-state-badges" }, [
+                pill(active ? "Aktiv" : "Gespeichert", active ? "cyan" : ""),
+                unvalidated ? pill("Unbewertet", "amber") : null,
+                model.imported ? pill("Importiert") : null,
+              ]),
+            ]),
+            el("label", { class: "checkbox model-live-choice" }, [
+              checkbox,
+              "Für Live-Stichproben auswählen",
+            ]),
+            el(
+              "div",
+              { class: "model-stats" },
+              [
+                [
+                  unvalidated ? "BEWERTUNG" : "GENAUIGKEIT · URSPRUNGSBERICHT",
+                  unvalidated ? "Unbewertet" : percent(metrics.accuracy),
+                ],
+                ["GRÖSSE", bytes(metrics.model_bytes ?? model.size_bytes)],
+                ["KLASSEN", arr(meta.classes).join(" / ") || "—"],
+                ["ERSTELLT", date(model.created_at || meta.created_at)],
+                [
+                  "GESAMTSCORE · URSPRUNGSRECHNER",
+                  scored
+                    ? `${num(score.total, 1)} / 100`
+                    : unvalidated
+                      ? "Unbewertet"
+                      : "—",
+                ],
+                [
+                  "P95 · URSPRÜNGLICHE MESSUNG",
+                  `${num(metrics.latency_ms_p95, 3)} ms`,
+                ],
+              ].map(([label, value]) =>
+                el("div", {}, [
+                  el("span", { class: "metric-label", text: label }),
+                  el("strong", { text: value }),
+                ]),
+              ),
             ),
-            download(
-              `/api/models/${encodeURIComponent(m.id)}/download`,
-              "Modell exportieren",
-            ),
-          ]),
-        ]);
-        return card;
+            el("div", { class: "model-assessment-hardware" }, [
+              el("span", {
+                class: "metric-label",
+                text: "TRAININGS-/BEWERTUNGSRECHNER",
+              }),
+              el("p", { text: modelAssessmentHardware(hardware) }),
+              el("small", {
+                text: "Gespeicherte Bewertung und Laufzeit gelten für den ursprünglichen Versuchsrechner. Aktuelle CPU-Zeiten auf diesem Gerät werden unter Empfang / Live-Stichproben neu gemessen.",
+              }),
+            ]),
+            el("div", {
+              class: "panel-note",
+              text: unvalidated
+                ? "Nur trainiert · noch keine unabhängige Bewertung. Reale Tests mit getrennten Aufnahmesitzungen erforderlich."
+                : meta.source === "synthetic" ||
+                    meta.config?.source === "synthetic" ||
+                    meta.provenance?.synthetic ||
+                    meta.synthetic
+                  ? "Trainiert mit synthetischen Daten · Realempfang separat validieren."
+                  : text(
+                      meta.description,
+                      "Vorverarbeitung und Topologie im Modellpaket enthalten.",
+                    ),
+            }),
+            el("div", { class: "panel-actions" }, [
+              button(
+                active ? "Aktiv" : "Für Klassifikation aktivieren",
+                () =>
+                  action(async () => {
+                    await api(
+                      `/api/models/${encodeURIComponent(model.id)}/activate`,
+                      { method: "POST" },
+                    );
+                    await Promise.all([loadStatus(), loadModels()]);
+                    toast("Modell aktiviert.");
+                  }),
+                active ? "button button-quiet" : "button button-primary",
+              ),
+              download(
+                `/api/models/${encodeURIComponent(model.id)}/download`,
+                "Modell exportieren",
+              ),
+            ]),
+          ],
+        );
       }),
     );
   }
@@ -2089,17 +3950,35 @@
     const form = $("#experiment-form");
     const allowed = [
       "name",
-      "topology_id",
       "source",
+      "evaluation_mode",
       "seed",
       "samples_per_class",
       "epochs",
       "device",
     ];
-    if (c.topology_id && !state.topologies.some((t) => t.id === c.topology_id))
+    const topologyIds =
+      c.topology_ids !== undefined
+        ? c.topology_ids
+        : c.topology_id
+          ? [c.topology_id]
+          : selectedTopologyIds();
+    if (
+      !Array.isArray(topologyIds) ||
+      topologyIds.length < 1 ||
+      topologyIds.length > 50 ||
+      topologyIds.some((id) => typeof id !== "string")
+    )
+      throw new Error("Die Konfiguration benötigt 1–50 Topologie-IDs.");
+    if (topologyIds.some((id) => !state.topologies.some((t) => t.id === id)))
       throw new Error(
-        "Die Topologie dieser Konfiguration zuerst im Tab Topologien laden.",
+        "Die Topologien dieser Konfiguration zuerst im Tab Topologien laden.",
       );
+    if (
+      c.evaluation_mode &&
+      !["independent", "training_only"].includes(c.evaluation_mode)
+    )
+      throw new Error("Ungültiger Bewertungsmodus.");
     if (c.source && !["synthetic", "recordings"].includes(c.source))
       throw new Error("Ungültige Datenquelle.");
     for (const key of [
@@ -2119,6 +3998,7 @@
       if (c[key] !== undefined && form.elements[key])
         form.elements[key].value = String(c[key]);
     }
+    setTopologySelection(topologyIds);
     form.elements.segment_lengths.value = arr(c.segment_lengths).length
       ? c.segment_lengths.join(", ")
       : String(c.segment_length || 2048);
@@ -2154,11 +4034,32 @@
     });
     $("#experiment-recordings-field").hidden =
       form.elements.source.value !== "recordings";
+    scheduleReadiness();
     toast(
       "Versuchskonfiguration geladen. Der Versuch wurde noch nicht gestartet.",
     );
   }
   function setupEvents() {
+    $("#models-live-start").addEventListener("click", () =>
+      action(() => configureLiveComparison([...state.checkedLiveModels], true)),
+    );
+    $("#models-live-clear").addEventListener("click", () => {
+      state.checkedLiveModels.clear();
+      renderModels();
+    });
+    $("#models-live-stop").addEventListener("click", () =>
+      action(async () => {
+        await configureLiveComparison([], false);
+        renderModels();
+      }),
+    );
+
+    $("#receiver-form").addEventListener("input", updateCaptureSizeEstimate);
+    $("#receiver-form").addEventListener("change", updateCaptureSizeEstimate);
+    $("#live-comparison-stop").addEventListener("click", () =>
+      action(() => configureLiveComparison([], false)),
+    );
+
     document.addEventListener("click", (event) => {
       const view = event.target.closest("[data-view]");
       if (view) changeView(view.dataset.view);
@@ -2220,8 +4121,47 @@
       updateReceiverFields,
     );
     $("#waterfall-toggle").addEventListener("change", () => {
-      $(".waterfall-stage").hidden = !$("#waterfall-toggle").checked;
+      $("#waterfall-section").hidden = !$("#waterfall-toggle").checked;
       drawWaterfall();
+    });
+    [
+      "waterfall-palette",
+      "waterfall-min",
+      "waterfall-max",
+      "waterfall-window",
+      "detection-overlay-toggle",
+    ].forEach((id) =>
+      document.getElementById(id).addEventListener("change", () => {
+        const minimum = Number($("#waterfall-min").value),
+          maximum = Number($("#waterfall-max").value);
+        if (
+          !Number.isFinite(minimum) ||
+          !Number.isFinite(maximum) ||
+          maximum <= minimum
+        ) {
+          $("#waterfall-max").value = String(
+            (Number.isFinite(minimum) ? minimum : -120) + 5,
+          );
+          toast("Das Skalenmaximum muss größer als das Minimum sein.");
+        }
+        drawSpectrum();
+        drawWaterfall();
+      }),
+    );
+    $("#waterfall-canvas").addEventListener("pointermove", waterfallPointer);
+    $("#waterfall-expand").addEventListener("click", () => {
+      const expanded = $(".receive-grid").classList.toggle("monitor-expanded");
+      $("#waterfall-expand").setAttribute("aria-pressed", String(expanded));
+      $("#waterfall-expand").setAttribute(
+        "aria-label",
+        expanded
+          ? "RF-Monitor wieder verkleinern"
+          : "Spektrum und Wasserfall vergrößern",
+      );
+      requestAnimationFrame(() => {
+        drawSpectrum();
+        drawWaterfall();
+      });
     });
     $("#live-priors").addEventListener("change", () =>
       action(() => saveSettings({ use_priors: $("#live-priors").checked })),
@@ -2261,6 +4201,37 @@
         toast("Bestätigtes Label gespeichert.");
       }, form);
     });
+    $("#recording-filter").addEventListener("change", renderRecordings);
+    $("#recording-select-all").addEventListener("change", (event) => {
+      const checked = event.currentTarget.checked;
+      if (checked) addRecordingSelection(visibleRecordings().map((r) => r.id));
+      else {
+        visibleRecordings().forEach((r) =>
+          state.selectedRecordings.delete(r.id),
+        );
+        updateRecordingSelection();
+      }
+    });
+    $("#recording-select-unconfirmed").addEventListener("click", () => {
+      addRecordingSelection(
+        visibleRecordings()
+          .filter((r) => !r.verified)
+          .map((r) => r.id),
+      );
+    });
+    $("#recording-clear-selection").addEventListener("click", () => {
+      state.selectedRecordings.clear();
+      updateRecordingSelection();
+    });
+    $("#recording-batch-open").addEventListener("click", openBatchLabels);
+    $("#batch-label-form").addEventListener("input", batchLabelPreview);
+    $("#batch-label-form").addEventListener("change", batchLabelPreview);
+    $("#batch-label-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      action(submitBatchLabels, event.currentTarget);
+    });
+    $("#experiment-form").addEventListener("input", scheduleReadiness);
+    $("#experiment-form").addEventListener("change", scheduleReadiness);
     $("#emitter-filter").addEventListener("input", renderEmitters);
     $("#suggest-form").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -2327,6 +4298,21 @@
         toast("Topologie geladen.");
       }, form);
     });
+    $("#experiment-topology").addEventListener("change", () => {
+      state.topologySelectionInitialized = true;
+      updateTopologySelection();
+      scheduleReadiness();
+    });
+    $("#topology-select-all").addEventListener("click", () =>
+      setTopologySelection(
+        state.topologies
+          .filter((t) => t.status !== "requires_torch")
+          .map((t) => t.id),
+      ),
+    );
+    $("#topology-select-none").addEventListener("click", () =>
+      setTopologySelection([]),
+    );
     $("#experiment-form").addEventListener("submit", (event) => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -2453,6 +4439,7 @@
       drawWaterfall();
     });
     observer.observe($(".plot-stage"));
+    observer.observe($(".waterfall-stage"));
   }
   async function poll() {
     if (state.polling) return;
@@ -2463,6 +4450,12 @@
         await loadSpectrum();
       }
       if (state.view === "drohnen") await loadDrones();
+      if (
+        state.view === "aufnahmen" &&
+        (receiverRunning() || state.wasReceiving)
+      )
+        await loadRecordings();
+      state.wasReceiving = receiverRunning();
       if (state.view === "experimente") {
         await loadExperiments();
         if (state.selectedExperiment)
@@ -2496,6 +4489,7 @@
       loadSettings(),
       loadRecordings(),
       loadTopologies(),
+      loadLiveComparison(),
     ]);
     for (const result of initial) {
       if (result.status === "rejected") showError(result.reason);

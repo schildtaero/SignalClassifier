@@ -27,10 +27,54 @@ Primärquelle: [Philipp Schildt, Condition Monitoring for Electric Aircraft Prop
 
 Die Zahlen bezeichnen die Anfangsbreite bzw. Hidden Size. Tiefe und Kernel sind im exportierten Topologie-JSON festgehalten. Eigene Varianten können innerhalb begrenzter Breite, Tiefe und Kernelgröße gespeichert werden. Der Ausgabekopf wird beim Training an die tatsächlich bestätigten Klassen angepasst. Alle Modelle brauchen getrennte Ergebnisse für Laptop und Workstation; GPU-Nutzung garantiert keine Beschleunigung kleiner Netze.
 
+## Mehrere Topologien in einem Experiment vergleichen
+
+Ein Experiment kann **1–50 unterschiedliche Topologien** umfassen. Alle ausgewählten Ansätze werden nacheinander mit denselben Aufnahmen, Aufnahmegruppen, Seeds und Augmentationskonfigurationen trainiert. Damit bleibt der GPU-/RAM-Bedarf auf einen Trainingslauf begrenzt. Bei gleicher Segmentlänge stimmt auch der Fingerabdruck der verwendeten IQ-Segmente überein. Feature-LDA läuft auf CPU, auch wenn die neuronalen Läufe CUDA verwenden.
+
+Jeder Ansatz erhält eigene Modelle, Konfigurationen und einen vollständigen Bericht. Der gemeinsame Bericht enthält eine Vergleichstabelle mit Metriken, Validierung und Links auf alle Modellartefakte. Topologieauswahl, Konfiguration und Fortschritt gehören zu einem gemeinsamen Experiment; es ist kein manuelles Anlegen eines separaten Experiments pro Netz erforderlich.
+
+Im Modus **Unabhängig auswerten** entscheidet das Validierungs-Macro-F1 über die vorgeschlagene Auswahl; bei Gleichstand gewinnt das kleinere Modell. Testgenauigkeit oder Test-F1 werden dafür **nicht** benutzt. Auch innerhalb einer Topologie wird eine Hyperparameterkombination nur nach Validierung ausgewählt. Sämtliche anderen Netze bleiben gespeichert und können separat geladen werden.
+
+Im Modus **Nur trainieren** werden ebenfalls alle ausgewählten Netze trainiert und gespeichert. Es gibt dabei keine Qualitätsrangfolge und keinen Gewinner. Das erste Netz bleibt lediglich eine technische Standardreferenz für kompatible Modelloperationen; daraus folgt keine Empfehlung. Rechenzeiten und Modellgrößen können verglichen werden, während Genauigkeit und F1 unbekannt bleiben.
+
+Die API nimmt die Auswahl als `topology_ids` entgegen, zum Beispiel `["feature-lda", "feature-mlp-16", "fb-lstm-32"]`. Bereits vorhandene Einzelkonfigurationen mit `topology_id` bleiben gültig. Die zugehörigen Topologien werden vor dem Einreihen aufgelöst; auch optionale Lernraten, Batchgrößen und Kanalaugmentationsgrenzen werden synchron geprüft.
+
+## Transparenter Gesamtscore und Live-Empfehlungen
+
+Der Vergleich bietet zwei getrennte Rangfolgen: **Validierungs-Balanced-Accuracy** und **Gesamtscore von 0 bis 100 Punkten**. Die abschließenden Testergebnisse bleiben sichtbar, bestimmen aber weder Score noch Rangfolge oder Empfehlung. Die bisherige technische Standardauswahl anhand des Validierungs-Macro-F1 bleibt im Bericht getrennt von der Gesamtscore-Empfehlung erhalten.
+
+Bei `K` Klassen wird Qualität oberhalb der Zufallstreffergrenze normiert: `q(b)=max(0,min(1,(b−1/K)/(1−1/K)))`. Damit erhält ein zufälliger Zweiklassen-Klassifikator mit Balanced Accuracy 0,5 keine Genauigkeitspunkte.
+
+| Anteil | Punkte | Berechnung |
+| --- | --- | --- |
+| Genauigkeit | 45 | `45 × q(Validierungs-Balanced-Accuracy)` |
+| Robustheit | 35 | `35 × q(0,7 × Mittelwert + 0,3 × schlechtester Wert)` der Balanced Accuracy im **Validierungs**-SNR-/Jitter-Raster |
+| Echtzeitreserve | 15 | `15 × min(1, (1 / p95-RTF) / 5)` |
+| Trainingsaufwand | 5 | `5 / (1 + Trainingssekunden / 300)` |
+
+Die Echtzeitpunkte sind ab **fünffacher Echtzeitgeschwindigkeit** vollständig erreicht. Zehnfach schneller erhält dieselben 15 Punkte; weitere Beschleunigung beeinflusst auch bei Punktegleichstand die Reihenfolge nicht. Bei gleichem Score entscheiden höhere Validierungs-Balanced-Accuracy und danach kleinere Modelldateien; ansonsten bleibt die Auswahlreihenfolge erhalten. Die 300 Sekunden im Trainingsanteil sind ein offen dokumentiertes Referenzbudget, kein Zeitlimit und keine hardwareunabhängige Messung.
+
+Der p95-Echtzeitfaktor wird über `Rechenzeit / tatsächliche Segmentdauer` gemessen. Für den Score wird der **CPU-Livepfad** verwendet: geladenes Modell nach Warmup, Featuregate, Eingabedarstellung, Vorwärtsrechnung und Entscheidung, ohne zusätzliche Attribution und ohne erstmaliges Laden der Gewichte. Diese Zeitmessung verwendet Validierungssegmente, damit auch hier keine abschließenden Testinformationen in die Auswahl fließen. Training und Validierung können auf CUDA stattfinden; `training_device` und `inference_device="cpu"` werden getrennt ausgewiesen. Die gemessene Quote von Merkmals-Ablehnungen steht unter `timing_skipped_model_fraction`.
+
+Ein Modell ist für die Live-Einzelprüfung nur dann zeitlich geeignet, wenn sein **gemessener CPU-p95-RTF höchstens 1** beträgt. Unter diesen Modellen werden höchstens drei nach dem Gesamtscore empfohlen. Ein sehr genaues, aber langsames Modell kann in der Qualitätsrangfolge hoch stehen und wird trotzdem nicht als Live-Kandidat empfohlen. Die gemeinsame Verarbeitung mehrerer Modelle braucht zusätzlich eine Messung der gesamten Pipeline.
+
+Fehlen Validierung, das Robustheitsraster oder erforderliche CPU-Laufzeit-/Trainingsmetriken, bleibt der Gesamtscore unbekannt. Im Modus **Nur trainieren** gibt es weder Qualitätsscore noch Qualitätsränge oder automatisch empfohlene Topologien. Bereits vorhandene Berichte ohne p95-CPU-Messung bekommen keinen nachträglich erfundenen Score.
+
+Der Bericht exportiert Komponenten, Rohwerte, Normierung, Gewichte, Formeln, Parameter, Gründe für fehlende Werte und Hardwareprofil. Die Messung gilt für den dokumentierten Rechner. Ein auf der Workstation berechneter Score ist keine exakte Vorhersage für den Laptop; dort müssen Laufzeiten erneut praktisch gemessen werden. Synthetische Qualitätsscores bleiben Softwareversuche und beweisen keine RF-Generalisierung.
+
 ## Erste Versuche
 
+Vor dem Start prüft die Datensatz-Vorprüfung die bestätigten Labels, die tatsächliche Zahl unabhängiger Aufnahmegruppen sowie lesbare SigMF-Dateien und vollständige Segmente. Sie lädt dabei keine IQ-Daten in den Arbeitsspeicher. Mehrere Ausschnitte aus derselben Aufnahmesitzung bleiben **eine** Gruppe, auch wenn es mehrere Dateien sind. Die Meldung zeigt je Klasse Dateien, Gruppen, vollständige Segmente und den konkreten nächsten Schritt.
+
+Es gibt zwei ausdrücklich auswählbare Betriebsarten:
+
+- **Unabhängig auswerten** (`evaluation_mode="independent"`, Standard): mindestens drei unabhängige Gruppen je Klasse für Training, Validierung und Test. Keine Gruppe wird über diese Bereiche aufgeteilt. Für eine belastbare Auswertung sind weitere Gruppen sinnvoll.
+- **Nur trainieren** (`evaluation_mode="training_only"`): mindestens eine ausreichend lange, bestätigte Aufnahmegruppe je Klasse und mindestens zwei Klassen. Damit lässt sich bereits mit je einer AM- und FM-Aufnahme ein Modell trainieren, speichern, übertragen und ausprobieren. Es entstehen **keine** Validierungs-/Testsplits und keine Genauigkeits-, F1-, Kalibrierungs- oder Empfindlichkeitswerte. Es ist genau eine vorher festgelegte Kombination aus Segmentlänge, Lernrate und Batchgröße erlaubt; das neuronale Modell nutzt den letzten Trainingsstand, keine Auswahl anhand von Trainingsdaten. Trainingsverlust ist nur eine Optimierungsdiagnose. Laufzeiten können an Trainingssegmenten gemessen werden und werden entsprechend gekennzeichnet.
+
+Nur trainierte Modelle und Berichte enthalten `evaluation_available=false` und `validation_status="unvalidated"`. Ihre Scores sind kein Nachweis der Generalisierung. Für die spätere unabhängige Bewertung zusätzliche getrennte Sitzungen aufnehmen und ein neues Experiment im Standardmodus starten.
+
 1. Ohne Hardware einen ausdrücklich synthetischen AM/FM-Versuch mit `feature-lda` durchführen. Dies prüft Software, Speichern/Laden und Auswertung, nicht die RF-Leistung.
-2. Für das reale Experiment mindestens drei unabhängige Aufnahmesitzungen pro Klasse aufnehmen und **manuell bestätigen**. Beim ersten Versuch AM-Flugfunk und UKW-FM getrennt aufnehmen und jeweils nur das isolierte gewünschte Signal verwenden. Bandplanvorschläge gelten nicht als bestätigte Labels.
+2. Für einen ersten unvalidierten Trainingslauf genügt je eine bestätigte AM- und FM-Aufnahme im Modus **Nur trainieren**. Für eine unabhängige reale Auswertung mindestens drei getrennte Aufnahmesitzungen pro Klasse aufnehmen und **manuell bestätigen**. Beim ersten Versuch AM-Flugfunk und UKW-FM getrennt aufnehmen und jeweils nur das isolierte gewünschte Signal verwenden. Bandplanvorschläge gelten nicht als bestätigte Labels.
 3. Training, Validierung und Test werden anhand **einer globalen Zuordnung physischer Aufnahmegruppen** getrennt. Ausschnitte desselben Ursprungs bleiben zusammen, auch wenn sie unterschiedliche Klassen enthalten. Aufnahme-IDs und Gruppen sind im Report dokumentiert.
 4. Feature-LDA gegen Feature-MLP und kleine IQ-/2D-CNNs vergleichen. Anschließend FB-LSTM und 5-CNN hinzufügen. Umfangreichere Netze sind nur dann sinnvoll, wenn sie auf unabhängigen Aufnahmen messbar helfen.
 5. Für Frequenzunabhängigkeit dieselben Modulationen auf weiteren Frequenzen, mit verschiedenen Nutzsignalen, Antennen, Pegeln und Empfängern prüfen. Weder RF-Mittenfrequenz noch Bandplanlabel fließen als Modellmerkmal ein. Optionales Vorwissen erscheint als separat gekennzeichneter Hinweis.
@@ -68,8 +112,9 @@ Diese optionalen Effekte werden in Training und Test entsprechend derselben konf
 | `confusion_matrix`, `recall` | Verwechslungen und Wiedererkennung je Klasse |
 | `brier_score`, `ece` | Qualität der unkalibrierten Scores; kleiner ist günstiger |
 | `training_seconds`, `preprocessing_seconds` | Training und getrennt gemessene Eingabeaufbereitung |
-| `latency_ms_p50`, `latency_ms_p95` | Einzel-Segment-Latenz inklusive Darstellung/Vorverarbeitung, nach Warmup; Modelldatei ist bereits geladen |
+| `latency_ms_p50`, `latency_ms_p95` | Einzel-Segment-Latenz des CPU-Livepfads inklusive Featuregate/Darstellung/Vorverarbeitung nach Warmup; Gewichte sind bereits geladen, Attribution ist aus |
 | `real_time_factor` | Median aus Rechenzeit / **tatsächlicher IQ-Segmentdauer** je gemessenem Segment; kleiner als 1 bedeutet für diesen Verarbeitungsschritt schneller als Echtzeit |
+| `real_time_factor_p95` | 95. Perzentil desselben CPU-Zeitverhältnisses; Grundlage für Echtzeitreserve und Live-Eignung |
 | `normalized_latency` | Latenz / feste lokale 4096-Sample-Feature-Referenzlast; kein universeller Hardwareumrechnungsfaktor |
 | `training_duration_ratio` | Trainingszeit / (Epochen × Summe der physikalischen Trainingssegmentdauern) |
 | `model_bytes`, `parameter_count` | Persistierte Modellkomponenten ohne abschließenden Report und Anzahl trainierbarer Parameter |
@@ -78,13 +123,13 @@ Diese optionalen Effekte werden in Training und Test entsprechend derselben konf
 | `sensitivity_snr90_db` | Kleinster **getesteter** SNR mit mindestens 90 % Balanced Accuracy beim geringsten getesteten Jitter; keine dBm-Empfindlichkeit |
 | `false_alarm_rate`, `unknown_detection_accuracy` | Ohne unabhängigen Negativ-/Unbekannt-Datensatz bewusst `null` |
 
-Hardwareprofil: CPU/GPU, Betriebssystem, Python/NumPy/PyTorch, Präzision, Threadzahl, Batchgröße, Warmup und Wiederholungen. CUDA-Timings werden synchronisiert. Die feste Referenzlast ermöglicht einen eingeordneten Vergleich, aber keine genaue Vorhersage für andere CPUs, GPUs oder Batchgrößen. Aufnahmegeschwindigkeit, USB-Fehler und Gesamtpipeline müssen zusätzlich praktisch geprüft werden.
+Hardwareprofil: CPU/GPU, Betriebssystem, Python/NumPy/PyTorch, Präzision, Threadzahl, Trainingsgerät, CPU-Inferenzgerät, Batchgröße, Warmup und Wiederholungen. CUDA-Training wird für die Trainingszeit synchronisiert; die ausgewiesene Inferenzmessung läuft auf CPU. Die feste Referenzlast ermöglicht einen eingeordneten Vergleich, aber keine genaue Vorhersage für andere CPUs, GPUs oder Batchgrößen. Aufnahmegeschwindigkeit, USB-Fehler und Gesamtpipeline müssen zusätzlich praktisch geprüft werden.
 
 Das 95-%-Wilson-Intervall ist deskriptiv: Verschiedene Augmentierungen derselben Testaufnahme sind korreliert und erhöhen nicht die Zahl unabhängiger RF-Quellen. Für belastbare wissenschaftliche Ergebnisse sind zusätzliche Aufnahmegruppen und eine auswertungsseitige Gruppen-Bootstrap-Analyse sinnvoll.
 
 ## Entscheidungsweg und portable Modelle
 
-Die Oberfläche zeigt Signalmerkmale, optionales Vorwissen, Modell, Ablehnung und Unsicherheit. Die untrainierte AM/FM-Heuristik wird ausdrücklich als Heuristik gekennzeichnet. Digitale Stille und klar rauschartige AM/FM-Eingaben werden **vor dem Laden bzw. Ausführen teurer Modellgewichte** abgelehnt. Die übersprungenen Schritte stehen im Ergebnis. Die Rauschregel ist nur für die anfängliche AM/FM-Domäne aktiv, damit sie kein gelerntes breitbandiges digitales Signal pauschal verwirft. Das ist noch kein allgemein validierter Open-Set-Klassifikator. Die Experimentgenauigkeit ist ein Closed-Set-Argmax-Wert ohne diese Laufzeitablehnung; Coverage und selektive Genauigkeit benötigen eine separate Open-Set-Auswertung.
+Die Oberfläche zeigt Signalmerkmale, optionales Vorwissen, Modell, Ablehnung und Unsicherheit. Die untrainierte AM/FM-Heuristik und nur trainierte, unvalidierte Modelle werden ausdrücklich gekennzeichnet. Digitale Stille und klar rauschartige AM/FM-Eingaben werden **vor dem Laden bzw. Ausführen teurer Modellgewichte** abgelehnt. Die übersprungenen Schritte stehen im Ergebnis. Die Rauschregel ist nur für die anfängliche AM/FM-Domäne aktiv, damit sie kein gelerntes breitbandiges digitales Signal pauschal verwirft. Das ist noch kein allgemein validierter Open-Set-Klassifikator. Die Experimentgenauigkeit ist bei unabhängiger Auswertung ein Closed-Set-Argmax-Wert ohne diese Laufzeitablehnung; Coverage und selektive Genauigkeit benötigen eine separate Open-Set-Auswertung. Beim reinen Training fehlen diese Gütemaße vollständig.
 
 LDA liefert die exakte additive Zerlegung der **Logit-Differenz zwischen den beiden stärksten Klassen** in Featurebeiträge und Bias. Auf Anfrage liefern neuronale Modelle Gradient×Input-Attributionen im tatsächlichen Eingaberaum: Merkmale, Zeitfenster, Frequenzbins oder IQ-Zeitabschnitte. Diese lokalen Sensitivitäten zeigen Einfluss auf das Modell, keine physikalische Kausalität.
 

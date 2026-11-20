@@ -39,6 +39,13 @@ class Store:
             conn.execute("INSERT INTO records(kind,id,payload) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET payload=excluded.payload", (kind, identifier, encoded))
         return value
 
+    def put_many(self, kind: str, values: list[dict]) -> list[dict]:
+        """Commit a set of labels in one transaction, or retain all old labels."""
+        rows = [(kind, value["id"], json.dumps(value, ensure_ascii=False, allow_nan=False)) for value in values]
+        with self.lock, self.connect() as conn:
+            conn.executemany("INSERT INTO records(kind,id,payload) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET payload=excluded.payload", rows)
+        return values
+
     def get(self, kind: str, identifier: str) -> dict | None:
         with self.connect() as conn:
             row = conn.execute("SELECT payload FROM records WHERE kind=? AND id=?", (kind, identifier)).fetchone()

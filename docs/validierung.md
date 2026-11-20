@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 20. November 2026, SignalClassifier 0.1.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 20. November 2026, SignalClassifier 0.2.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 33 Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests. Python-Wheel gebaut und auf enthaltene lokale Oberfläche und Leaflet-Dateien geprüft.
+- 85 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall und Vergleichsansicht. Python-Wheel 0.2.0 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,16 @@ Prüfstand: 20. November 2026, SignalClassifier 0.1.0, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.2.0
+
+- Batchvorschläge für volle RF-Fenster und Mehrdeutigkeit; menschliche Bestätigung, Schutz vorhandener Labels, Vorschauabgleich und Rückabwicklung bei simuliertem Datenbank-/Datenträgerfehler. Gruppenherkunft bleibt erhalten.
+- Vorprüfung der unabhängigen Gruppen vor dem Start und ausdrücklich unbewertetes Training mit nur einer Gruppe je Klasse. Ohne Validierung keine Genauigkeit oder Qualitätsrangfolge.
+- LDA und zwei ANNs im selben Experiment, gemeinsame Datenfingerabdrücke/Gruppen, alle Modelle erneut ladbar. Genauigkeitsrangliste und Score wählen anhand Validierung; absichtlich vertauschte Test-/Validierungswerte prüfen den Schutz vor Testauswahl.
+- Score 45/35/15/5, Echtzeitpunkte bei 5× begrenzt, CPU-p95-Eignung und maximal drei Empfehlungen. CUDA-Training und CPU-Live-Inferenz sind getrennte Messpfade.
+- API-Live-Vergleich mehrerer Modelle auf demselben aktuellen IQ-Ring ohne automatischen Empfängerstart; Warmup und verworfene/zu kurze Inferenzfenster erzeugen keine fingierten Laufzeitserien.
+- Bounded Hardwarequeue, geliehene Treiberpuffer, simulierte Überläufe und Schreibfehler, zusammenhängender gespeicherter Präfix sowie schnelle Dezimierung gegen vollständige FIR-Referenz. [Numerischer 5-MS/s-Vergleich](aufnahme.md#reproduzierbarer-softwarebenchmark).
+- Wasserfall-Leistungsaggregation, Palette, Frequenz-/Zeitgrenzen, Zuordnung eines Klassifikationsergebnisses zu genau einem Kanal, deduplizierte Zeitstempel und sichtbar fehlende Beobachtungsintervalle mit `node tests/test_frontend.js` geprüft. Auch Dateibudgetabschätzung, Validierungsranking und Live-Warmup sind abgedeckt. Eine visuelle Browserabnahme ersetzt dies nicht.
 
 ## Hier nicht verifiziert
 
@@ -34,6 +44,6 @@ Auf beiden Rechnern Installation und Browserdarstellung prüfen. Auf dem Laptop 
 
 ## Installationshelfer 0.1.1
 
-Der neue `install_driver.sh` installiert standardmäßig die Host-Komponenten für PlutoSDR und RSP1A. Die Gesamtsuite besteht jetzt **52 Tests**; davon prüfen 19 den Installer und seine Bibliotheksprüfungen mit simulierten System-/Netzwerkbefehlen und Bibliotheken. Die vollständige Suite sowie Bash- und JavaScript-Syntaxprüfung bestanden. Vorschau und Empfängerauswahl wurden ebenfalls ausgeführt.
+Mit Version 0.1.1 kam `install_driver.sh` für die Host-Komponenten von PlutoSDR und RSP1A hinzu. Die damalige Gesamtsuite umfasste **52 Tests**; davon prüften 19 den Installer und seine Bibliotheksprüfungen mit simulierten System-/Netzwerkbefehlen und Bibliotheken. Die vollständige Suite sowie Bash- und JavaScript-Syntaxprüfung bestanden. Installationsvorschau und Empfängerauswahl wurden ebenfalls ausgeführt.
 
 Geprüft sind unter anderem getrennte Pluto-/RSP-Pfade, keine Änderungen bei Vorschau/Prüfmodus, HTML-/Prüfsummenablehnung, ursprüngliche API-Aufrufreihenfolge, Erhalt beziehungsweise Sicherung vorhandener Pythonumgebungen sowie Pluto-USB-Suche ohne TX-Initialisierung. Soapy-Quellstand und Pluto-USB-Regeln sind festgelegt; letztere sind mit SHA-256 geprüft. Native Pakete, libiio und Hersteller-API wurden hier **nicht administrativ installiert**. Der SDRplay-Download lieferte aus dieser Umgebung HTTP 403; das Skript bietet deshalb eine lokale Installerdatei als Alternative. Ein Test des realen Installationslaufs auf dem Zielrechner bleibt erforderlich. [Aufruf und Grenzen](install-driver.md).

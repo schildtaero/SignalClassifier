@@ -239,6 +239,9 @@ def _torch_model(topology, num_classes=2):
 
 def _validate_config(config):
     c = dict(config)
+    c.setdefault("evaluation_mode", "independent")
+    if c["evaluation_mode"] not in ("independent", "training_only"):
+        raise ValueError("evaluation_mode muss independent oder training_only sein.")
     def scalar(key, default, lo, hi, integer=False):
         v = c.get(key, default)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) or not lo <= v <= hi or (integer and int(v) != v):
@@ -263,6 +266,8 @@ def _validate_config(config):
         c[key] = sorted(set(values))
     if len(c["segment_lengths"]) * len(c["learning_rates"]) * len(c["batch_sizes"]) > 12:
         raise ValueError("Maximal zwölf Kombinationen aus Segmentlänge, Lernrate und Batchgröße pro Experiment.")
+    if c["evaluation_mode"] == "training_only" and len(c["segment_lengths"]) * len(c["learning_rates"]) * len(c["batch_sizes"]) != 1:
+        raise ValueError("Nur trainieren erlaubt genau eine Kombination aus Segmentlänge, Lernrate und Batchgröße; ohne Validierung ist keine Modellwahl möglich.")
     c.setdefault("source", "recordings" if c.get("recordings") else "synthetic")
     if c["source"] not in ("synthetic", "recordings") or c.get("device", "auto") not in ("auto", "cpu", "cuda"):
         raise ValueError("Quelle oder Rechengerät ist ungültig.")
@@ -280,6 +285,187 @@ def _validate_config(config):
         raise ValueError("Ungültige Kanalaugmentation; siehe dokumentierte Wertebereiche.")
     c["augmentation"] = effects
     return c
+
+
+def validate_experiment_config(config: dict) -> dict:
+    """Public synchronous validation for queue admission and comparison batches."""
+    if not isinstance(config, dict):
+        raise ValueError("Experimentkonfiguration muss ein JSON-Objekt sein.")
+    c = _validate_config(config)
+    identifiers = c.get("topology_ids")
+    if identifiers is None:
+        supplied = c.get("topology")
+        identifiers = [c.get("topology_id") or (supplied.get("id") if isinstance(supplied, dict) else None) or "feature-lda"]
+    if (not isinstance(identifiers, list) or not 1 <= len(identifiers) <= 50
+            or any(not isinstance(identifier, str) or not identifier for identifier in identifiers)
+            or len(set(identifiers)) != len(identifiers)):
+        raise ValueError("1–50 unterschiedliche Topologie-IDs auswählen.")
+    supplied_topologies = c.get("topologies")
+    if supplied_topologies is not None:
+        if not isinstance(supplied_topologies, list) or len(supplied_topologies) != len(identifiers):
+            raise ValueError("Für jede ausgewählte Topologie muss genau eine aufgelöste Konfiguration vorliegen.")
+        if any(not isinstance(topology, dict) for topology in supplied_topologies):
+            raise ValueError("Aufgelöste Topologien müssen JSON-Objekte sein.")
+        supplied_by_id = {topology.get("id"): topology for topology in supplied_topologies if isinstance(topology.get("id"), str)}
+        if len(supplied_by_id) != len(identifiers) or set(supplied_by_id) != set(identifiers):
+            raise ValueError("Topologie-IDs und aufgelöste Konfigurationen stimmen nicht überein.")
+    else:
+        supplied_by_id = {}
+        if isinstance(c.get("topology"), dict):
+            supplied_by_id[c["topology"].get("id")] = c["topology"]
+    resolved = []
+    for identifier in identifiers:
+        topology = validate_topology(supplied_by_id.get(identifier, {"id": identifier}))
+        if topology["id"] != identifier:
+            raise ValueError("Die aufgelöste Topologie hat eine andere ID als die Auswahl.")
+        if topology["family"] != "feature_lda" and importlib.util.find_spec("torch") is None:
+            raise ValueError(f"{topology['name']} benötigt PyTorch; ./setup.sh --neural-cpu oder --neural verwenden.")
+        resolved.append(topology)
+    c["topology_ids"] = list(identifiers)
+    c["topologies"] = resolved
+    return c
+
+
+def _recording_inventory(entry):
+    """Resolve and inspect one SigMF source without reading its numeric samples."""
+    from .sigmf import recording_info
+    path = entry.get("metadata_path") or entry.get("path")
+    if not path:
+        raise ValueError("Aufnahmepfad fehlt.")
+    info = recording_info(path)
+    # recording_info validates format and sample counts; opening checks actual access.
+    with Path(info["data_path"]).open("rb"):
+        pass
+    group_id = str(entry.get("group_id") or info.get("group_id") or entry.get("id") or path)
+    return {**entry, "metadata_path": str(path), "group_id": group_id,
+            "sample_count": info["sample_count"], "sample_rate": info["sample_rate"],
+            "integrity": info["metadata"]["global"].get("sc:integrity")}
+
+
+def _assign_groups(membership, classes, seed, training_only=False):
+    """One assignment per physical source, shared by readiness and execution."""
+    if training_only:
+        return {gid: "train" for gid in membership}
+    r = np.random.default_rng(seed)
+    ids = sorted(membership)
+    n = len(ids)
+    targets = [(n - v - t, v, t) for v in range(1, min(n - 1, max(5, n // 3 + 1)))
+               for t in range(1, min(n - v, max(5, n // 3 + 1))) if n - v - t >= 1]
+    targets.sort(key=lambda z: sum((z[i] / n - [.6, .2, .2][i]) ** 2 for i in range(3)))
+    for sizes in targets[:30]:
+        for _ in range(150):
+            order = list(r.permutation(ids))
+            parts = [order[:sizes[0]], order[sizes[0]:sizes[0] + sizes[1]], order[sizes[0] + sizes[1]:]]
+            if all(set().union(*(membership[gid] for gid in part)) == set(classes) for part in parts):
+                return {gid: split for split, part in zip(("train", "validation", "test"), parts) for gid in part}
+    raise ValueError("Aufnahmegruppen lassen sich nicht mit allen Klassen auf Training, Validierung und Test aufteilen. Weitere unabhängige Aufnahmen ergänzen oder ausdrücklich „Nur trainieren“ ohne Bewertung wählen.")
+
+
+def dataset_readiness(config: dict) -> dict:
+    """Cheap dataset preflight. Counts metadata only; no complete IQ loads or training."""
+    mode = config.get("evaluation_mode", "independent")
+    required = 1 if mode == "training_only" else 3
+    result = {"ready": False, "evaluation_mode": mode, "classes": [], "errors": [], "warnings": [], "group_count": 0}
+    errors, warnings = result["errors"], result["warnings"]
+    if mode not in ("independent", "training_only"):
+        errors.append("Auswertungsmodus muss independent oder training_only sein.")
+        return result
+    source = config.get("source", "recordings" if config.get("recordings") else "synthetic")
+    lengths = config.get("segment_lengths", [config.get("segment_length", 4096)])
+    if not isinstance(lengths, list) or not lengths or any(type(x) is not int or not 256 <= x <= 65536 for x in lengths):
+        errors.append("Segmentlängen müssen ganze Zahlen zwischen 256 und 65536 sein.")
+        return result
+    length = max(lengths)
+    result["segment_length"] = length
+    if mode == "training_only":
+        combinations = len(set(lengths))
+        for name, default in (("learning_rates", config.get("learning_rate", .001)), ("batch_sizes", config.get("batch_size", 32))):
+            values = config.get(name, [default])
+            if not isinstance(values, list) or not values or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) for v in values):
+                errors.append(f"{name} muss mindestens einen Wert enthalten.")
+                return result
+            combinations *= len(set(values))
+        if combinations != 1:
+            errors.append("Nur trainieren erlaubt genau eine Segmentlänge, Lernrate und Batchgröße; ohne Validierung ist keine Modellwahl möglich.")
+        warnings.append("Nur trainieren: Das Modell bleibt unvalidiert. Es werden keine Genauigkeit, F1-Werte oder unabhängigen Testergebnisse berechnet.")
+    if source == "synthetic":
+        count = config.get("samples_per_class", 64)
+        if type(count) is not int or not 12 <= count <= 1000:
+            errors.append("Synthetische Experimente benötigen 12–1000 Segmente je Klasse.")
+            return result
+        result["classes"] = [{"label": label, "recordings": 0, "groups": count, "segments": count,
+                              "required_groups": required, "ready": True} for label in CLASSES]
+        result["group_count"] = count * len(CLASSES)
+        result["ready"] = not errors
+        return result
+    if source != "recordings":
+        errors.append("Datengrundlage muss synthetic oder recordings sein.")
+        return result
+    entries = config.get("recordings", [])
+    if not isinstance(entries, list) or len(entries) > 128:
+        errors.append("1–128 Aufnahmen auswählen.")
+        return result
+    stats, membership = {}, {}
+    samples_cap = config.get("samples_per_class", 64)
+    samples_cap = min(64, samples_cap) if type(samples_cap) is int and samples_cap > 0 else 64
+    retained_samples = 0
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            errors.append(f"Aufnahme {index + 1}: ungültige Metadaten.")
+            continue
+        label = entry.get("label")
+        if not isinstance(label, str) or not label or len(label) > 120 or entry.get("verified") is False:
+            errors.append(f"Aufnahme {index + 1}: bestätigtes Klassenlabel fehlt.")
+            continue
+        state = stats.setdefault(label, {"recordings": 0, "groups": set(), "segments": 0, "usable_segments": 0})
+        state["recordings"] += 1
+        try:
+            info = _recording_inventory(entry)
+            integrity = info.get("integrity")
+            if isinstance(integrity, dict):
+                gap_count = integrity.get("reported_gaps", 0)
+                overflow_count = integrity.get("overflows", 0)
+                if gap_count or overflow_count or integrity.get("capture_error"):
+                    warnings.append(f"{label}, Aufnahme {index + 1}: Capture meldete Lücken={gap_count}, Überläufe={overflow_count}, Stopgrund={integrity.get('stop_reason', 'unbekannt')}. Ein gespeicherter zusammenhängender Präfix ist dadurch nicht automatisch fehlerhaft; Integritätsprovenienz prüfen.")
+                if integrity.get("contains_sample_gaps") is True:
+                    message = f"{label}, Aufnahme {index + 1}: Die gespeicherten Samples sind ausdrücklich als lückenhaft markiert; für unabhängige Auswertung eine zusammenhängende Aufnahme wählen."
+                    (errors if mode == "independent" else warnings).append(message)
+            count = info["sample_count"]
+            segments = count // length
+            state["segments"] += segments
+            state["usable_segments"] += min(segments, samples_cap, 4_194_304 // length)
+            if not segments:
+                errors.append(f"{label}, Aufnahme {index + 1}: {count} Samples sind kürzer als das gewählte Segment ({length} Samples). Kürzeres Segment wählen oder länger aufnehmen.")
+                continue
+            state["groups"].add(info["group_id"])
+            membership.setdefault(info["group_id"], set()).add(label)
+            retained_samples += min(count, length * samples_cap, 4_194_304)
+        except (OSError, ValueError, UnicodeError) as exc:
+            errors.append(f"{label}, Aufnahme {index + 1}: nicht lesbar ({exc}). SigMF-Metadaten und zugehörige IQ-Datei prüfen.")
+    classes = sorted(stats)
+    if not 2 <= len(classes) <= 64:
+        errors.append(f"Es sind {len(classes)} bestätigte Klassen ausgewählt; mindestens zwei und maximal 64 sind erforderlich.")
+    for label in classes:
+        state = stats[label]
+        count = len(state["groups"])
+        ready = count >= required and state["segments"] > 0
+        result["classes"].append({"label": label, "recordings": state["recordings"], "groups": count,
+                                  "segments": state["segments"], "usable_segments": state["usable_segments"], "required_groups": required, "ready": ready})
+        if not ready:
+            remedy = "Weitere getrennte Aufnahmesitzungen ergänzen oder ausdrücklich „Nur trainieren“ ohne Genauigkeitsbewertung wählen." if mode == "independent" else "Mindestens eine lesbare, ausreichend lange Aufnahme dieser Klasse ergänzen."
+            errors.append(f"{label}: {state['recordings']} Aufnahmen, {count} unabhängige Aufnahmegruppen, {state['segments']} vollständige Segmente. Für {'Training, Validierung und Test' if mode == 'independent' else 'das Training'} sind {required} Aufnahmegruppen je Klasse erforderlich. {remedy}")
+    result["group_count"] = len(membership)
+    if retained_samples > 16_777_216:
+        errors.append("Aufnahmedatensatz überschreitet das 128-MiB-IQ-Budget; weniger Aufnahmen oder Segmente wählen.")
+    if not errors and mode == "independent":
+        try:
+            _assign_groups(membership, classes, config.get("seed", 42))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if mode == "independent" and any(state["recordings"] > len(state["groups"]) for state in stats.values()):
+        warnings.append("Mehrere Ausschnitte derselben Aufnahmesitzung zählen gemeinsam als eine unabhängige Gruppe.")
+    result["ready"] = not errors
+    return result
 
 
 def generate_signal(modulation, length=4096, sample_rate=256_000, seed=42):
@@ -354,48 +540,34 @@ def _recording_groups(config, length):
     from .sigmf import read_recording
     items = config["recordings"]
     assignments, groups = {}, {"train": [], "validation": [], "test": []}
-    r = np.random.default_rng(config["seed"])
     if len(items) > 128:
         raise ValueError("Maximal 128 Aufnahmen pro Experiment; größere Datensätze in getrennten Experimenten prüfen.")
     classes = config["classes"]
-    eligible = [x for x in items if x.get("label") in classes and x.get("verified") is not False]
+    eligible = [_recording_inventory(x) for x in items if x.get("label") in classes and x.get("verified") is not False]
+    training_only = config.get("evaluation_mode") == "training_only"
     membership = {}
     for entry in eligible:
-        gid = str(entry.get("group_id") or entry.get("id") or entry.get("metadata_path") or entry.get("path"))
+        gid = entry["group_id"]
         membership.setdefault(gid, set()).add(entry["label"])
     for label in classes:
         ids = [gid for gid, labels in membership.items() if label in labels]
-        if len(ids) < 3:
-            raise ValueError(f"{label}: mindestens drei unabhängige bestätigte Aufnahmen für Training, Validierung und Test erforderlich.")
+        required = 1 if training_only else 3
+        if len(ids) < required:
+            raise ValueError(f"{label}: {len(ids)} unabhängige Aufnahmegruppen vorhanden; {required} erforderlich. Weitere Aufnahmesitzungen ergänzen oder ausdrücklich „Nur trainieren“ wählen.")
     # One assignment per physical source group, across labels and every derived clip.
-    ids = sorted(membership)
-    n = len(ids)
-    targets = [(n - v - t, v, t) for v in range(1, min(n - 1, max(5, n // 3 + 1)))
-               for t in range(1, min(n - v, max(5, n // 3 + 1))) if n - v - t >= 1]
-    targets.sort(key=lambda z: sum((z[i] / n - [.6, .2, .2][i]) ** 2 for i in range(3)))
-    for sizes in targets[:30]:
-        for _ in range(150):
-            order = list(r.permutation(ids))
-            parts = [order[:sizes[0]], order[sizes[0]:sizes[0] + sizes[1]], order[sizes[0] + sizes[1]:]]
-            if all(set().union(*(membership[gid] for gid in part)) == set(classes) for part in parts):
-                assignments = {gid: split for split, part in zip(groups, parts) for gid in part}
-                break
-        if assignments:
-            break
-    if not assignments:
-        raise ValueError("Aufnahmegruppen lassen sich nicht mit allen Klassen auf Training, Validierung und Test aufteilen. Weitere unabhängige Aufnahmen ergänzen.")
+    assignments = _assign_groups(membership, classes, config["seed"], training_only)
     retained_samples = 0
-    for entry in items:
+    for entry in eligible:
         label = entry.get("label")
         if label not in classes or entry.get("verified") is False:
             continue
-        path = entry.get("metadata_path") or entry.get("path")
+        path = entry["metadata_path"]
         if not path:
             raise ValueError("Aufnahmepfad fehlt.")
-        group_id = str(entry.get("group_id") or entry.get("id") or path)
+        group_id = entry["group_id"]
         split = assignments[group_id]
         # Bound memory and segments. Read only the beginning of long captures.
-        count = min(4_194_304, length * min(64, config["samples_per_class"]))
+        count = min(entry["sample_count"], 4_194_304, length * min(64, config["samples_per_class"]))
         # Budget before loading, independent of the number of files and segment size.
         if retained_samples + count > 16_777_216:
             raise ValueError("Aufnahmedatensatz überschreitet das 128-MiB-IQ-Budget. Weniger Aufnahmen/Segmente wählen.")
@@ -405,6 +577,8 @@ def _recording_groups(config, length):
         for start in range(0, len(x) - length + 1, length):
             groups[split].append({"iq": x[start:start + length].copy(), "label": classes.index(label), "sample_rate": rate, "group_id": group_id})
     for split, entries in groups.items():
+        if training_only and split != "train":
+            continue
         for label in range(len(classes)):
             if not any(x["label"] == label for x in entries):
                 raise ValueError(f"{split}: kein vollständiges Segment für {classes[label]}; längere Aufnahmen oder kürzere Segmente wählen.")
@@ -505,8 +679,104 @@ def benchmark_hardware():
             "interpretation": "Verhältnis zu derselben CPU-Referenzlast; keine exakte Prognose für andere CPUs oder GPUs."}
 
 
+def score_definition() -> dict:
+    return {
+        "version": 1, "maximum": 100,
+        "weights": {"accuracy": 45, "robustness": 35, "realtime": 15, "training": 5},
+        "parameters": {"robustness_mean_weight": .7, "robustness_worst_weight": .3,
+                       "full_realtime_credit_speedup": 5., "training_reference_seconds": 300.},
+        "formulas": {
+            "chance_normalization": "q=max(0,min(1,(balanced_accuracy-1/K)/(1-1/K)))",
+            "accuracy": "45*q(validation_balanced_accuracy)",
+            "robustness": "35*q(0.7*mean(validation_grid_balanced_accuracy)+0.3*min(validation_grid_balanced_accuracy))",
+            "realtime": "15*min(1,(1/real_time_factor_p95)/5)",
+            "training": "5/(1+training_seconds/300)",
+            "total": "accuracy_points+robustness_points+realtime_points+training_points",
+        },
+        "live_eligibility": "Measured cached CPU p95 real-time factor <=1; recommendations additionally require a complete validated quality score.",
+        "quality_source": "Validation data and validation SNR/jitter grid only. Final test quality never enters scores or rankings.",
+        "hardware_scope": "Measured on this host CPU, batch 1, warmed cached model, feature gate and representation included; no exact hardware portability claim.",
+        "training_budget_scope": "300 seconds is an explicit reference budget, not a timeout or a hardware-independent training measure.",
+    }
+
+
+def score_candidate(validation, validation_trials, metrics, num_classes=2, evaluation_available=True) -> dict:
+    """Transparent 100-point comparison using validation quality and CPU resources.
+
+    Missing inputs stay unavailable. Runtime eligibility is separate from quality
+    ranking: a measured fast but unvalidated model receives no total or rank.
+    """
+    definition = score_definition()
+    weights = definition["weights"]
+    params = dict(definition["parameters"])
+    reasons = []
+    metrics = metrics if isinstance(metrics, dict) else {}
+    validation = validation if isinstance(validation, dict) else {}
+    def finite(value, minimum=0., maximum=None):
+        return (not isinstance(value, bool) and isinstance(value, (int, float, np.number))
+                and np.isfinite(value) and value >= minimum and (maximum is None or value <= maximum))
+    class_count_valid = type(num_classes) is int and 2 <= num_classes <= 64
+    chance = 1 / num_classes if class_count_valid else None
+    params["chance_level"] = chance
+    params["num_classes"] = num_classes if class_count_valid else None
+    if not class_count_valid:
+        reasons.append("Für die Zufallstreffer-Normierung fehlen 2–64 gültige Klassen.")
+    rtf = metrics.get("real_time_factor_p95")
+    cpu_measured = metrics.get("inference_device") == "cpu"
+    valid_rtf = finite(rtf) and rtf > 0 and cpu_measured
+    eligible = bool(valid_rtf and rtf <= 1)
+    if not valid_rtf:
+        reasons.append("Gemessener p95-Echtzeitfaktor des CPU-Livepfads fehlt.")
+    elif not eligible:
+        reasons.append("Die gemessene CPU-p95-Laufzeit überschreitet die Signaldauer; nicht für Live empfohlen.")
+    training_seconds = metrics.get("training_seconds")
+    valid_training = finite(training_seconds)
+    if not valid_training:
+        reasons.append("Gemessene Trainingsdauer fehlt.")
+    ba = validation.get("balanced_accuracy") if evaluation_available else None
+    valid_ba = finite(ba, 0., 1.)
+    grid = validation_trials if isinstance(validation_trials, list) else []
+    grid_values = [trial.get("balanced_accuracy") if isinstance(trial, dict) else None for trial in grid]
+    valid_grid = bool(evaluation_available and grid_values and all(finite(value, 0., 1.) for value in grid_values))
+    if not evaluation_available:
+        reasons.append("Keine unabhängige Validierung: kein Qualitätsscore und keine Qualitätsrangfolge.")
+    else:
+        if not valid_ba:
+            reasons.append("Balanced Accuracy der Validierung fehlt.")
+        if not valid_grid:
+            reasons.append("Vollständiges Validierungsraster über SNR und Jitter fehlt.")
+    def normalized(value):
+        return max(0., min(1., (float(value) - chance) / (1 - chance))) if chance is not None else None
+    mean_ba = float(np.mean(grid_values)) if valid_grid else None
+    worst_ba = float(min(grid_values)) if valid_grid else None
+    robust_raw = .7 * mean_ba + .3 * worst_ba if valid_grid else None
+    accuracy_q = normalized(ba) if valid_ba else None
+    robustness_q = normalized(robust_raw) if valid_grid else None
+    speedup = 1 / rtf if valid_rtf else None
+    realtime_q = min(1., speedup / 5) if valid_rtf else None
+    training_q = 1 / (1 + training_seconds / 300) if valid_training else None
+    raw = {"accuracy": float(ba) if valid_ba else None, "robustness": robust_raw,
+           "realtime": speedup, "training": float(training_seconds) if valid_training else None}
+    qualities = {"accuracy": accuracy_q, "robustness": robustness_q, "realtime": realtime_q, "training": training_q}
+    components = {key: {"points": float(weights[key] * quality) if quality is not None else None,
+                        "weight": weights[key], "normalized": float(quality) if quality is not None else None, "raw": raw[key]}
+                  for key, quality in qualities.items()}
+    available = bool(evaluation_available and class_count_valid and valid_ba and valid_grid and valid_rtf and valid_training)
+    return {"total": float(sum(component["points"] for component in components.values())) if available else None,
+            "components": components, "component_points": {key: component["points"] for key, component in components.items()},
+            "weights": weights, "parameters": params, "eligible_for_live": eligible,
+            "quality_score_available": available, "reasons": reasons,
+            "inputs": {"validation_balanced_accuracy": raw["accuracy"], "validation_robustness_mean_ba": mean_ba,
+                       "validation_robustness_worst_ba": worst_ba, "real_time_factor_p95": float(rtf) if valid_rtf else None,
+                       "training_seconds": raw["training"], "inference_device": metrics.get("inference_device")}}
+
+
 def run_experiment(config: dict, output_dir, progress=None) -> dict:
     c = _validate_config(config)
+    readiness = dataset_readiness(c)
+    if not readiness["ready"]:
+        raise ValueError(" ".join(readiness["errors"]))
+    training_only = c["evaluation_mode"] == "training_only"
     classes = c["classes"]
     if c.get("topology"):
         topology = validate_topology(c["topology"])
@@ -554,26 +824,32 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
     all_trials, evaluations, candidates = [], [], []
     wall_start = time.perf_counter()
     for ci, (length, lr, batch_size) in enumerate(combos):
+        emit(.04 + .9 * ci / len(combos), "prepare", f"Kombination {ci + 1}/{len(combos)}: Daten vorbereiten")
         rng = np.random.default_rng(c["seed"])
         groups = _synthetic_groups(c, length) if c["source"] == "synthetic" else _recording_groups(c, length)
+        if training_only and c["source"] == "synthetic":
+            groups = {"train": groups["train"] + groups["validation"] + groups["test"], "validation": [], "test": []}
         segment_fingerprints = sorted(f"{entry['group_id']}|{entry['label']}|{entry['sample_rate']}|{hashlib.sha256(entry['iq'].tobytes()).hexdigest()}"
                                       for entries in groups.values() for entry in entries)
         dataset_sha256 = hashlib.sha256("\n".join(segment_fingerprints).encode()).hexdigest()
         preprocessing_start = time.perf_counter()
         xtrain, ytrain = _dataset(groups["train"], topology, c, rng)
-        xval, yval = _dataset(groups["validation"], topology, c, rng)
+        xval, yval = _dataset(groups["validation"], topology, c, rng) if not training_only else (None, None)
         if c["include_clean"]:
             clean_train, clean_y = _dataset(groups["train"], topology, c, rng, snr="clean", jitter=0)
-            clean_val, clean_vy = _dataset(groups["validation"], topology, c, rng, snr="clean", jitter=0)
             xtrain, ytrain = np.concatenate([xtrain, clean_train]), np.concatenate([ytrain, clean_y])
-            xval, yval = np.concatenate([xval, clean_val]), np.concatenate([yval, clean_vy])
+            if not training_only:
+                clean_val, clean_vy = _dataset(groups["validation"], topology, c, rng, snr="clean", jitter=0)
+                xval, yval = np.concatenate([xval, clean_val]), np.concatenate([yval, clean_vy])
         # Normalization fitted strictly on training representations.
         axis = (0, 1) if topology["input"] == "feature_sequence" else (0,)
         if topology["input"] in ("features", "feature_sequence"):
             mean, scale = xtrain.mean(axis=axis), np.maximum(xtrain.std(axis=axis), 1e-5)
         else:
             mean, scale = np.array(0., dtype=np.float32), np.array(1., dtype=np.float32)
-        xtrain, xval = (xtrain - mean) / scale, (xval - mean) / scale
+        xtrain = (xtrain - mean) / scale
+        if not training_only:
+            xval = (xval - mean) / scale
         preprocessing_seconds = time.perf_counter() - preprocessing_start
         training_start = time.perf_counter()
         history = []
@@ -599,14 +875,17 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                     optimizer.step()
                     losses.append(float(loss.detach().cpu()))
                 model.eval()
-                with torch.inference_mode():
-                    vl = float(torch.nn.functional.cross_entropy(model(torch.from_numpy(xval).to(device)), torch.from_numpy(yval).to(device)).cpu())
+                vl = None
+                if not training_only:
+                    with torch.inference_mode():
+                        vl = float(torch.nn.functional.cross_entropy(model(torch.from_numpy(xval).to(device)), torch.from_numpy(yval).to(device)).cpu())
                 history.append({"epoch": epoch + 1, "training_loss": float(np.mean(losses)), "validation_loss": vl})
                 sample_rss()
-                if vl < best_loss:
+                if not training_only and vl < best_loss:
                     best_loss, best_state = vl, {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-                emit(.06 + .68 * (ci + (epoch + 1) / c["epochs"]) / len(combos), "train", f"Kombination {ci + 1}/{len(combos)}, Epoche {epoch + 1}/{c['epochs']}")
-            model.load_state_dict(best_state)
+                emit(.04 + .9 * (ci + .6 * (epoch + 1) / c["epochs"]) / len(combos), "train", f"Kombination {ci + 1}/{len(combos)}, Epoche {epoch + 1}/{c['epochs']}")
+            if not training_only:
+                model.load_state_dict(best_state)
             model.eval()
             if device == "cuda":
                 torch.cuda.synchronize()
@@ -616,8 +895,7 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                 return np.concatenate(batches)
         training_seconds = time.perf_counter() - training_start
         sample_rss()
-        val_probabilities = predict(xval)
-        validation = _metrics(yval, val_probabilities, classes)
+        validation = None if training_only else _metrics(yval, predict(xval), classes)
         modeldir = out / f"candidate-{ci + 1}"
         modeldir.mkdir(exist_ok=True)
         if neural:
@@ -629,6 +907,9 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                     "topology": topology, "input": topology["input"], "segment_length": length, "sample_rate": c["sample_rate"],
                     "sample_rates": sorted(set(float(x["sample_rate"]) for split in groups.values() for x in split)),
                     "source": c["source"], "weights_file": "weights.pt" if neural else "weights.npz", "device_trained": device,
+                    "inference_device": "cpu",
+                    "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
+                    "validation_status": "unvalidated" if training_only else "evaluated",
                     "dataset_sha256": dataset_sha256,
                     "feature_names": FEATURE_NAMES, "confidence_threshold": .6, "frequency_metadata_input": False, "include_clean_training_examples": c["include_clean"],
                     "preprocessing": {"version": 1, "segment_length": length, "normalization": "training-only zscore for features", "iq_samples": 1024,
@@ -642,13 +923,23 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
         # Hyperparameter/model selection uses validation only; never best test score.
         candidate = {"candidate": ci + 1, "model_path": str(modeldir), "segment_length": length, "learning_rate": lr, "batch_size": batch_size,
                      "validation": validation, "training_seconds": training_seconds, "preprocessing_seconds": preprocessing_seconds,
+                     "training_segments": len(groups["train"]), "training_examples": len(ytrain),
                      "model_bytes": model_bytes, "history": history, "parameter_count": int(sum(p.numel() for p in model.parameters())) if neural else 11 * len(classes),
                      "training_signal_seconds": float(sum(len(x["iq"]) / x["sample_rate"] for x in groups["train"]) * (2 if c["include_clean"] else 1))}
+        validation_trials = []
+        validation_rng = np.random.default_rng(c["seed"] + 710_003)
+        for snr in ([] if training_only else c["snr_db"]):
+            for jitter in c["jitter"]:
+                xv, yv = _dataset(groups["validation"], topology, c, validation_rng, snr, jitter)
+                values = _metrics(yv, predict((xv - mean) / scale), classes)
+                validation_trials.append({"candidate": ci + 1, "segment_length": length, "snr_db": snr, "jitter": jitter, **values})
+        candidate["validation_trials"] = validation_trials
         candidates.append(candidate)
         candidate_evaluations = []
-        for snr in c["snr_db"]:
-            for jitter in c["jitter"]:
-                emit(.75 + .18 * ci / len(combos), "evaluate", f"Unabhängiger Test: SNR {snr} dB, Jitter {jitter} Samples")
+        for snr_index, snr in enumerate([] if training_only else c["snr_db"]):
+            for jitter_index, jitter in enumerate(c["jitter"]):
+                grid_fraction = (snr_index * len(c["jitter"]) + jitter_index) / (len(c["snr_db"]) * len(c["jitter"]))
+                emit(.04 + .9 * (ci + .65 + .2 * grid_fraction) / len(combos), "evaluate", f"Unabhängiger Test: SNR {snr} dB, Jitter {jitter} Samples")
                 xt, yt = _dataset(groups["test"], topology, c, rng, snr, jitter)
                 prob = predict((xt - mean) / scale)
                 m = _metrics(yt, prob, classes)
@@ -656,40 +947,48 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                          "snr_db": snr, "jitter": jitter, **m}
                 all_trials.append(trial)
                 candidate_evaluations.append((yt, prob))
-        # End-to-end single-segment inference timings, including representation conversion.
+        # Measure the same cached CPU classification path used in live reception.
+        # GPU training/validation timings must never masquerade as laptop inference.
         durations, duration_ratios = [], []
-        entries = groups["test"]
+        entries = groups["train"] if training_only else groups["validation"]
         for entry in entries[:3]:
-            if topology["input"] != "features":
-                extract_features(entry["iq"], entry["sample_rate"])
-            predict((np.stack([_representation(entry["iq"], entry["sample_rate"], topology["input"])]) - mean) / scale)
+            classify(entry["iq"], entry["sample_rate"], model_path=modeldir, attribution=False)
+        skipped_measurements = 0
         for i in range(min(30, max(10, len(entries)))):
             entry = entries[i % len(entries)]
-            if neural and device == "cuda":
-                torch.cuda.synchronize()
             begin = time.perf_counter()
-            if topology["input"] != "features":
-                extract_features(entry["iq"], entry["sample_rate"])
-            predict((np.stack([_representation(entry["iq"], entry["sample_rate"], topology["input"])]) - mean) / scale)
-            if neural and device == "cuda":
-                torch.cuda.synchronize()
+            timed_result = classify(entry["iq"], entry["sample_rate"], model_path=modeldir, attribution=False)
             elapsed = time.perf_counter() - begin
+            skipped_measurements += bool(timed_result.get("skipped_stages"))
             durations.append(elapsed * 1000)
             duration_ratios.append(elapsed / (len(entry["iq"]) / entry["sample_rate"]))
         candidate.update(latency_ms_p50=float(np.median(durations)), latency_ms_p95=float(np.percentile(durations, 95)),
-                         real_time_factor=float(np.median(duration_ratios)), timed_sample_rates=sorted(set(x["sample_rate"] for x in entries)))
+                         real_time_factor=float(np.median(duration_ratios)), real_time_factor_p95=float(np.percentile(duration_ratios, 95)),
+                         inference_device="cpu", timing_skipped_model_fraction=skipped_measurements / len(durations),
+                         timed_sample_rates=sorted(set(x["sample_rate"] for x in entries)))
+        candidate["score"] = score_candidate(candidate["validation"], validation_trials, candidate,
+                                             num_classes=len(classes), evaluation_available=not training_only)
         for trial in all_trials:
             if trial["candidate"] == ci + 1:
                 trial.update(latency_ms_p50=candidate["latency_ms_p50"])
         evaluations.append(candidate_evaluations)
-    best_index = max(range(len(candidates)), key=lambda i: (candidates[i]["validation"]["macro_f1"], -candidates[i]["model_bytes"]))
+        emit(.04 + .9 * (ci + 1) / len(combos), "evaluate", f"Kombination {ci + 1}/{len(combos)} abgeschlossen")
+    best_index = 0 if training_only else max(range(len(candidates)), key=lambda i: (candidates[i]["validation"]["macro_f1"], -candidates[i]["model_bytes"]))
     best = candidates[best_index]
-    y = np.concatenate([x[0] for x in evaluations[best_index]])
-    probabilities = np.concatenate([x[1] for x in evaluations[best_index]])
-    summary = _metrics(y, probabilities, classes)
+    if training_only:
+        summary = {key: None for key in ("accuracy", "balanced_accuracy", "macro_f1", "brier_score", "ece", "accuracy_ci95", "recall")}
+        summary.update(count=0, confusion_matrix=[])
+    else:
+        y = np.concatenate([x[0] for x in evaluations[best_index]])
+        probabilities = np.concatenate([x[1] for x in evaluations[best_index]])
+        summary = _metrics(y, probabilities, classes)
     # CI above counts augmented observations; record-group correlation limits interpretation.
     summary.update({key: best[key] for key in ("training_seconds", "preprocessing_seconds", "latency_ms_p50", "latency_ms_p95", "model_bytes", "parameter_count")})
-    summary.update(real_time_factor=best["real_time_factor"], timed_sample_rates=best["timed_sample_rates"],
+    summary.update(real_time_factor=best["real_time_factor"], real_time_factor_p95=best["real_time_factor_p95"], timed_sample_rates=best["timed_sample_rates"],
+                   inference_device="cpu", timing_skipped_model_fraction=best["timing_skipped_model_fraction"],
+                   timing_scope="training_segments" if training_only else "validation_segments",
+                   timing_method="Cached CPU classify: feature gate, representation, forward and decision; no attribution or initial weights load",
+                   training_segments=best["training_segments"], training_examples=best["training_examples"],
                    reference_latency_ms=benchmark["reference_latency_ms"], normalized_latency=best["latency_ms_p50"] / max(1e-9, benchmark["reference_latency_ms"]),
                    false_alarm_rate=None, unknown_detection_accuracy=None,
                    training_duration_ratio=best["training_seconds"] / max(1e-9, c["epochs"] * best["training_signal_seconds"]) if neural else None,
@@ -702,17 +1001,22 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
         summary.update(process_rss_before_bytes=rss_samples[0], process_rss_after_bytes=rss_samples[-1],
                        sampled_process_rss_max_bytes=max(rss_samples),
                        memory_scope="Gemeinsamer App-Prozess, vor/nach Training und pro Epoche abgetastet; kein isolierter Trainings-Peak.")
-    hardware = hardware_profile() | {"device": device, "batch_size": best["batch_size"], "inference_batch_size": 1,
+    hardware = hardware_profile() | {"device": device, "training_device": device, "inference_device": "cpu", "batch_size": best["batch_size"], "inference_batch_size": 1,
                                     "warmup": 3, "timing_repetitions": min(30, max(10, len(entries)))}
     if neural and device == "cuda":
         summary["peak_gpu_bytes"] = int(torch.cuda.max_memory_allocated())
     safe_config = {key: value for key, value in c.items() if key != "recordings"}
     safe_config["recording_groups"] = [str(x.get("group_id") or x.get("id") or "") for x in c.get("recordings", [])]
     report = {"schema_version": 1, "source": c["source"], "synthetic": c["source"] == "synthetic", "config": safe_config,
+              "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
+              "validation_status": "unvalidated" if training_only else "evaluated", "readiness": readiness,
               "topology": topology, "model_path": best["model_path"], "metrics": summary, "hardware": hardware, "benchmark": benchmark,
-              "trials": all_trials, "candidates": candidates, "selected_candidate": best_index + 1, "selection": "Höchstes Validierungs-Macro-F1; bei Gleichstand kleineres Modell",
+              "score": best["score"], "score_definition": score_definition(),
+              "trials": all_trials, "candidates": candidates, "selected_candidate": best_index + 1,
+              "validation": best["validation"], "validation_trials": best["validation_trials"],
+              "selection": "Eine vorab festgelegte Konfiguration; letzter Trainingsstand, keine Validierung oder Modellwahl" if training_only else "Höchstes Validierungs-Macro-F1; bei Gleichstand kleineres Modell",
               "confusion_matrix": summary["confusion_matrix"], "classes": classes, "history": best["history"],
-              "evaluation_policy": "closed-set argmax without runtime abstention; runtime rejection/coverage require separate open-set validation",
+              "evaluation_policy": "training only; no validation, test split or predictive quality metrics" if training_only else "closed-set argmax without runtime abstention; runtime rejection/coverage require separate open-set validation",
               "split_groups": load_model_metadata(best["model_path"])["split_groups"],
               "dataset_sha256": load_model_metadata(best["model_path"])["dataset_sha256"],
               "limitations": ["Synthetische Ergebnisse sind kein Nachweis mit realen Empfängern." if c["source"] == "synthetic" else "SNR bezeichnet zusätzlich injiziertes Rauschen relativ zur Gesamtleistung der Aufnahme; der ursprüngliche RF-SNR ist unbekannt.",
@@ -721,9 +1025,106 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                               "Augmentierungen derselben Testaufnahme sind korreliert; das Wilson-Intervall ist nur eine deskriptive Orientierung.",
                               "Referenz-normalisierte Laufzeit ist eine Vergleichskennzahl, keine exakte Hardwareübertragung.",
                               "Optionale Kanalaugmentationen werden zufällig innerhalb konfigurierter Grenzen angewendet; separate Robustheitskurven gibt es in diesem Build für SNR und Jitter."]}
+    if training_only:
+        report["limitations"] = ["Nur trainiert, unvalidiert: Keine unabhängigen Validierungs-/Testdaten und keine Aussage zu Genauigkeit, F1 oder Generalisierung.",
+                                 "Rechenzeiten wurden an Trainingssegmenten gemessen. Trainingsverlust ist eine Optimierungsdiagnose und kein unabhängiger Qualitätsnachweis.",
+                                 "Für eine unabhängige Auswertung getrennte Aufnahmesitzungen ergänzen und den Modus „Unabhängig auswerten“ wählen."] + readiness["warnings"]
     _json(out / "report.json", report)
     _json(Path(best["model_path"]) / "report.json", report)
-    emit(1., "complete", "Experiment ausgewertet; Modell und Konfiguration gespeichert")
+    emit(1., "complete", "Modell trainiert und gespeichert; unabhängige Auswertung steht aus" if training_only else "Experiment ausgewertet; Modell und Konfiguration gespeichert")
+    return report
+
+
+def run_comparison(config: dict, output_dir, progress=None) -> dict:
+    """Train all selected topologies on the same source groups, then compare them.
+
+    Runs are sequential to bound GPU/RAM demand. Quality selection uses validation
+    only. A training-only batch deliberately has no winner or quality ranking.
+    """
+    c = validate_experiment_config(config)
+    readiness = dataset_readiness(c)
+    if not readiness["ready"]:
+        raise ValueError(" ".join(readiness["errors"]))
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    training_only = c["evaluation_mode"] == "training_only"
+    entries = []
+    started = time.perf_counter()
+    total = len(c["topologies"])
+    for index, topology in enumerate(c["topologies"]):
+        identifier = topology["id"]
+        child_config = {key: value for key, value in c.items() if key not in ("topologies", "topology_ids", "topology")}
+        child_config.update(topology_id=identifier, topology=topology)
+        # The linear CPU baseline remains usable in a CUDA comparison batch.
+        if topology["family"] == "feature_lda":
+            child_config["device"] = "cpu"
+        def child_progress(update, position=index, selected=topology):
+            if progress is None:
+                return
+            completed = float(update.get("progress", 0))
+            progress({**update, "progress": (position + max(0., min(1., completed))) / total,
+                      "topology_id": selected["id"], "topology_index": position + 1, "topology_count": total,
+                      "message": f"{selected['name']} ({position + 1}/{total}): {update.get('message', '')}"})
+        subreport = run_experiment(child_config, output / f"topology-{index + 1:02d}-{identifier}", child_progress)
+        selected_candidate = next((candidate for candidate in subreport["candidates"]
+                                   if candidate["candidate"] == subreport["selected_candidate"]), None)
+        validation = selected_candidate.get("validation") if selected_candidate else None
+        validation_trials = subreport.get("validation_trials", selected_candidate.get("validation_trials", []) if selected_candidate else [])
+        if not training_only:
+            score = validation.get("macro_f1") if isinstance(validation, dict) else None
+            if not isinstance(score, (float, int)) or not np.isfinite(score):
+                raise ValueError(f"{identifier}: Kein gültiges Validierungsergebnis für den Modellvergleich verfügbar.")
+        entries.append({"topology_id": identifier, "name": topology["name"], "family": topology["family"],
+                        "model_path": subreport["model_path"], "metrics": subreport["metrics"],
+                        "validation": validation, "evaluation_available": bool(subreport["evaluation_available"]),
+                        "validation_trials": validation_trials,
+                        "score": subreport.get("score") or score_candidate(validation, validation_trials, subreport["metrics"],
+                                                                             num_classes=len(subreport["classes"]),
+                                                                             evaluation_available=bool(subreport["evaluation_available"])),
+                        "score_rank": None, "accuracy_rank": None,
+                        "report": subreport})
+    chosen = 0 if training_only else max(range(len(entries)),
+                                         key=lambda i: (entries[i]["validation"]["macro_f1"], -entries[i]["metrics"]["model_bytes"]))
+    report = dict(entries[chosen]["report"])
+    def valid_accuracy(index):
+        validation = entries[index]["validation"]
+        value = validation.get("balanced_accuracy") if isinstance(validation, dict) else None
+        return (entries[index]["evaluation_available"] and isinstance(value, (float, int))
+                and not isinstance(value, bool) and np.isfinite(value) and 0 <= value <= 1)
+    score_order = sorted((i for i, entry in enumerate(entries) if entry["score"]["quality_score_available"]),
+                         key=lambda i: (-entries[i]["score"]["total"],
+                                        -entries[i]["validation"]["balanced_accuracy"],
+                                        entries[i]["metrics"]["model_bytes"]))
+    accuracy_order = sorted((i for i in range(len(entries)) if valid_accuracy(i)),
+                            key=lambda i: (-entries[i]["validation"]["balanced_accuracy"],
+                                           -entries[i]["validation"].get("macro_f1", 0), entries[i]["metrics"]["model_bytes"]))
+    for rank, index in enumerate(score_order, 1):
+        entries[index]["score_rank"] = rank
+    for rank, index in enumerate(accuracy_order, 1):
+        entries[index]["accuracy_rank"] = rank
+    recommendations = [entries[index]["topology_id"] for index in score_order if entries[index]["score"]["eligible_for_live"]][:3]
+    safe_config = {key: value for key, value in c.items() if key != "recordings"}
+    safe_config["recording_groups"] = report["config"].get("recording_groups", [])
+    report.update(config=safe_config, topology_ids=list(c["topology_ids"]), comparison=entries,
+                  comparison_schema_version=1, comparison_wall_seconds=time.perf_counter() - started,
+                  score=entries[chosen]["score"], score_definition=score_definition(),
+                  rankings={"score": [entries[index]["topology_id"] for index in score_order],
+                            "accuracy": [entries[index]["topology_id"] for index in accuracy_order]},
+                  recommended_topology_ids=recommendations,
+                  selected_topology_id=None if training_only else entries[chosen]["topology_id"],
+                  selected_comparison_index=None if training_only else chosen,
+                  selection="Keine Qualitätsrangfolge ohne Validierung; erstes Modell nur als Standardreferenz gespeichert" if training_only
+                            else "Höchstes Validierungs-Macro-F1 der gewählten Kandidaten; bei Gleichstand kleinere Modelldateien. Testwerte bestimmen die Auswahl nicht.")
+    report["comparison_policy"] = {"sequential": True, "seed": c["seed"], "same_recording_groups": True,
+                                   "same_augmentation_configuration": True, "selection_uses_test_metrics": False,
+                                   "quality_ranking_available": bool(score_order),
+                                   "accuracy_ranking_source": "validation_balanced_accuracy",
+                                   "recommendation_source": "composite_validation_score_among_measured_cpu_p95_rtf_le_1"}
+    _json(output / "report.json", report)
+    if progress:
+        progress({"progress": 1., "stage": "complete", "topology_count": total,
+                  "message": f"{total} Modelle trainiert und gespeichert; keine unabhängige Bewertung" if training_only
+                             else f"{total} Topologien verglichen; Auswahl ausschließlich anhand der Validierung"})
     return report
 
 
@@ -879,7 +1280,7 @@ def _cached_inference(path, signature):
     return _load_inference(path)
 
 
-def classify(iq, sample_rate, center_frequency_hz=None, use_priors=False, model_path=None, explain=False) -> dict:
+def classify(iq, sample_rate, center_frequency_hz=None, use_priors=False, model_path=None, explain=False, attribution=True) -> dict:
     begin = time.perf_counter()
     x = _iq(iq)
     features = extract_features(x, sample_rate)
@@ -916,6 +1317,8 @@ def classify(iq, sample_rate, center_frequency_hz=None, use_priors=False, model_
         signature = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in directory.iterdir() if p.name in ("model.json", "weights.pt", "weights.npz", "normalization.npz"))
         manifest, predict = _cached_inference(str(directory.resolve()), tuple(sorted(signature)))
         classes = manifest["classes"]
+        if manifest.get("evaluation_available") is False:
+            steps.append({"stage": "Modellgültigkeit", "decision": "Nur trainiert · unvalidiert", "reason": "Für dieses Modell wurden keine unabhängigen Validierungs-/Testdaten ausgewertet. Scores belegen keine Generalisierungsgenauigkeit."})
         length = int(manifest.get("segment_length", len(x)))
         segment = x[:length]
         representation = np.stack([_vector_from_features(features) if manifest["input"] == "features" and len(segment) == len(x)
@@ -927,7 +1330,7 @@ def classify(iq, sample_rate, center_frequency_hz=None, use_priors=False, model_
         trained_rates = manifest.get("sample_rates", [manifest.get("sample_rate")])
         if sample_rate not in trained_rates:
             steps.append({"stage": "Gültigkeitsbereich", "decision": "Abtastrate abweichend", "reason": "Die Trainingsraten enthalten diese Abtastrate nicht; Generalisierung muss separat geprüft werden."})
-        if explain or manifest["family"] == "feature_lda":
+        if attribution and (explain or manifest["family"] == "feature_lda"):
             order = np.argsort(probabilities)
             explanation = predict.explain(representation, int(order[-1]), int(order[-2]))
             if manifest["family"] == "feature_lda":
@@ -967,6 +1370,8 @@ def classify(iq, sample_rate, center_frequency_hz=None, use_priors=False, model_
             hint = "VHF-Flugfunkbereich: konventionelles AM plausibel"
         steps.append({"stage": "Optionales Vorwissen", "decision": hint, "reason": "Unbestätigter Bandplanhinweis; verändert weder RF-Merkmale noch Modellscore und ist kein Ground-Truth-Label."})
     return {"label": label, "confidence": maximum, "confidence_kind": "uncalibrated_model_score" if model_path else "heuristic_score",
+            "evaluation_available": manifest.get("evaluation_available", True) if model_path else False,
+            "validation_status": manifest.get("validation_status", "evaluated") if model_path else "unvalidated",
             "method": method, "probabilities": dict(zip(classes, map(float, probabilities))), "features": features, "steps": steps, "explanation": explanation,
             "elapsed_ms": float((time.perf_counter() - begin) * 1000), "use_priors": bool(use_priors),
             "limitations": "Heuristische Ablehnung ersetzt keinen validierten Open-Set-Klassifikator; Scores gelten nur innerhalb der geprüften Trainingsdomäne."}

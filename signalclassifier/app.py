@@ -13,6 +13,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -75,6 +76,30 @@ class LabelInput(BaseModel):
     verified: bool = False
     notes: str = Field(default="", max_length=4000)
 
+    @field_validator("label")
+    @classmethod
+    def meaningful_label(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("Klassenlabel darf nicht leer sein")
+        return value
+
+
+class BatchLabelInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recording_ids: list[str] = Field(min_length=1, max_length=1000)
+    use_suggestions: bool = True
+    label: str | None = Field(default=None, max_length=80)
+    verified: bool = True
+    overwrite_confirmed: bool = False
+    notes: str = Field(default="", max_length=4000)
+    expected_labels: dict[str, str] | None = Field(default=None, max_length=1000)
+
+
+class LiveComparisonInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_ids: list[str] = Field(default_factory=list, max_length=3)
+
 
 class SettingsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -104,6 +129,8 @@ class Runtime:
         self.cancel_events: dict[str, threading.Event] = {}
         self.active_experiment = None
         self.benchmark = None
+        self.live_model_ids: list[str] = []
+        self.live_timings = {}
         # A previous process cannot still execute these jobs.
         for run in self.store.all("experiment"):
             if run.get("status") in ("running", "queued", "cancelling"):
@@ -114,20 +141,126 @@ class Runtime:
 
     def recording(self, identifier: str) -> dict:
         clean_id(identifier)
-        for recording in self.capture.list_recordings():
+        for recording in self.recordings():
             if str(recording["id"]) == identifier:
-                return self.annotated_recording(recording)
+                return recording
         raise HTTPException(404, "Aufnahme nicht gefunden")
 
-    def annotated_recording(self, recording: dict) -> dict:
-        annotation = self.store.get("label", str(recording["id"]))
+    def recordings(self) -> list[dict]:
+        # Read the small catalogues once, not one SQLite connection per clip.
+        with self.lock:
+            annotations = {row["id"]: row for row in self.store.all("label")}
+            entries = self.store.all("emitter")
+            return [self.annotated_recording(recording, annotations, entries) for recording in self.capture.list_recordings()]
+
+    def annotated_recording(self, recording: dict, annotations=None, entries=None, with_suggestions=True) -> dict:
+        annotation = (annotations.get(str(recording["id"])) if annotations is not None else self.store.get("label", str(recording["id"])))
         if annotation is None:
             glob = recording.get("metadata", {}).get("global", {})
             if glob.get("signalclassifier:label"):
                 annotation = {"recording_id": recording["id"], "label": glob["signalclassifier:label"],
                               "verified": glob.get("signalclassifier:label_verified") is True,
-                              "notes": glob.get("signalclassifier:label_notes", ""), "provenance": "sigmf-import"}
-        return {**recording, "annotation": annotation}
+                              "notes": glob.get("signalclassifier:label_notes", ""),
+                              "provenance": glob.get("signalclassifier:label_provenance", "sigmf-import"),
+                              "suggestion": glob.get("signalclassifier:label_suggestion")}
+        result = {**recording, "annotation": annotation}
+        if with_suggestions:
+            result.update(labels.recording_suggestions(self.store, recording, entries=entries))
+        return result
+
+    def write_labels(self, items: list[tuple[dict, dict]]) -> list[dict]:
+        """Stage metadata first; roll back file replacements if the DB fails."""
+        staged = []
+        total_bytes = 0
+        try:
+            for recording, annotation in items:
+                path = self.recording_path(recording)
+                total_bytes += path.stat().st_size
+                if total_bytes > 32 * 1024**2:
+                    raise ValueError("Metadatenumfang für einen Batch zu groß; kleinere Auswahl verwenden")
+                doc = json.loads(path.read_text(encoding="utf-8"))
+                glob = doc.setdefault("global", {})
+                glob.update({"signalclassifier:label": annotation["label"], "signalclassifier:label_verified": annotation["verified"],
+                             "signalclassifier:label_notes": annotation.get("notes", ""),
+                             "signalclassifier:label_provenance": annotation["provenance"]})
+                extensions = glob.setdefault("core:extensions", [])
+                if not isinstance(extensions, list):
+                    raise ValueError("Ungültige SigMF-Erweiterungsliste")
+                if not any(isinstance(extension, dict) and extension.get("name") == "signalclassifier" for extension in extensions):
+                    extensions.append({"name": "signalclassifier", "version": "1.0.0", "optional": True})
+                if annotation.get("suggestion"):
+                    glob["signalclassifier:label_suggestion"] = annotation["suggestion"]
+                else:
+                    glob.pop("signalclassifier:label_suggestion", None)
+                token = uuid.uuid4().hex
+                temporary = path.with_name(f".{path.name}.{token}.label-stage")
+                backup = path.with_name(f".{path.name}.{token}.label-backup")
+                staged.append((path, temporary, backup))
+                temporary.write_text(json.dumps(doc, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            written = []
+            try:
+                for path, temporary, backup in staged:
+                    path.replace(backup)
+                    written.append((path, backup))
+                    temporary.replace(path)
+                annotations = [value for _, value in items]
+                self.store.put_many("label", annotations)
+            except Exception:
+                for path, backup in reversed(written):
+                    backup.replace(path)
+                raise
+            for _, _, backup in staged:
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    LOG.warning("Label-Metadatensicherung konnte nicht entfernt werden: %s", backup.name)
+            return annotations
+        finally:
+            for _, temporary, _ in staged:
+                temporary.unlink(missing_ok=True)
+
+    def batch_labels(self, payload: BatchLabelInput) -> dict:
+        label = (payload.label or "").strip()
+        if not payload.use_suggestions and not label:
+            raise ValueError("Für ein gemeinsames Batchlabel ein Klassenlabel angeben")
+        if payload.use_suggestions and label:
+            raise ValueError("Entweder individuelle Vorschläge oder ein gemeinsames Label wählen")
+        with self.lock:
+            catalogue = {recording["id"]: recording for recording in self.recordings()}
+            identifiers = list(dict.fromkeys(payload.recording_ids))
+            for identifier in identifiers:
+                clean_id(identifier)
+                if identifier not in catalogue:
+                    raise HTTPException(404, f"Aufnahme nicht gefunden: {identifier}")
+            updates, skipped = [], []
+            now = utcnow()
+            for identifier in identifiers:
+                recording = catalogue[identifier]
+                current = recording.get("annotation") or {}
+                suggestion = recording.get("label_suggestion")
+                if current.get("verified") and not payload.overwrite_confirmed:
+                    skipped.append({"id": identifier, "reason": "Label bereits bestätigt"})
+                    continue
+                if recording.get("error"):
+                    skipped.append({"id": identifier, "reason": "Aufnahmemetadaten sind ungültig"})
+                    continue
+                if payload.use_suggestions and (not suggestion or suggestion.get("ambiguous")):
+                    skipped.append({"id": identifier, "reason": recording.get("label_suggestion_reason") or "Kein eindeutiger Frequenzvorschlag; Label manuell wählen"})
+                    continue
+                selected = suggestion["label"] if payload.use_suggestions else label
+                if payload.use_suggestions and payload.expected_labels is not None and payload.expected_labels.get(identifier) != selected:
+                    skipped.append({"id": identifier, "reason": "Frequenzvorschlag wurde seit der Vorschau geändert; bitte erneut prüfen"})
+                    continue
+                if not isinstance(selected, str) or not selected.strip() or len(selected) > 80:
+                    raise ValueError("Klassenlabel muss 1–80 Zeichen enthalten")
+                annotation = {"id": identifier, "recording_id": identifier, "label": selected.strip(), "verified": payload.verified,
+                              "notes": payload.notes, "updated_at": now,
+                              "provenance": "human-confirmed-frequency-prior" if payload.use_suggestions and payload.verified else "human-confirmed" if payload.verified else "human-provisional"}
+                if payload.use_suggestions:
+                    annotation["suggestion"] = suggestion
+                updates.append((recording, annotation))
+            updated = self.write_labels(updates) if updates else []
+            return {"updated": updated, "skipped": skipped, "count": len(updated), "selected_count": len(identifiers)}
 
     def recording_path(self, recording: dict) -> Path:
         raw = recording.get("metadata_path") or recording.get("path")
@@ -150,6 +283,65 @@ class Runtime:
             return None
         return self.model(selected["model_id"])["model_path"]
 
+    def live_comparison_settings(self):
+        with self.lock:
+            models = [self.model(identifier) for identifier in self.live_model_ids]
+            return {"model_ids": list(self.live_model_ids), "active": bool(models), "sampling": "latest_iq",
+                    "models": [{"id": model["id"], "name": model.get("name", model["id"]),
+                                "topology_id": model.get("topology_id"), "evaluation_available": model.get("evaluation_available", False)} for model in models],
+                    "message": "Live-Stichproben derselben aktuellen IQ-Daten; ohne Referenzlabel keine Live-Genauigkeit."}
+
+    def compare_latest(self, iq, sample_rate, center_frequency, snapshot, primary=None):
+        with self.lock:
+            selected = list(self.live_model_ids)
+        active = self.store.get("active_model", "main") or {}
+        use_priors = self.store.get("settings", "main").get("use_priors", False)
+        observation = (snapshot.get("receiver", {}).get("session_id"), snapshot.get("timestamp"), snapshot.get("sample_index"))
+        source_key = (observation[0], sample_rate, center_frequency)
+        results = []
+        for identifier in selected:
+            model = self.model(identifier)
+            result = {"model_id": identifier, "name": model.get("name", identifier), "classification": None,
+                      "elapsed_ms": None, "real_time_factor": None, "model_segment_length": None, "sample_rate": sample_rate,
+                      "rolling": {"latency_ms_p50": None, "latency_ms_p95": None, "real_time_factor_p95": None, "observations": 0, "warmup": True}, "error": None}
+            try:
+                metadata = ml.load_model_metadata(model["model_path"])
+                length = metadata["segment_length"]
+                result["model_segment_length"] = length
+                if iq is None or not len(iq) or sample_rate <= 0:
+                    result["error"] = "Noch keine IQ-Daten; Empfang starten."
+                    results.append(result)
+                    continue
+                reuse_primary = active.get("model_id") == identifier and primary and not primary.get("explanation")
+                prediction = primary if reuse_primary else ml.classify(
+                    iq[-length:], sample_rate, center_frequency_hz=center_frequency, use_priors=use_priors,
+                    model_path=model["model_path"], attribution=False)
+                duration = min(len(iq), length) / sample_rate
+                full_inference = prediction.get("confidence_kind") == "uncalibrated_model_score" and not prediction.get("skipped_stages")
+                elapsed = prediction["elapsed_ms"]
+                ratio = elapsed / 1000 / duration if full_inference and duration > 0 else None
+                result.update(classification=prediction, elapsed_ms=elapsed, real_time_factor=ratio)
+                with self.lock:
+                    timing = self.live_timings.get(identifier)
+                    if timing is None or timing["source"] != source_key:
+                        timing = {"source": source_key, "calls": 0, "last_observation": None, "values": deque(maxlen=30)}
+                        self.live_timings[identifier] = timing
+                    if full_inference and timing["last_observation"] != observation:
+                        timing["calls"] += 1
+                        timing["last_observation"] = observation
+                        if timing["calls"] > 3:
+                            timing["values"].append((elapsed, ratio))
+                    values = list(timing["values"])
+                    result["rolling"].update(observations=len(values), warmup=timing["calls"] <= 3)
+                    if values:
+                        latencies, ratios = np.asarray(values).T
+                        result["rolling"].update(latency_ms_p50=float(np.median(latencies)), latency_ms_p95=float(np.percentile(latencies, 95)),
+                                                 real_time_factor_p95=float(np.percentile(ratios, 95)))
+            except (ValueError, OSError, RuntimeError, ImportError) as exc:
+                result["error"] = str(exc)
+            results.append(result)
+        return results
+
     def topologies(self):
         catalogue = {item["id"]: item for item in ml.list_topologies()}
         for item in self.store.all("topology"):
@@ -170,20 +362,43 @@ class Runtime:
             with self.lock:
                 self.active_experiment = identifier
             progress({"progress": 0, "stage": "initializing", "started_at": utcnow()})
-            report = ml.run_experiment(config, self.data_dir / "experiments" / identifier, progress=progress)
+            report = ml.run_comparison(config, self.data_dir / "experiments" / identifier, progress=progress)
             if event.is_set():
                 raise ExperimentCancelled()
             report = finite_json(report)
-            model_path = Path(report["model_path"]).resolve()
-            if not model_path.is_dir() or not model_path.is_relative_to(self.data_dir.resolve()):
-                raise ValueError("Experiment hat keinen gültigen Modellordner erzeugt")
-            model_id = uuid.uuid4().hex
-            destination = self.data_dir / "models" / model_id
-            shutil.copytree(model_path, destination)
-            model_metadata = ml.load_model_metadata(destination)
-            self.store.put("model", model_id, finite_json({**model_metadata, "name": config.get("name") or config["topology_id"], "model_path": str(destination), "experiment_id": identifier, "created_at": utcnow(), "metrics": report.get("metrics", {})}))
+            comparison = report["comparison"]
+            model_records, copied = [], []
+            selected_model_id = None
+            try:
+                for result in comparison:
+                    if event.is_set():
+                        raise ExperimentCancelled()
+                    model_path = Path(result["model_path"]).resolve()
+                    if not model_path.is_dir() or not model_path.is_relative_to(self.data_dir.resolve()):
+                        raise ValueError("Experiment hat keinen gültigen Modellordner erzeugt")
+                    model_id = uuid.uuid4().hex
+                    destination = self.data_dir / "models" / model_id
+                    copied.append(destination)
+                    shutil.copytree(model_path, destination)
+                    model_metadata = ml.load_model_metadata(destination)
+                    name = config.get("name") or result["name"]
+                    if len(comparison) > 1:
+                        name = f"{name} · {result['name']}" if config.get("name") else result["name"]
+                    model_records.append(finite_json({**model_metadata, "id": model_id, "name": name,
+                        "model_path": str(destination), "experiment_id": identifier, "created_at": utcnow(), "metrics": result.get("metrics", {}),
+                        "score": result.get("score"), "score_rank": result.get("score_rank"), "accuracy_rank": result.get("accuracy_rank"),
+                        "assessment_hardware": result.get("report", {}).get("hardware")}))
+                    result["model_id"] = model_id
+                    if result["model_path"] == report["model_path"]:
+                        selected_model_id = model_id
+                self.store.put_many("model", model_records)
+            except Exception:
+                for path in copied:
+                    shutil.rmtree(path, ignore_errors=True)
+                raise
+            model_ids = [value["id"] for value in model_records]
             state = self.store.get("experiment", identifier)
-            state.update(status="completed", progress=1, report=report, metrics=report.get("metrics", {}), model_id=model_id, finished_at=utcnow())
+            state.update(status="completed", progress=1, report=report, metrics=report.get("metrics", {}), model_id=selected_model_id, model_ids=model_ids, finished_at=utcnow())
             self.store.put("experiment", identifier, state)
         except ExperimentCancelled:
             state = self.store.get("experiment", identifier)
@@ -220,19 +435,27 @@ async def copy_upload(upload: UploadFile, destination: Path, limit: int) -> int:
 def validate_experiment(config: dict, rt: Runtime) -> dict:
     value = {"source": "synthetic", "topology_id": "feature-lda", "seed": 42, "samples_per_class": 80,
              "segment_length": 2048, "snr_db": [0, 10, 20], "jitter": [0.0], "epochs": 5,
-             "learning_rate": 0.001, "batch_size": 32, "device": "auto", "use_priors": False, **config}
+             "learning_rate": 0.001, "batch_size": 32, "device": "auto", "use_priors": False, "evaluation_mode": "independent", **config}
     if value["source"] not in ("synthetic", "recordings"):
         raise ValueError("Quelle muss synthetic oder recordings sein")
     catalogue = {t["id"]: t for t in rt.topologies()}
-    if value["topology_id"] not in catalogue:
+    identifiers = value.get("topology_ids", [value["topology_id"]])
+    if not isinstance(identifiers, list) or not 1 <= len(identifiers) <= 50 or not all(isinstance(item, str) for item in identifiers):
+        raise ValueError("1–50 Topologien für das Experiment auswählen")
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("Eine Topologie darf pro Vergleich nur einmal ausgewählt sein")
+    if any(identifier not in catalogue for identifier in identifiers):
         raise ValueError("Topologie unbekannt")
-    value["topology"] = catalogue[value["topology_id"]]
+    value.update(topology_id=identifiers[0], topology_ids=identifiers,
+                 topology=catalogue[identifiers[0]], topologies=[catalogue[identifier] for identifier in identifiers])
     for key, low, high in (("seed", 0, 2**31 - 1), ("samples_per_class", 12, 1000), ("segment_length", 256, 65536), ("epochs", 1, 100), ("batch_size", 4, 256)):
         number = value[key]
         if isinstance(number, bool) or not isinstance(number, int) or not low <= number <= high:
             raise ValueError(f"{key}: Ganzzahl zwischen {low} und {high} erforderlich")
     if value["device"] not in ("auto", "cpu", "cuda"):
         raise ValueError("device muss auto, cpu oder cuda sein")
+    if value["evaluation_mode"] not in ("independent", "training_only"):
+        raise ValueError("Bewertung muss independent oder training_only sein")
     if not isinstance(value["use_priors"], bool):
         raise ValueError("use_priors muss boolesch sein")
     if not isinstance(value["learning_rate"], (int, float)) or not 1e-5 <= value["learning_rate"] <= 0.1:
@@ -251,11 +474,17 @@ def validate_experiment(config: dict, rt: Runtime) -> dict:
     value.pop("recordings", None)  # Never accept arbitrary filesystem paths from a client.
     if value["source"] == "recordings":
         ids = value.get("recording_ids", [])
-        if not isinstance(ids, list) or not 6 <= len(ids) <= 1000:
-            raise ValueError("Mindestens drei unabhängige bestätigte Aufnahmen je Klasse für Training, Validierung und Test benötigt")
+        if not isinstance(ids, list) or not 2 <= len(ids) <= 1000:
+            raise ValueError("Mindestens zwei bestätigte Aufnahmen unterschiedlicher Klassen auswählen")
+        if not all(isinstance(identifier, str) for identifier in ids):
+            raise ValueError("Aufnahmekennungen müssen Zeichenketten sein")
         recordings = []
+        catalogue = {recording["id"]: recording for recording in rt.recordings()}
         for identifier in dict.fromkeys(ids):
-            recording = rt.recording(identifier)
+            clean_id(identifier)
+            if identifier not in catalogue:
+                raise HTTPException(404, f"Aufnahme nicht gefunden: {identifier}")
+            recording = catalogue[identifier]
             annotation = recording.get("annotation") or {}
             label = str(annotation.get("label", "")).strip()
             if not annotation.get("verified") or not label:
@@ -264,9 +493,9 @@ def validate_experiment(config: dict, rt: Runtime) -> dict:
             meta = json.loads(path.read_text(encoding="utf-8"))
             global_meta = meta.get("global", {})
             group = global_meta.get("signalclassifier:group_id") or global_meta.get("sc:origin_group_id") or global_meta.get("signalclassifier:session_id") or global_meta.get("sc:session_id") or global_meta.get("signalclassifier:parent_recording_id") or recording.get("group_id") or identifier
-            recordings.append({"path": str(path), "metadata_path": str(path), "label": label, "group_id": str(group), "id": identifier})
+            recordings.append({"path": str(path), "metadata_path": str(path), "label": label, "group_id": str(group), "id": identifier, "verified": True})
         value["recordings"] = recordings
-    return value
+    return ml.validate_experiment_config(value)
 
 
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
@@ -302,11 +531,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     async def runtime_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
+    @app.exception_handler(OSError)
+    async def file_error(request, exc):
+        LOG.error("Dateizugriff fehlgeschlagen: %s", exc)
+        return JSONResponse({"detail": f"Dateizugriff fehlgeschlagen: {exc}"}, status_code=503)
+
     @app.get("/api/status")
     def status():
         recordings = runtime.capture.list_recordings()
+        annotations = {row["id"]: row for row in runtime.store.all("label")}
         return finite_json({"version": __version__, "receiver": runtime.capture.status(), "hardware": hardware_info(),
-            "counts": {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r).get("annotation")) for r in recordings),
+            "counts": {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r, annotations, with_suggestions=False).get("annotation")) for r in recordings),
                        "experiments": len(runtime.store.all("experiment")), "models": len(runtime.store.all("model"))},
             "active_experiment": runtime.store.get("experiment", runtime.active_experiment) if runtime.active_experiment else None,
             "active_model": runtime.store.get("active_model", "main")})
@@ -337,11 +572,36 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             length = ml.load_model_metadata(model_path)["segment_length"] if model_path else 16384
             snapshot["classification"] = finite_json(ml.classify(iq[-length:], sample_rate,
                 center_frequency_hz=center_frequency, use_priors=settings.get("use_priors", False), model_path=model_path))
+            snapshot["classification"].update(center_frequency_hz=center_frequency, sample_rate=sample_rate)
+            channel = snapshot.get("classification_channel") or {}
+            if channel.get("center_frequency_hz") == center_frequency and channel.get("sample_rate") == sample_rate:
+                snapshot["classification"]["bandwidth_hz"] = channel.get("bandwidth_hz")
+        snapshot["classification_comparison"] = finite_json(runtime.compare_latest(iq, sample_rate, center_frequency, snapshot, snapshot.get("classification")))
         return finite_json(snapshot)
+
+    @app.get("/api/live/compare")
+    def live_comparison():
+        return runtime.live_comparison_settings()
+
+    @app.post("/api/live/compare")
+    def set_live_comparison(payload: LiveComparisonInput):
+        if len(set(payload.model_ids)) != len(payload.model_ids):
+            raise ValueError("Ein Modell darf im Live-Vergleich nur einmal vorkommen")
+        for identifier in payload.model_ids:
+            model = runtime.model(identifier)
+            ml.load_model_metadata(model["model_path"])
+        with runtime.lock:
+            runtime.live_model_ids = list(payload.model_ids)
+            runtime.live_timings = {identifier: value for identifier, value in runtime.live_timings.items() if identifier in payload.model_ids}
+        return runtime.live_comparison_settings()
 
     @app.get("/api/recordings")
     def recordings():
-        return finite_json([runtime.annotated_recording(r) for r in runtime.capture.list_recordings()])
+        return finite_json(runtime.recordings())
+
+    @app.post("/api/recordings/labels/batch")
+    def batch_labels(payload: BatchLabelInput):
+        return finite_json(runtime.batch_labels(payload))
 
     @app.post("/api/recordings/import")
     async def import_recording(metadata: UploadFile = File(...), data: UploadFile = File(...)):
@@ -393,18 +653,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/recordings/{identifier}/label")
     def label_recording(identifier: str, payload: LabelInput):
-        runtime.recording(identifier)
-        result = runtime.store.put("label", identifier, {**payload.model_dump(), "recording_id": identifier, "updated_at": utcnow(), "provenance": "human-confirmed" if payload.verified else "human-provisional"})
-        # Carry labels with SigMF exports to the workstation.
-        path = runtime.recording_path(runtime.recording(identifier))
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        doc.setdefault("global", {})["signalclassifier:label"] = payload.label
-        doc["global"]["signalclassifier:label_verified"] = payload.verified
-        doc["global"]["signalclassifier:label_notes"] = payload.notes
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(doc, ensure_ascii=False, allow_nan=False), encoding="utf-8")
-        temporary.replace(path)
-        return result
+        with runtime.lock:
+            recording = runtime.recording(identifier)
+            annotation = {**payload.model_dump(), "id": identifier, "recording_id": identifier,
+                          "updated_at": utcnow(), "provenance": "human-confirmed" if payload.verified else "human-provisional"}
+            return runtime.write_labels([(recording, annotation)])[0]
 
     @app.post("/api/recordings/{identifier}/classify")
     def classify_recording(identifier: str, payload: dict | None = None):
@@ -458,9 +711,22 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def experiments():
         return runtime.store.all("experiment")
 
+    @app.post("/api/experiments/validate")
+    def validate_dataset(payload: dict):
+        try:
+            config = validate_experiment(payload, runtime)
+            return finite_json(ml.dataset_readiness(config))
+        except (ValueError, HTTPException, OSError) as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            return {"ready": False, "evaluation_mode": payload.get("evaluation_mode", "independent"),
+                    "classes": [], "group_count": 0, "errors": [str(detail)], "warnings": []}
+
     @app.post("/api/experiments")
     def start_experiment(payload: dict):
         config = validate_experiment(payload, runtime)
+        readiness = ml.dataset_readiness(config)
+        if not readiness["ready"]:
+            raise ValueError("; ".join(readiness["errors"]))
         with runtime.lock:
             if any(e.get("status") in ("queued", "running", "cancelling") for e in runtime.store.all("experiment")):
                 raise HTTPException(409, "Es läuft bereits ein Experiment")
@@ -528,9 +794,20 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                     with archive.open(item) as incoming, (unpacked / item.filename).open("wb") as output:
                         shutil.copyfileobj(incoming, output, length=1024 * 1024)
             metadata = ml.validate_model(unpacked)
+            report = {}
+            report_path = unpacked / "report.json"
+            if report_path.is_file():
+                if report_path.stat().st_size > 16 * 1024**2:
+                    raise ValueError("Modellbericht überschreitet 16 MiB")
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                if not isinstance(report, dict):
+                    raise ValueError("Modellbericht muss ein JSON-Objekt sein")
             destination = directory / "models" / identifier
             shutil.move(str(unpacked), destination)
-            return runtime.store.put("model", identifier, finite_json({**metadata, "name": metadata.get("name", "Importiertes Modell"), "model_path": str(destination), "created_at": utcnow(), "imported": True}))
+            return runtime.store.put("model", identifier, finite_json({**metadata,
+                "name": metadata.get("name") or metadata.get("topology", {}).get("name") or "Importiertes Modell",
+                "model_path": str(destination), "created_at": utcnow(), "imported": True,
+                "metrics": report.get("metrics", {}), "score": report.get("score"), "assessment_hardware": report.get("hardware")}))
         except (zipfile.BadZipFile, KeyError) as exc:
             raise ValueError(f"Ungültiges Modellarchiv: {exc}") from exc
         finally:
