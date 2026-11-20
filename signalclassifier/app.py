@@ -1,0 +1,607 @@
+"""Local API and experiment orchestration. Hardware and ML remain optional."""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import logging
+import math
+import os
+import re
+import shutil
+import tempfile
+import threading
+import uuid
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import numpy as np
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from . import __version__, labels, ml
+from .db import Store, utcnow
+from .drones import Bridge, DroneStore, capabilities, example_payload
+from .receivers import CaptureManager
+from .sigmf import read_recording
+
+LOG = logging.getLogger(__name__)
+IDENTIFIER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+
+
+def clean_id(value: str) -> str:
+    if not isinstance(value, str) or not IDENTIFIER.fullmatch(value) or ".." in value:
+        raise HTTPException(400, "Ungültige Kennung")
+    return value
+
+
+def finite_json(value):
+    if isinstance(value, dict):
+        return {str(k): finite_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [finite_json(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return finite_json(value.tolist())
+    if isinstance(value, np.generic):
+        return finite_json(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+class EmitterInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    service: str = Field(default="Unbekannt", max_length=200)
+    standard: str = Field(default="Unbekannt", max_length=200)
+    modulation: str = Field(default="Unbekannt", max_length=100)
+    frequency_min_hz: float = Field(ge=0, le=100e9, allow_inf_nan=False)
+    frequency_max_hz: float = Field(ge=0, le=100e9, allow_inf_nan=False)
+    region: str = Field(default="DE-BY", max_length=100)
+    confidence: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
+    source: str = Field(default="Benutzereintrag", max_length=1000)
+    notes: str = Field(default="", max_length=4000)
+
+
+class LabelInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(min_length=1, max_length=80)
+    verified: bool = False
+    notes: str = Field(default="", max_length=4000)
+
+
+class SettingsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    use_priors: bool = False
+    region: str = Field(default="DE-BY · Bamberg / Nürnberg", max_length=200)
+    station_lat: float | None = Field(default=49.9, ge=-90, le=90, allow_inf_nan=False)
+    station_lon: float | None = Field(default=10.9, ge=-180, le=180, allow_inf_nan=False)
+    online_map: bool = False
+
+
+class ExperimentCancelled(Exception):
+    pass
+
+
+class Runtime:
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+        for name in ("recordings", "models", "experiments", "topologies", "exports"):
+            (data_dir / name).mkdir(parents=True, exist_ok=True)
+        self.store = Store(data_dir / "library.sqlite3")
+        labels.seed(self.store)
+        self.capture = CaptureManager(data_dir)
+        self.drones = DroneStore(data_dir / "drones.sqlite3")
+        self.bridge = Bridge(self.drones)
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="experiment")
+        self.lock = threading.RLock()
+        self.cancel_events: dict[str, threading.Event] = {}
+        self.active_experiment = None
+        self.benchmark = None
+        # A previous process cannot still execute these jobs.
+        for run in self.store.all("experiment"):
+            if run.get("status") in ("running", "queued", "cancelling"):
+                run.update(status="interrupted", error="Anwendung während des Experiments beendet.", finished_at=utcnow())
+                self.store.put("experiment", run["id"], run)
+        if self.store.get("settings", "main") is None:
+            self.store.put("settings", "main", SettingsInput().model_dump())
+
+    def recording(self, identifier: str) -> dict:
+        clean_id(identifier)
+        for recording in self.capture.list_recordings():
+            if str(recording["id"]) == identifier:
+                return self.annotated_recording(recording)
+        raise HTTPException(404, "Aufnahme nicht gefunden")
+
+    def annotated_recording(self, recording: dict) -> dict:
+        annotation = self.store.get("label", str(recording["id"]))
+        if annotation is None:
+            glob = recording.get("metadata", {}).get("global", {})
+            if glob.get("signalclassifier:label"):
+                annotation = {"recording_id": recording["id"], "label": glob["signalclassifier:label"],
+                              "verified": glob.get("signalclassifier:label_verified") is True,
+                              "notes": glob.get("signalclassifier:label_notes", ""), "provenance": "sigmf-import"}
+        return {**recording, "annotation": annotation}
+
+    def recording_path(self, recording: dict) -> Path:
+        raw = recording.get("metadata_path") or recording.get("path")
+        path = Path(raw) if raw else self.data_dir / "recordings" / (recording["id"] + ".sigmf-meta")
+        if not path.is_absolute():
+            path = self.data_dir / "recordings" / path
+        if not path.resolve().is_relative_to((self.data_dir / "recordings").resolve()):
+            raise HTTPException(400, "Aufnahme liegt außerhalb der Bibliothek")
+        return path
+
+    def model(self, identifier: str) -> dict:
+        value = self.store.get("model", clean_id(identifier))
+        if value is None:
+            raise HTTPException(404, "Modell nicht gefunden")
+        return value
+
+    def active_model_path(self):
+        selected = self.store.get("active_model", "main")
+        if not selected:
+            return None
+        return self.model(selected["model_id"])["model_path"]
+
+    def topologies(self):
+        catalogue = {item["id"]: item for item in ml.list_topologies()}
+        for item in self.store.all("topology"):
+            catalogue[item["id"]] = item
+        return list(catalogue.values())
+
+    def run(self, identifier: str, config: dict):
+        event = self.cancel_events[identifier]
+        def progress(value):
+            if event.is_set():
+                raise ExperimentCancelled()
+            state = self.store.get("experiment", identifier)
+            if isinstance(value, dict):
+                state.update(value)
+            state["status"] = "running"
+            self.store.put("experiment", identifier, finite_json(state))
+        try:
+            with self.lock:
+                self.active_experiment = identifier
+            progress({"progress": 0, "stage": "initializing", "started_at": utcnow()})
+            report = ml.run_experiment(config, self.data_dir / "experiments" / identifier, progress=progress)
+            if event.is_set():
+                raise ExperimentCancelled()
+            report = finite_json(report)
+            model_path = Path(report["model_path"]).resolve()
+            if not model_path.is_dir() or not model_path.is_relative_to(self.data_dir.resolve()):
+                raise ValueError("Experiment hat keinen gültigen Modellordner erzeugt")
+            model_id = uuid.uuid4().hex
+            destination = self.data_dir / "models" / model_id
+            shutil.copytree(model_path, destination)
+            model_metadata = ml.load_model_metadata(destination)
+            self.store.put("model", model_id, finite_json({**model_metadata, "name": config.get("name") or config["topology_id"], "model_path": str(destination), "experiment_id": identifier, "created_at": utcnow(), "metrics": report.get("metrics", {})}))
+            state = self.store.get("experiment", identifier)
+            state.update(status="completed", progress=1, report=report, metrics=report.get("metrics", {}), model_id=model_id, finished_at=utcnow())
+            self.store.put("experiment", identifier, state)
+        except ExperimentCancelled:
+            state = self.store.get("experiment", identifier)
+            state.update(status="cancelled", finished_at=utcnow())
+            self.store.put("experiment", identifier, state)
+        except Exception as exc:
+            LOG.exception("Experiment %s failed", identifier)
+            state = self.store.get("experiment", identifier)
+            state.update(status="failed", error=str(exc), finished_at=utcnow())
+            self.store.put("experiment", identifier, state)
+        finally:
+            with self.lock:
+                self.active_experiment = None
+
+    def close(self):
+        for event in self.cancel_events.values():
+            event.set()
+        self.capture.stop()
+        self.bridge.stop()
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def copy_upload(upload: UploadFile, destination: Path, limit: int) -> int:
+    size = 0
+    with destination.open("wb") as output:
+        while block := await upload.read(1024 * 1024):
+            size += len(block)
+            if size > limit:
+                raise HTTPException(413, f"Datei überschreitet die Grenze von {limit // (1024 * 1024)} MiB")
+            output.write(block)
+    return size
+
+
+def validate_experiment(config: dict, rt: Runtime) -> dict:
+    value = {"source": "synthetic", "topology_id": "feature-lda", "seed": 42, "samples_per_class": 80,
+             "segment_length": 2048, "snr_db": [0, 10, 20], "jitter": [0.0], "epochs": 5,
+             "learning_rate": 0.001, "batch_size": 32, "device": "auto", "use_priors": False, **config}
+    if value["source"] not in ("synthetic", "recordings"):
+        raise ValueError("Quelle muss synthetic oder recordings sein")
+    catalogue = {t["id"]: t for t in rt.topologies()}
+    if value["topology_id"] not in catalogue:
+        raise ValueError("Topologie unbekannt")
+    value["topology"] = catalogue[value["topology_id"]]
+    for key, low, high in (("seed", 0, 2**31 - 1), ("samples_per_class", 12, 1000), ("segment_length", 256, 65536), ("epochs", 1, 100), ("batch_size", 4, 256)):
+        number = value[key]
+        if isinstance(number, bool) or not isinstance(number, int) or not low <= number <= high:
+            raise ValueError(f"{key}: Ganzzahl zwischen {low} und {high} erforderlich")
+    if value["device"] not in ("auto", "cpu", "cuda"):
+        raise ValueError("device muss auto, cpu oder cuda sein")
+    if not isinstance(value["use_priors"], bool):
+        raise ValueError("use_priors muss boolesch sein")
+    if not isinstance(value["learning_rate"], (int, float)) or not 1e-5 <= value["learning_rate"] <= 0.1:
+        raise ValueError("Ungültige Lernrate")
+    if len(str(value.get("name", ""))) > 200:
+        raise ValueError("Experimentname zu lang")
+    for key, low, high in (("snr_db", -30, 80), ("jitter", 0, 2)):
+        entries = value[key]
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 20 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not low <= x <= high for x in entries):
+            raise ValueError(f"{key}: 1–20 Zahlen im Bereich {low} bis {high} erforderlich")
+    # Prevent accidentally reserving many gigabytes on a laptop.
+    if value["samples_per_class"] * value["segment_length"] > 64_000_000:
+        raise ValueError("Datensatz zu groß: Segmentlänge oder Anzahl reduzieren (64 Mio. Samples je Klasse)")
+    if len(value["snr_db"]) * len(value["jitter"]) > 60:
+        raise ValueError("Maximal 60 SNR-/Jitter-Kombinationen pro Experiment")
+    value.pop("recordings", None)  # Never accept arbitrary filesystem paths from a client.
+    if value["source"] == "recordings":
+        ids = value.get("recording_ids", [])
+        if not isinstance(ids, list) or not 6 <= len(ids) <= 1000:
+            raise ValueError("Mindestens drei unabhängige bestätigte Aufnahmen je Klasse für Training, Validierung und Test benötigt")
+        recordings = []
+        for identifier in dict.fromkeys(ids):
+            recording = rt.recording(identifier)
+            annotation = recording.get("annotation") or {}
+            label = str(annotation.get("label", "")).strip()
+            if not annotation.get("verified") or not label:
+                raise ValueError("Alle Trainingsaufnahmen benötigen ein bestätigtes Klassenlabel")
+            path = rt.recording_path(recording)
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            global_meta = meta.get("global", {})
+            group = global_meta.get("signalclassifier:group_id") or global_meta.get("sc:origin_group_id") or global_meta.get("signalclassifier:session_id") or global_meta.get("sc:session_id") or global_meta.get("signalclassifier:parent_recording_id") or recording.get("group_id") or identifier
+            recordings.append({"path": str(path), "metadata_path": str(path), "label": label, "group_id": str(group), "id": identifier})
+        value["recordings"] = recordings
+    return value
+
+
+def create_app(data_dir: str | Path | None = None) -> FastAPI:
+    directory = Path(data_dir or os.environ.get("SIGNALCLASSIFIER_DATA", Path.home() / ".signalclassifier")).expanduser().resolve()
+    runtime = Runtime(directory)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        runtime.close()
+
+    app = FastAPI(title="SignalClassifier", version=__version__, lifespan=lifespan)
+    app.state.runtime = runtime
+
+    @app.middleware("http")
+    async def local_api_security(request: Request, call_next):
+        # Browser requests from unrelated origins must not operate local USB devices.
+        origin = request.headers.get("origin")
+        if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
+            from urllib.parse import urlsplit
+            if urlsplit(origin).netloc != request.headers.get("host"):
+                return JSONResponse({"detail": "Fremder Browser-Ursprung nicht erlaubt"}, status_code=403)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        return response
+
+    @app.exception_handler(ValueError)
+    async def value_error(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.exception_handler(RuntimeError)
+    async def runtime_error(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.get("/api/status")
+    def status():
+        recordings = runtime.capture.list_recordings()
+        return finite_json({"version": __version__, "receiver": runtime.capture.status(), "hardware": hardware_info(),
+            "counts": {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r).get("annotation")) for r in recordings),
+                       "experiments": len(runtime.store.all("experiment")), "models": len(runtime.store.all("model"))},
+            "active_experiment": runtime.store.get("experiment", runtime.active_experiment) if runtime.active_experiment else None,
+            "active_model": runtime.store.get("active_model", "main")})
+
+    @app.get("/api/receiver/status")
+    def receiver_status():
+        return finite_json(runtime.capture.status())
+
+    @app.post("/api/receiver/start")
+    def receiver_start(config: dict):
+        config = dict(config)
+        config.pop("recording_path", None)
+        if config.get("source") == "recording":
+            config["recording_path"] = str(runtime.recording_path(runtime.recording(config.get("recording_id", ""))))
+        return finite_json(runtime.capture.start(config))
+
+    @app.post("/api/receiver/stop")
+    def receiver_stop():
+        return finite_json(runtime.capture.stop())
+
+    @app.get("/api/spectrum")
+    def spectrum():
+        snapshot = runtime.capture.snapshot()
+        iq, sample_rate, center_frequency = runtime.capture.inference_segment()
+        if iq is not None and len(iq):
+            settings = runtime.store.get("settings", "main")
+            model_path = runtime.active_model_path()
+            length = ml.load_model_metadata(model_path)["segment_length"] if model_path else 16384
+            snapshot["classification"] = finite_json(ml.classify(iq[-length:], sample_rate,
+                center_frequency_hz=center_frequency, use_priors=settings.get("use_priors", False), model_path=model_path))
+        return finite_json(snapshot)
+
+    @app.get("/api/recordings")
+    def recordings():
+        return finite_json([runtime.annotated_recording(r) for r in runtime.capture.list_recordings()])
+
+    @app.post("/api/recordings/import")
+    async def import_recording(metadata: UploadFile = File(...), data: UploadFile = File(...)):
+        identifier = uuid.uuid4().hex
+        temp_dir = Path(tempfile.mkdtemp(prefix="import-", dir=directory))
+        try:
+            meta_path = temp_dir / (identifier + ".sigmf-meta")
+            data_path = temp_dir / (identifier + ".sigmf-data")
+            await copy_upload(metadata, meta_path, 4 * 1024 * 1024)
+            size = await copy_upload(data, data_path, 8 * 1024**3)
+            doc = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not isinstance(doc, dict) or not isinstance(doc.get("global"), dict):
+                raise ValueError("SigMF-Metadaten benötigen ein global-Objekt")
+            global_meta = doc.get("global", {})
+            datatype = global_meta.get("core:datatype")
+            sample_bytes = {"cf32_le": 8, "ci16_le": 4}.get(datatype)
+            if sample_bytes is None or size == 0 or size % sample_bytes:
+                raise ValueError("SigMF: cf32_le oder ci16_le und vollständige IQ-Samples erforderlich")
+            if global_meta.get("core:num_channels", 1) != 1:
+                raise ValueError("Nur einkanalige IQ-Aufnahmen werden unterstützt")
+            global_meta["core:dataset"] = data_path.name
+            global_meta["signalclassifier:imported_at"] = utcnow()
+            if not (global_meta.get("signalclassifier:session_id") or global_meta.get("sc:session_id")):
+                with data_path.open("rb") as source_file:
+                    fingerprint = hashlib.file_digest(source_file, "sha256").hexdigest()
+                global_meta["signalclassifier:session_id"] = "sha256-" + fingerprint
+            # Validate bounded data against the reader before committing files.
+            meta_path.write_text(json.dumps(doc, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            read_recording(meta_path, count=1024)
+            for path in (data_path, meta_path):
+                shutil.move(str(path), directory / "recordings" / path.name)
+            return runtime.recording(identifier)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            await metadata.close()
+            await data.close()
+
+    @app.get("/api/recordings/{identifier}/download")
+    def download_recording(identifier: str):
+        path = runtime.recording_path(runtime.recording(identifier))
+        data_path = path.with_suffix(".sigmf-data")
+        destination = directory / "exports" / (clean_id(identifier) + ".sigmf.zip")
+        with runtime.lock:
+            with zipfile.ZipFile(destination.with_suffix(".tmp"), "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.write(path, path.name)
+                archive.write(data_path, data_path.name)
+            destination.with_suffix(".tmp").replace(destination)
+        return FileResponse(destination, filename=destination.name)
+
+    @app.post("/api/recordings/{identifier}/label")
+    def label_recording(identifier: str, payload: LabelInput):
+        runtime.recording(identifier)
+        result = runtime.store.put("label", identifier, {**payload.model_dump(), "recording_id": identifier, "updated_at": utcnow(), "provenance": "human-confirmed" if payload.verified else "human-provisional"})
+        # Carry labels with SigMF exports to the workstation.
+        path = runtime.recording_path(runtime.recording(identifier))
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc.setdefault("global", {})["signalclassifier:label"] = payload.label
+        doc["global"]["signalclassifier:label_verified"] = payload.verified
+        doc["global"]["signalclassifier:label_notes"] = payload.notes
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(doc, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        temporary.replace(path)
+        return result
+
+    @app.post("/api/recordings/{identifier}/classify")
+    def classify_recording(identifier: str, payload: dict | None = None):
+        payload = payload or {}
+        path = runtime.recording_path(runtime.recording(identifier))
+        model_path = runtime.model(payload["model_id"])["model_path"] if payload.get("model_id") else runtime.active_model_path()
+        length = ml.load_model_metadata(model_path)["segment_length"] if model_path else 16384
+        iq, metadata = read_recording(path, count=length)
+        glob = metadata.get("global", metadata)
+        captures = metadata.get("captures", [{}])
+        return finite_json(ml.classify(iq, glob.get("core:sample_rate", metadata.get("sample_rate", 1)), center_frequency_hz=captures[0].get("core:frequency"), use_priors=bool(payload.get("use_priors", False)), model_path=model_path, explain=True))
+
+    @app.get("/api/emitters")
+    def emitters():
+        return runtime.store.all("emitter")
+
+    @app.post("/api/emitters")
+    def create_emitter(payload: EmitterInput):
+        if payload.frequency_max_hz < payload.frequency_min_hz:
+            raise ValueError("Obergrenze liegt unter der Untergrenze")
+        return runtime.store.put("emitter", uuid.uuid4().hex, {**payload.model_dump(), "verified": False, "created_at": utcnow()})
+
+    @app.get("/api/labels")
+    def get_labels():
+        return runtime.store.all("label")
+
+    @app.get("/api/labels/suggest")
+    def suggest(frequency_hz: float):
+        if not math.isfinite(frequency_hz) or not 0 <= frequency_hz <= 100e9:
+            raise ValueError("Ungültige Frequenz")
+        return {"suggestions": labels.suggest(runtime.store, frequency_hz)}
+
+    @app.get("/api/topologies")
+    def topologies():
+        return finite_json(runtime.topologies())
+
+    @app.post("/api/topologies")
+    def save_topology(payload: dict):
+        result = ml.save_topology(payload, directory / "topologies")
+        return runtime.store.put("topology", result["id"], finite_json(result))
+
+    @app.get("/api/topologies/{identifier}/download")
+    def download_topology(identifier: str):
+        clean_id(identifier)
+        for value in runtime.topologies():
+            if value["id"] == identifier:
+                return JSONResponse(value, headers={"Content-Disposition": f'attachment; filename="{identifier}.json"'})
+        raise HTTPException(404, "Topologie nicht gefunden")
+
+    @app.get("/api/experiments")
+    def experiments():
+        return runtime.store.all("experiment")
+
+    @app.post("/api/experiments")
+    def start_experiment(payload: dict):
+        config = validate_experiment(payload, runtime)
+        with runtime.lock:
+            if any(e.get("status") in ("queued", "running", "cancelling") for e in runtime.store.all("experiment")):
+                raise HTTPException(409, "Es läuft bereits ein Experiment")
+            identifier = uuid.uuid4().hex
+            state = runtime.store.put("experiment", identifier, {"name": config.get("name") or "AM / FM", "status": "queued", "config": config, "progress": 0, "created_at": utcnow()})
+            runtime.cancel_events[identifier] = threading.Event()
+            runtime.executor.submit(runtime.run, identifier, config)
+        return state
+
+    @app.get("/api/experiments/{identifier}")
+    def experiment(identifier: str):
+        value = runtime.store.get("experiment", clean_id(identifier))
+        if value is None:
+            raise HTTPException(404, "Experiment nicht gefunden")
+        return value
+
+    @app.get("/api/experiments/{identifier}/download")
+    def download_experiment(identifier: str):
+        value = experiment(identifier)
+        return JSONResponse(value, headers={"Content-Disposition": f'attachment; filename="experiment-{identifier}.json"'})
+
+    @app.post("/api/experiments/{identifier}/cancel")
+    def cancel_experiment(identifier: str):
+        value = experiment(identifier)
+        if value["status"] not in ("queued", "running", "cancelling"):
+            return value
+        runtime.cancel_events[identifier].set()
+        value["status"] = "cancelling"
+        return runtime.store.put("experiment", identifier, value)
+
+    @app.get("/api/models")
+    def models():
+        return runtime.store.all("model")
+
+    @app.get("/api/models/{identifier}/download")
+    def download_model(identifier: str):
+        value = runtime.model(identifier)
+        source = Path(value["model_path"])
+        destination = directory / "exports" / (identifier + ".model.zip")
+        with runtime.lock:
+            with zipfile.ZipFile(destination.with_suffix(".tmp"), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(source.rglob("*")):
+                    if path.is_file() and not path.is_symlink():
+                        archive.write(path, path.relative_to(source).as_posix())
+            destination.with_suffix(".tmp").replace(destination)
+        return FileResponse(destination, filename=destination.name)
+
+    @app.post("/api/models/import")
+    async def import_model(file: UploadFile = File(...)):
+        identifier = uuid.uuid4().hex
+        temporary = Path(tempfile.mkdtemp(prefix="model-import-", dir=directory))
+        try:
+            archive_path = temporary / "upload.zip"
+            await copy_upload(file, archive_path, 512 * 1024**2)
+            unpacked = temporary / "unpacked"
+            unpacked.mkdir()
+            with zipfile.ZipFile(archive_path) as archive:
+                items = archive.infolist()
+                if len(items) > 50 or sum(item.file_size for item in items) > 1024**3:
+                    raise ValueError("Modellarchiv überschreitet die Größenbegrenzung")
+                allowed = {"model.json", "topology.json", "report.json", "weights.npz", "weights.pt", "preprocessing.json", "normalization.npz"}
+                for item in items:
+                    if item.filename not in allowed or item.is_dir() or (item.external_attr >> 16) & 0o170000 == 0o120000:
+                        raise ValueError("Modellarchiv enthält nicht unterstützte Dateien")
+                    with archive.open(item) as incoming, (unpacked / item.filename).open("wb") as output:
+                        shutil.copyfileobj(incoming, output, length=1024 * 1024)
+            metadata = ml.validate_model(unpacked)
+            destination = directory / "models" / identifier
+            shutil.move(str(unpacked), destination)
+            return runtime.store.put("model", identifier, finite_json({**metadata, "name": metadata.get("name", "Importiertes Modell"), "model_path": str(destination), "created_at": utcnow(), "imported": True}))
+        except (zipfile.BadZipFile, KeyError) as exc:
+            raise ValueError(f"Ungültiges Modellarchiv: {exc}") from exc
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+            await file.close()
+
+    @app.post("/api/models/{identifier}/activate")
+    def activate_model(identifier: str):
+        model = runtime.model(identifier)
+        ml.load_model_metadata(model["model_path"])
+        return runtime.store.put("active_model", "main", {"model_id": identifier, "name": model.get("name"), "activated_at": utcnow()})
+
+    @app.get("/api/benchmark")
+    def benchmark():
+        with runtime.lock:
+            if runtime.benchmark is None:
+                runtime.benchmark = finite_json(ml.benchmark_hardware())
+            return runtime.benchmark
+
+    @app.get("/api/drones/capabilities")
+    def drone_capabilities():
+        return capabilities()
+
+    @app.get("/api/drones/tracks")
+    def tracks():
+        return finite_json(runtime.drones.tracks())
+
+    @app.post("/api/drones/ingest")
+    def ingest(payload: dict):
+        return finite_json(runtime.drones.ingest(payload))
+
+    @app.get("/api/drones/example")
+    def drone_example():
+        return example_payload()
+
+    @app.get("/api/drones/bridge")
+    def bridge_status():
+        return runtime.bridge.status()
+
+    @app.post("/api/drones/bridge/start")
+    def bridge_start(payload: dict | None = None):
+        return runtime.bridge.start(payload or {})
+
+    @app.post("/api/drones/bridge/stop")
+    def bridge_stop():
+        return runtime.bridge.stop()
+
+    @app.get("/api/settings")
+    def settings():
+        return runtime.store.get("settings", "main")
+
+    @app.put("/api/settings")
+    def save_settings(payload: SettingsInput):
+        return runtime.store.put("settings", "main", payload.model_dump())
+
+    static = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=static), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def index():
+        return FileResponse(static / "index.html")
+
+    return app
+
+
+def hardware_info():
+    import importlib.util
+    import platform
+    import psutil
+    result = {"platform": platform.platform(), "cpu": platform.processor() or platform.machine(), "logical_cpus": os.cpu_count(),
+              "ram_bytes": psutil.virtual_memory().total, "torch_available": bool(importlib.util.find_spec("torch")),
+              "pluto_driver": bool(importlib.util.find_spec("adi")), "rsp1a_driver": bool(importlib.util.find_spec("SoapySDR"))}
+    # Importing torch on every status poll is expensive. GPU details are in benchmark.
+    return result
