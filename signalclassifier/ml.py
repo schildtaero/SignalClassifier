@@ -8,11 +8,15 @@ from __future__ import annotations
 import hashlib
 import functools
 import copy
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
+import importlib.metadata
 import json
 import math
 import os
 import platform
+import sys
 import time
 import zipfile
 from pathlib import Path
@@ -23,6 +27,7 @@ from scipy import signal, __version__ as scipy_version
 from . import __version__
 from .topologies import list_topologies, save_topology, validate_topology
 from .optimization import normalize_optimization, sample_configurations
+from .execution import normalize_execution, get_current_execution, get_wait_seconds, cpu_benchmark_phase, execute_jobs, ExecutionCancelled
 
 CLASSES = ["AM", "FM"]
 FEATURE_NAMES = ["amplitude_cv", "amplitude_kurtosis", "phase_std", "phase_dispersion",
@@ -31,6 +36,17 @@ FEATURE_NAMES = ["amplitude_cv", "amplitude_kurtosis", "phase_std", "phase_dispe
 _SCHEMA = 1
 MAX_RECORDINGS = 1000
 MAX_SEGMENTS_PER_SPLIT = 4096
+_EXECUTION_CONTEXT = contextvars.ContextVar("signalclassifier_ml_execution", default=None)
+_DATASET_EXECUTION = contextvars.ContextVar("signalclassifier_ml_dataset_execution", default=None)
+PREPROCESSING_PARALLEL_THRESHOLD = 32
+
+
+def _worker_settings():
+    context = {**get_current_execution(), **(_EXECUTION_CONTEXT.get() or {})}
+    cpu_threads = int(context.get("resolved_cpu_threads") or context.get("cpu_threads") or min(4, os.cpu_count() or 1))
+    workers = int(context.get("resolved_preprocessing_workers") or context.get("preprocessing_workers") or 1)
+    return {**context, "resolved_cpu_threads": max(1, min(32, cpu_threads)),
+            "resolved_preprocessing_workers": max(1, min(8, workers))}
 
 
 def _json(path, value):
@@ -259,6 +275,7 @@ def _validate_config(config):
     scalar("learning_rate", .001, .00001, .1)
     scalar("sample_rate", 256_000, 8000, 10_000_000)
     c["optimization"] = normalize_optimization(c)
+    c["execution"] = normalize_execution(c)
     for key, default, lo, hi, limit in [("snr_db", [0, 10, 20], -30, 80, 12), ("jitter", [0], 0, 2, 8),
                                        ("segment_lengths", [c["segment_length"]], 256, 65_536, 4),
                                        ("learning_rates", [c["learning_rate"]], .00001, .1, 4),
@@ -671,14 +688,31 @@ def _data_usage(groups):
 
 
 def _dataset(entries, topology, config, rng, snr=None, jitter=None):
-    x, y = [], []
+    # Draw every stochastic choice in source order before parallel NumPy work.
+    # Threads only receive independent seeds and never touch shared Torch RNGs.
+    jobs = []
     for entry in entries:
         sn = float(rng.choice(config["snr_db"])) if snr is None else snr
         ji = float(rng.choice(config["jitter"])) if jitter is None else jitter
-        # For real recordings this is injected SNR relative to recorded total power, not absolute RF SNR.
-        data = entry["iq"] if snr == "clean" else augment(entry["iq"], sn, ji, int(rng.integers(0, 2 ** 31)), entry["sample_rate"], config.get("augmentation"))
-        x.append(_representation(data, entry["sample_rate"], topology["input"]))
-        y.append(entry["label"])
+        seed = None if snr == "clean" else int(rng.integers(0, 2 ** 31))
+        jobs.append((entry, sn, ji, seed))
+    def prepare(job):
+        entry, sn, ji, seed = job
+        # Injected SNR is relative to recorded total power, not calibrated RF SNR.
+        data = entry["iq"] if seed is None else augment(entry["iq"], sn, ji, seed, entry["sample_rate"], config.get("augmentation"))
+        return _representation(data, entry["sample_rate"], topology["input"]), entry["label"]
+    requested = _worker_settings()["resolved_preprocessing_workers"]
+    workers = min(requested, len(jobs)) if len(jobs) >= PREPROCESSING_PARALLEL_THRESHOLD else 1
+    statistics = _DATASET_EXECUTION.get()
+    if statistics is not None:
+        statistics["max_workers_used"] = max(workers, statistics.get("max_workers_used", 1))
+        statistics["parallel_calls"] = statistics.get("parallel_calls", 0) + int(workers > 1)
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="iq-preprocessing") as pool:
+            prepared = list(pool.map(prepare, jobs))
+    else:
+        prepared = [prepare(job) for job in jobs]
+    x, y = zip(*prepared)
     return np.stack(x).astype(np.float32), np.array(y, dtype=np.int64)
 
 
@@ -724,7 +758,7 @@ def hardware_profile():
     info = {"cpu": platform.processor() or platform.machine(), "logical_cpus": os.cpu_count(),
             "platform": platform.platform(), "python": platform.python_version(), "numpy": np.__version__, "scipy": scipy_version, "signalclassifier": __version__,
             "precision": "float32 (features accumulated in float64)", "torch_available": importlib.util.find_spec("torch") is not None,
-            "gpu": None, "cuda_available": False}
+            "gpu": None, "cuda_available": None, "cuda_probe_scope": "not_probed_for_cpu_model_metadata"}
     try:
         cpuinfo = Path("/proc/cpuinfo").read_text()
         info["cpu"] = next(line.split(":", 1)[1].strip() for line in cpuinfo.splitlines() if line.startswith("model name"))
@@ -736,28 +770,44 @@ def hardware_profile():
                     process_rss_bytes=int(psutil.Process().memory_info().rss))
     except ImportError:
         pass
+    torch = sys.modules.get("torch")
     try:
-        import torch
-        info.update(torch_version=torch.__version__, cuda_available=torch.cuda.is_available(), torch_threads=torch.get_num_threads())
-        if torch.cuda.is_available():
+        info["torch_version"] = importlib.metadata.version("torch") if info["torch_available"] else None
+    except importlib.metadata.PackageNotFoundError:
+        info["torch_version"] = None
+    if torch is not None:
+        info["torch_threads"] = torch.get_num_threads()
+    context = _worker_settings()
+    cached = context.get("resource_snapshot") or {}
+    if isinstance(cached, dict) and "cuda_available" in cached:
+        skipped = cached.get("gpu_probe_performed") is False
+        info.update(cuda_available=None if skipped else cached.get("cuda_available"), gpu=cached.get("gpu_name"),
+                    gpu_memory_bytes=cached.get("gpu_memory_bytes"),
+                    cuda_probe_scope="cached_scheduler_gpu_probe_skipped" if skipped else "cached_scheduler_resource_snapshot")
+    if context.get("device") == "cuda" and torch is not None:
+        available = torch.cuda.is_available()
+        info.update(cuda_available=available, cuda_probe_scope="active_cuda_worker_runtime")
+        if available:
             dev = torch.cuda.get_device_properties(0)
             info.update(gpu=dev.name, gpu_memory_bytes=dev.total_memory)
-    except ImportError:
-        pass
     return info
 
 
 def benchmark_hardware():
-    fixture = generate_signal("AM", 4096, seed=17)
-    for _ in range(3):
-        extract_features(fixture)
-    durations = []
-    for _ in range(12):
-        begin = time.perf_counter()
-        extract_features(fixture)
-        durations.append((time.perf_counter() - begin) * 1000)
+    waiting = time.perf_counter()
+    with cpu_benchmark_phase():
+        wait_seconds = time.perf_counter() - waiting
+        fixture = generate_signal("AM", 4096, seed=17)
+        for _ in range(3):
+            extract_features(fixture)
+        durations = []
+        for _ in range(12):
+            begin = time.perf_counter()
+            extract_features(fixture)
+            durations.append((time.perf_counter() - begin) * 1000)
     return {"hardware": hardware_profile(), "reference": "signalclassifier-features-v1/AM4096-fs256000-seed17",
             "reference_latency_ms": float(np.median(durations)), "p95_ms": float(np.percentile(durations, 95)),
+            "benchmark_wait_seconds": wait_seconds,
             "warmup": 3, "repetitions": 12, "batch_size": 1,
             "interpretation": "Verhältnis zu derselben CPU-Referenzlast; keine exakte Prognose für andere CPUs oder GPUs."}
 
@@ -854,7 +904,20 @@ def score_candidate(validation, validation_trials, metrics, num_classes=2, evalu
                        "training_seconds": raw["training"], "inference_device": metrics.get("inference_device")}}
 
 
-def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=True, _reference_length=None, _planned_groups=None) -> dict:
+def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=True, _reference_length=None, _planned_groups=None, _execution_context=None) -> dict:
+    token = _EXECUTION_CONTEXT.set(_execution_context) if _execution_context is not None else None
+    statistics = _DATASET_EXECUTION.set({"max_workers_used": 1, "parallel_calls": 0})
+    try:
+        return _run_experiment_impl(config, output_dir, progress, _evaluate_test=_evaluate_test,
+                                    _reference_length=_reference_length, _planned_groups=_planned_groups)
+    finally:
+        _DATASET_EXECUTION.reset(statistics)
+        if token is not None:
+            _EXECUTION_CONTEXT.reset(token)
+
+
+def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_test=True, _reference_length=None, _planned_groups=None) -> dict:
+    experiment_wait_start = get_wait_seconds()
     c = _validate_config(config)
     if c["optimization"]["enabled"]:
         return _run_optimization(c, output_dir, progress)
@@ -882,7 +945,7 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
             import torch
         except ImportError as exc:
             raise ValueError("Für diese Topologie fehlt PyTorch; ./setup.sh --neural-cpu oder --neural verwenden.") from exc
-        torch.set_num_threads(min(4, os.cpu_count() or 1))
+        torch.set_num_threads(_worker_settings()["resolved_cpu_threads"])
         torch.manual_seed(c["seed"])
         if c["device"] == "cuda" and not torch.cuda.is_available():
             raise ValueError("CUDA wurde gewählt, ist aber in diesem Python-/WSL-System nicht verfügbar.")
@@ -911,13 +974,17 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
     for ci, (length, lr, batch_size) in enumerate(combos):
         emit(.04 + .9 * ci / len(combos), "prepare", f"Kombination {ci + 1}/{len(combos)}: Daten vorbereiten")
         rng = np.random.default_rng(c["seed"])
+        source_started = time.perf_counter()
         groups = (_synthetic_groups(c, length, include_test=_evaluate_test, reference_length=_reference_length) if c["source"] == "synthetic"
                   else _recording_groups(c, length, include_test=_evaluate_test, anchor_length=_reference_length))
         if training_only and c["source"] == "synthetic":
             groups = {"train": groups["train"] + groups["validation"] + groups["test"], "validation": [], "test": []}
+        source_loading_seconds = time.perf_counter() - source_started
+        fingerprint_started = time.perf_counter()
         segment_fingerprints = sorted(f"{entry['group_id']}|{entry['label']}|{entry['sample_rate']}|{hashlib.sha256(entry['iq'].tobytes()).hexdigest()}"
                                       for entries in groups.values() for entry in entries)
         dataset_sha256 = hashlib.sha256("\n".join(segment_fingerprints).encode()).hexdigest()
+        fingerprint_seconds = time.perf_counter() - fingerprint_started
         preprocessing_start = time.perf_counter()
         xtrain, ytrain = _dataset(groups["train"], topology, c, rng)
         xval, yval = _dataset(groups["validation"], topology, c, rng) if not training_only else (None, None)
@@ -940,20 +1007,50 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
         emit(.04 + .9 * ci / len(combos), "train", "Vorverarbeitung abgeschlossen; Training startet",
              preprocessing_seconds=preprocessing_seconds, training_elapsed_seconds=0.)
         training_start = time.perf_counter()
+        training_wait_start = get_wait_seconds()
         history = []
+        phase_timings = {"source_loading_seconds": source_loading_seconds, "fingerprint_seconds": fingerprint_seconds,
+                         "preprocessing_seconds": preprocessing_seconds, "device_transfer_seconds": 0.,
+                         "training_epoch_seconds": 0., "validation_seconds": 0., "checkpoint_seconds": 0.,
+                         "validation_grid_seconds": 0., "cpu_benchmark_seconds": 0., "benchmark_wait_seconds": 0.}
+        training_execution = {"device": device, "training_batch_size": batch_size, "validation_batch_size": batch_size,
+                              "cpu_threads": _worker_settings()["resolved_cpu_threads"],
+                              "preprocessing_workers_requested": _worker_settings()["resolved_preprocessing_workers"],
+                              "preprocessing_workers": (_DATASET_EXECUTION.get() or {}).get("max_workers_used", 1),
+                              "preprocessing_parallel_threshold": PREPROCESSING_PARALLEL_THRESHOLD,
+                              "process_isolated": bool(_worker_settings().get("process_isolated", False)),
+                              "cpu_benchmark_scope": "managed_experiment_workers_quiescent" if _worker_settings().get("process_isolated") else "local_process_only",
+                              "external_host_load_verified": False,
+                              "checkpoint_device": None, "training_batches": 0, "validation_batches": 0,
+                              "loss_host_transfers": 0, "validation_tensor_transfers": 0}
         if not neural:
             weights = _fit_lda(xtrain, ytrain)
+            phase_timings["training_epoch_seconds"] = time.perf_counter() - training_start
             def predict(x):
                 return _softmax(x @ weights["weights"].T + weights["bias"])
         else:
             model = _torch_model(topology, len(classes)).to(device)
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            transfer_started = time.perf_counter()
             tx, ty = torch.from_numpy(xtrain).to(device), torch.from_numpy(ytrain).to(device)
+            vx, vy = (torch.from_numpy(xval).to(device), torch.from_numpy(yval).to(device)) if not training_only else (None, None)
+            if not training_only:
+                training_execution["validation_tensor_transfers"] = 1
+            if device == "cuda":
+                torch.cuda.synchronize()
+            phase_timings["device_transfer_seconds"] = time.perf_counter() - transfer_started
+            training_execution["device"] = str(next(model.parameters()).device)
             best_loss, best_state = float("inf"), None
+            gpu_checkpoints = []
+            checkpoint_devices = set()
             for epoch in range(c["epochs"]):
                 model.train()
                 order = torch.randperm(len(tx), device=device)
-                losses = []
+                loss_sum = torch.zeros((), device=device)
+                train_begin = time.perf_counter()
+                train_events = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if device == "cuda" else None
+                if train_events:
+                    train_events[0].record()
                 for offset in range(0, len(tx), batch_size):
                     batch = order[offset:offset + batch_size]
                     optimizer.zero_grad(set_to_none=True)
@@ -961,31 +1058,94 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 5.)
                     optimizer.step()
-                    losses.append(float(loss.detach().cpu()))
+                    loss_sum.add_(loss.detach() * len(batch))
+                    training_execution["training_batches"] += 1
+                if train_events:
+                    train_events[1].record()
+                else:
+                    phase_timings["training_epoch_seconds"] += time.perf_counter() - train_begin
                 model.eval()
                 vl = None
+                validation_sum = torch.zeros((), device=device)
+                validation_begin = time.perf_counter()
+                validation_events = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if device == "cuda" and not training_only else None
+                if validation_events:
+                    validation_events[0].record()
                 if not training_only:
                     with torch.inference_mode():
-                        vl = float(torch.nn.functional.cross_entropy(model(torch.from_numpy(xval).to(device)), torch.from_numpy(yval).to(device)).cpu())
-                history.append({"epoch": epoch + 1, "training_loss": float(np.mean(losses)), "validation_loss": vl})
+                        for offset in range(0, len(vx), batch_size):
+                            stop = offset + batch_size
+                            validation_sum.add_(torch.nn.functional.cross_entropy(model(vx[offset:stop]), vy[offset:stop], reduction="sum"))
+                            training_execution["validation_batches"] += 1
+                if validation_events:
+                    validation_events[1].record()
+                elif not training_only:
+                    phase_timings["validation_seconds"] += time.perf_counter() - validation_begin
+                # One host transfer for epoch-level loss values, never per batch.
+                epoch_losses = torch.stack((loss_sum / len(tx), validation_sum / max(1, len(vx) if vx is not None else 0))).detach().cpu().tolist()
+                training_execution["loss_host_transfers"] += 1
+                training_loss = float(epoch_losses[0])
+                if not training_only:
+                    vl = float(epoch_losses[1])
+                if train_events:
+                    phase_timings["training_epoch_seconds"] += train_events[0].elapsed_time(train_events[1]) / 1000
+                if validation_events:
+                    phase_timings["validation_seconds"] += validation_events[0].elapsed_time(validation_events[1]) / 1000
+                history.append({"epoch": epoch + 1, "training_loss": training_loss, "validation_loss": vl})
                 sample_rss()
                 if not training_only and vl < best_loss:
-                    best_loss, best_state = vl, {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                    snapshot_device = "cpu"
+                    state_bytes = sum(value.numel() * value.element_size() for value in model.state_dict().values())
+                    if device == "cuda":
+                        free_bytes, total_bytes = torch.cuda.mem_get_info()
+                        reserve = max(64 * 1024**2, total_bytes // 20)
+                        if state_bytes <= 128 * 1024**2 and free_bytes >= state_bytes + reserve:
+                            snapshot_device = device
+                    checkpoint_started = time.perf_counter()
+                    checkpoint_events = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if snapshot_device == "cuda" else None
+                    if checkpoint_events:
+                        checkpoint_events[0].record()
+                    try:
+                        snapshot = {key: value.detach().to(snapshot_device).clone() for key, value in model.state_dict().items()}
+                    except torch.OutOfMemoryError:
+                        snapshot_device = "cpu"
+                        checkpoint_events = None
+                        snapshot = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                    if checkpoint_events:
+                        checkpoint_events[1].record()
+                        gpu_checkpoints.append(checkpoint_events)
+                    else:
+                        phase_timings["checkpoint_seconds"] += time.perf_counter() - checkpoint_started
+                    best_loss, best_state = vl, snapshot
+                    checkpoint_devices.add(snapshot_device)
+                    training_execution["checkpoint_device"] = next(iter(checkpoint_devices)) if len(checkpoint_devices) == 1 else "mixed"
+                    training_execution["checkpoint_bytes"] = state_bytes
                 emit(.04 + .9 * (ci + .6 * (epoch + 1) / c["epochs"]) / len(combos), "train", f"Kombination {ci + 1}/{len(combos)}, Epoche {epoch + 1}/{c['epochs']}",
-                     epoch=epoch + 1, epoch_count=c["epochs"], training_loss=float(np.mean(losses)), validation_loss=vl,
-                     training_elapsed_seconds=time.perf_counter() - training_start)
+                     epoch=epoch + 1, epoch_count=c["epochs"], training_loss=training_loss, validation_loss=vl,
+                     training_elapsed_seconds=max(0., time.perf_counter() - training_start - (get_wait_seconds() - training_wait_start)),
+                     training_wall_seconds=time.perf_counter() - training_start,
+                     managed_training_pause_seconds=max(0., get_wait_seconds() - training_wait_start), phase_timings=dict(phase_timings),
+                     training_execution=dict(training_execution))
             if not training_only:
                 model.load_state_dict(best_state)
             model.eval()
             if device == "cuda":
                 torch.cuda.synchronize()
+                phase_timings["checkpoint_seconds"] += sum(start.elapsed_time(stop) / 1000 for start, stop in gpu_checkpoints)
             def predict(x):
                 with torch.inference_mode():
-                    batches = [torch.softmax(model(torch.from_numpy(x[start:start + batch_size].astype(np.float32)).to(device)), dim=-1).cpu().numpy() for start in range(0, len(x), batch_size)]
-                return np.concatenate(batches)
-        training_seconds = time.perf_counter() - training_start
+                    source = vx if x is xval and vx is not None else torch.from_numpy(np.asarray(x, dtype=np.float32)).to(device)
+                    batches = [torch.softmax(model(source[start:start + batch_size]), dim=-1) for start in range(0, len(source), batch_size)]
+                    # Predictions are small; transfer once after minibatched forward.
+                    result = torch.cat(batches, dim=0).cpu().numpy()
+                return result
+        training_wall_seconds = time.perf_counter() - training_start
+        managed_training_pause_seconds = max(0., get_wait_seconds() - training_wait_start)
+        training_seconds = max(0., training_wall_seconds - managed_training_pause_seconds)
         sample_rss()
+        validation_started = time.perf_counter()
         validation = None if training_only else _metrics(yval, predict(xval), classes)
+        phase_timings["validation_grid_seconds"] += time.perf_counter() - validation_started
         modeldir = out / f"candidate-{ci + 1}"
         modeldir.mkdir(exist_ok=True)
         if neural:
@@ -1017,17 +1177,20 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
         candidate = {"candidate": ci + 1, "model_path": str(modeldir), "segment_length": length, "learning_rate": lr, "batch_size": batch_size,
                      "epochs": c["epochs"],
                      "validation": validation, "training_seconds": training_seconds, "preprocessing_seconds": preprocessing_seconds,
+                     "training_wall_seconds": training_wall_seconds, "managed_training_pause_seconds": managed_training_pause_seconds,
                      "training_segments": len(groups["train"]), "training_examples": len(ytrain),
                      "data_usage": _data_usage(groups), "dataset_sha256": dataset_sha256,
                      "model_bytes": model_bytes, "history": history, "parameter_count": int(sum(p.numel() for p in model.parameters())) if neural else 11 * len(classes),
                      "training_signal_seconds": float(sum(len(x["iq"]) / x["sample_rate"] for x in groups["train"]) * (2 if c["include_clean"] else 1))}
         validation_trials = []
         validation_rng = np.random.default_rng(c["seed"] + 710_003)
+        validation_started = time.perf_counter()
         for snr in ([] if training_only else c["snr_db"]):
             for jitter in c["jitter"]:
                 xv, yv = _dataset(groups["validation"], topology, c, validation_rng, snr, jitter)
                 values = _metrics(yv, predict((xv - mean) / scale), classes)
                 validation_trials.append({"candidate": ci + 1, "segment_length": length, "snr_db": snr, "jitter": jitter, **values})
+        phase_timings["validation_grid_seconds"] += time.perf_counter() - validation_started
         candidate["validation_trials"] = validation_trials
         candidates.append(candidate)
         candidate_evaluations = []
@@ -1042,25 +1205,46 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
                          "snr_db": snr, "jitter": jitter, **m}
                 all_trials.append(trial)
                 candidate_evaluations.append((yt, prob))
+        if neural:
+            # CPU ranking loads the portable state separately. Release training
+            # tensors/optimizer before the barrier so GPU slots can share VRAM.
+            best_state = None
+            snapshot = None
+            loss = None
+            loss_sum = None
+            validation_sum = None
+            order = None
+            batch = None
+            del model, optimizer, tx, ty, vx, vy
+            if device == "cuda":
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
         # Measure the same cached CPU classification path used in live reception.
         # GPU training/validation timings must never masquerade as laptop inference.
         durations, duration_ratios = [], []
         entries = groups["train"] if training_only else groups["validation"]
-        for entry in entries[:3]:
-            classify(entry["iq"], entry["sample_rate"], model_path=modeldir, attribution=False)
-        skipped_measurements = 0
-        for i in range(min(30, max(10, len(entries)))):
-            entry = entries[i % len(entries)]
-            begin = time.perf_counter()
-            timed_result = classify(entry["iq"], entry["sample_rate"], model_path=modeldir, attribution=False)
-            elapsed = time.perf_counter() - begin
-            skipped_measurements += bool(timed_result.get("skipped_stages"))
-            durations.append(elapsed * 1000)
-            duration_ratios.append(elapsed / (len(entry["iq"]) / entry["sample_rate"]))
+        waiting = time.perf_counter()
+        with cpu_benchmark_phase():
+            benchmark_started = time.perf_counter()
+            phase_timings["benchmark_wait_seconds"] += benchmark_started - waiting
+            for entry in entries[:3]:
+                classify(entry["iq"], entry["sample_rate"], model_path=modeldir, attribution=False)
+            skipped_measurements = 0
+            for i in range(min(30, max(10, len(entries)))):
+                entry = entries[i % len(entries)]
+                begin = time.perf_counter()
+                timed_result = classify(entry["iq"], entry["sample_rate"], model_path=modeldir, attribution=False)
+                elapsed = time.perf_counter() - begin
+                skipped_measurements += bool(timed_result.get("skipped_stages"))
+                durations.append(elapsed * 1000)
+                duration_ratios.append(elapsed / (len(entry["iq"]) / entry["sample_rate"]))
+            phase_timings["cpu_benchmark_seconds"] += time.perf_counter() - benchmark_started
         candidate.update(latency_ms_p50=float(np.median(durations)), latency_ms_p95=float(np.percentile(durations, 95)),
                          real_time_factor=float(np.median(duration_ratios)), real_time_factor_p95=float(np.percentile(duration_ratios, 95)),
                          inference_device="cpu", timing_skipped_model_fraction=skipped_measurements / len(durations),
                          timed_sample_rates=sorted(set(x["sample_rate"] for x in entries)))
+        training_execution["preprocessing_workers"] = (_DATASET_EXECUTION.get() or {}).get("max_workers_used", 1)
+        candidate.update(training_execution=dict(training_execution), phase_timings=dict(phase_timings))
         candidate["score"] = score_candidate(candidate["validation"], validation_trials, candidate,
                                              num_classes=len(classes), evaluation_available=not training_only)
         for trial in all_trials:
@@ -1079,6 +1263,9 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
         summary = _metrics(y, probabilities, classes)
     # CI above counts augmented observations; record-group correlation limits interpretation.
     summary.update({key: best[key] for key in ("training_seconds", "preprocessing_seconds", "latency_ms_p50", "latency_ms_p95", "model_bytes", "parameter_count")})
+    summary.update(training_wall_seconds=best["training_wall_seconds"], managed_training_pause_seconds=best["managed_training_pause_seconds"],
+                   coordination_wait_seconds=max(0., get_wait_seconds() - experiment_wait_start),
+                   training_time_scope="Active worker wall time minus managed benchmark coordination pauses; shared-device contention and host load remain included.")
     summary.update(real_time_factor=best["real_time_factor"], real_time_factor_p95=best["real_time_factor_p95"], timed_sample_rates=best["timed_sample_rates"],
                    inference_device="cpu", timing_skipped_model_fraction=best["timing_skipped_model_fraction"],
                    timing_scope="training_segments" if training_only else "validation_segments",
@@ -1095,7 +1282,8 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
     if rss_samples:
         summary.update(process_rss_before_bytes=rss_samples[0], process_rss_after_bytes=rss_samples[-1],
                        sampled_process_rss_max_bytes=max(rss_samples),
-                       memory_scope="Gemeinsamer App-Prozess, vor/nach Training und pro Epoche abgetastet; kein isolierter Trainings-Peak.")
+                       memory_scope=("Gesamter Trainingsworker-Prozess" if _worker_settings().get("process_isolated") else "Gemeinsamer App-Prozess")
+                                    + ", vor/nach Training und pro Epoche abgetastet; enthält Framework-/Prozesszustand und ist kein exakter Modell- oder Trainings-Peak.")
     hardware = hardware_profile() | {"device": device, "training_device": device, "inference_device": "cpu", "batch_size": best["batch_size"], "inference_batch_size": 1,
                                     "warmup": 3, "timing_repetitions": min(30, max(10, len(entries)))}
     if neural and device == "cuda":
@@ -1110,6 +1298,8 @@ def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=Tr
               "validation_status": "unvalidated" if training_only else "evaluated", "readiness": readiness,
               "topology": topology, "model_path": best["model_path"], "metrics": summary, "hardware": hardware, "benchmark": benchmark,
               "score": best["score"], "score_definition": score_definition(),
+              "training_execution": best["training_execution"], "phase_timings": best["phase_timings"],
+              "phase_timing_scope": "Per-worker phases; CUDA training/validation/checkpoint intervals use device events, other phases use process wall time. Managed experiment workers pause for CPU benchmarking; unrelated/live system load is not controlled. Overlapping workers must not be summed as wall time.",
               "trials": all_trials, "candidates": candidates, "selected_candidate": best_index + 1,
               "validation": best["validation"], "validation_trials": best["validation_trials"],
               "data_usage": best["data_usage"], "reference_window_samples": _reference_length or best["segment_length"],
@@ -1199,18 +1389,18 @@ def _run_optimization(config, output_dir, progress=None):
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    deadline = started + settings["timeout_seconds"] if settings["timeout_seconds"] else None
+    deadline = time.monotonic() + settings["timeout_seconds"] if settings["timeout_seconds"] else None
     state = {**settings, "schema_version": 1, "status": "running", "seed": config["seed"], "topology_id": topology["id"],
              "reference_window_samples": reference_length, "split_groups": split_groups,
              "excluded_segment_lengths": readiness["optimization"]["excluded_segment_lengths"],
              "planned_trials": len(plan), "trials": [], "best_trial": None, "best_config": None,
-             "completed_trials": 0, "failed_trials": 0, "timed_out_trials": 0,
+             "completed_trials": 0, "failed_trials": 0, "timed_out_trials": 0, "skipped_trials": 0,
              "total_training_seconds": 0., "total_preprocessing_seconds": 0., "elapsed_seconds": 0.,
              "stop_reason": None, "test_evaluations": 0, "objective_version": 1,
              "score_definition": score_definition(),
              "effective_parameters": ["segment_length"] if topology["family"] == "feature_lda" else ["segment_length", "learning_rate", "batch_size", "epochs"],
-             "budget_scope": "Sequential search trials, including preprocessing, validation and CPU timing; final test follows selection.",
-             "timeout_enforcement": "Cooperative at progress/epoch/trial boundaries; running native operations are not interrupted.",
+             "budget_scope": "Shared wall deadline for queued and running trials, including preprocessing, validation and CPU timing; final test follows selection.",
+             "timeout_enforcement": "Cooperative progress/epoch checkpoints, followed by bounded worker stop when a native operation does not return.",
              "cost_accounting": "Completed-trial timings plus last observed partial timings; unobserved interrupted work is only included in elapsed_seconds.",
              "fairness": "Same group split and validation SNR/jitter grid. Synthetic sources share a max-length reference and prefix crops; real sources share max-length window anchors."}
     def save_state():
@@ -1218,6 +1408,7 @@ def _run_optimization(config, output_dir, progress=None):
         state["completed_trials"] = sum(trial["status"] == "completed" for trial in state["trials"])
         state["failed_trials"] = sum(trial["status"] == "failed" for trial in state["trials"])
         state["timed_out_trials"] = sum(trial["status"] == "timed_out" for trial in state["trials"])
+        state["skipped_trials"] = sum(trial["status"] == "skipped" for trial in state["trials"])
         def cost(trial, metric, partial):
             measured = trial.get("metrics", {}).get(metric)
             return float(measured if measured is not None else trial.get(partial, 0.))
@@ -1231,67 +1422,104 @@ def _run_optimization(config, output_dir, progress=None):
             progress(update)
     save_state()
     completed = []
+    jobs = []
     for index, parameters in enumerate(plan, 1):
-        if deadline is not None and time.perf_counter() >= deadline:
-            state["stop_reason"] = "timeout"
-            break
-        trial_started = time.perf_counter()
-        record = {"trial": index, "status": "running", "config": dict(parameters), "objective_value": None,
+        record = {"trial": index, "status": "queued", "config": dict(parameters), "objective_value": None,
                   "validation": None, "score": None, "metrics": {}, "model_path": None, "elapsed_seconds": 0., "epoch_history": []}
         state["trials"].append(record)
-        state["current_trial"] = index
-        save_state()
         trial_config = {**config, **parameters, "optimization": {"enabled": False}, "segment_lengths": [parameters["segment_length"]],
                         "learning_rates": [parameters["learning_rate"]], "batch_sizes": [parameters["batch_size"]]}
         trial_config.pop("topologies", None)
         trial_config.pop("topology_ids", None)
-        def trial_progress(update):
+        jobs.append({"id": f"trial-{index:03d}", "trial": index, "topology_id": topology["id"],
+                     "config": trial_config, "output_dir": output / f"trial-{index:03d}", "deadline": deadline,
+                     "kwargs": {"_evaluate_test": False, "_reference_length": reference_length, "_planned_groups": split_groups}})
+    save_state()
+    finalized = set()
+    def finish_trial(outcome, fraction):
+        position = outcome["index"]
+        if position in finalized:
+            return
+        finalized.add(position)
+        record = state["trials"][position]
+        status = outcome["status"]
+        record.update(status=status, elapsed_seconds=outcome.get("elapsed_seconds", 0.), pid=outcome.get("pid"), device=outcome.get("device"))
+        if status == "timed_out" and outcome.get("pid") is None:
+            record["status"] = "skipped"
+        if status in ("timed_out", "cancelled"):
+            state["stop_reason"] = "timeout" if status == "timed_out" else "user_cancellation"
+        if status != "completed":
+            record["error"] = outcome.get("error") or status
+        else:
+            subreport = outcome.get("report")
+            if subreport is None:
+                path = Path(outcome.get("report_path") or Path(jobs[position]["output_dir"]) / "report.json")
+                subreport = json.loads(path.read_text(encoding="utf-8"))
+            objective = _objective_value(subreport, settings["objective"])
+            record.update(status="completed", objective_value=objective, validation=subreport["validation"],
+                          score=subreport["score"], metrics=subreport["metrics"], model_path=subreport["model_path"], report=subreport,
+                          training_execution=subreport.get("training_execution"), phase_timings=subreport.get("phase_timings"))
+            completed.append(record)
+            best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"], -trial["trial"]))
+            state.update(best_trial=best["trial"], best_config=best["config"])
+        save_state()
+        emit({"progress": .92 * fraction, "stage": "optimize", "optimization_trial": record["trial"],
+              "optimization_max_trials": settings["max_trials"], "optimization_config": record["config"],
+              "optimization_status": record["status"], "validation": record["validation"], "score": record["score"],
+              "metrics": record["metrics"], "objective_value": record["objective_value"],
+              "message": f"Random Search: Versuch {record['trial']} {record['status']}"})
+    def search_progress(update):
+        result = update.get("execution_job_result")
+        trial_number = update.get("trial")
+        if result is not None and trial_number is None:
+            trial_number = result["index"] + 1
+        fraction = update.get("progress", 0.)
+        if _worker_settings().get("nested_parallelism_disabled"):
+            position = result["index"] if result is not None else update.get("job_index", 0)
+            fraction = (position + (1. if result is not None else fraction)) / len(plan)
+        if result is not None:
+            try:
+                finish_trial(result, fraction)
+            except (ValueError, OSError, KeyError) as exc:
+                record = state["trials"][result["index"]]
+                record.update(status="failed", error=str(exc))
+                save_state()
+        if isinstance(trial_number, int) and 1 <= trial_number <= len(plan):
+            record = state["trials"][trial_number - 1]
+            state["current_trial"] = trial_number
+            if record["status"] == "queued":
+                record["status"] = "running"
             if "epoch" in update:
                 point = {key: update[key] for key in ("epoch", "epoch_count", "training_loss", "validation_loss") if key in update}
                 record["epoch_history"].append(point)
             record["partial_training_seconds"] = update.get("training_elapsed_seconds", record.get("partial_training_seconds", 0.))
             record["partial_preprocessing_seconds"] = update.get("preprocessing_seconds", record.get("partial_preprocessing_seconds", 0.))
-            emit({**update, "progress": .92 * ((index - 1) + update.get("progress", 0)) / len(plan),
-                  "stage": "optimize", "optimization_stage": update.get("stage"), "optimization_trial": index,
-                  "optimization_max_trials": settings["max_trials"], "optimization_config": dict(parameters)})
-            if deadline is not None and time.perf_counter() >= deadline and update.get("progress", 0) < 1:
-                raise _OptimizationTimeout("Zeitbudget der automatischen Suche erreicht.")
-        try:
-            emit({"progress": .92 * (index - 1) / len(plan), "stage": "optimize", "optimization_trial": index,
-                  "optimization_max_trials": settings["max_trials"], "optimization_config": dict(parameters),
-                  "message": f"Random Search: Versuch {index}/{len(plan)} startet"})
-            subreport = run_experiment(trial_config, output / f"trial-{index:03d}", trial_progress,
-                                       _evaluate_test=False, _reference_length=reference_length, _planned_groups=split_groups)
-            objective = _objective_value(subreport, settings["objective"])
-            record.update(status="completed", objective_value=objective, validation=subreport["validation"],
-                          score=subreport["score"], metrics=subreport["metrics"], model_path=subreport["model_path"], report=subreport,
-                          elapsed_seconds=time.perf_counter() - trial_started)
-            completed.append(record)
-            best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"]))
-            state.update(best_trial=best["trial"], best_config=best["config"])
-            save_state()
-            emit({"progress": .92 * index / len(plan), "stage": "optimize", "optimization_trial": index,
-                  "optimization_max_trials": settings["max_trials"], "optimization_config": dict(parameters),
-                  "validation": record["validation"], "score": record["score"], "metrics": record["metrics"],
-                  "objective_value": objective, "message": f"Random Search: Versuch {index} abgeschlossen"})
-        except _OptimizationTimeout as exc:
-            record.update(status="timed_out", error=str(exc), elapsed_seconds=time.perf_counter() - trial_started)
-            state["stop_reason"] = "timeout"
-            save_state()
-            break
-        except (ValueError, RuntimeError, OSError, ImportError, MemoryError) as exc:
-            record.update(status="failed", error=str(exc), elapsed_seconds=time.perf_counter() - trial_started)
-            save_state()
-            emit({"progress": .92 * index / len(plan), "stage": "optimize", "optimization_trial": index,
-                  "optimization_config": dict(parameters), "optimization_status": "failed", "error": str(exc),
-                  "message": f"Random Search: Versuch {index} fehlgeschlagen"})
-        except BaseException as exc:
-            record.update(status="interrupted", elapsed_seconds=time.perf_counter() - trial_started)
-            state["status"] = "interrupted"
-            state["stop_reason"] = "user_cancellation" if "Cancel" in type(exc).__name__ else "interrupted"
-            state["interruption_reason"] = str(exc) or type(exc).__name__
-            save_state()
-            raise
+            if "training_execution" in update:
+                record["training_execution"] = update["training_execution"]
+            if "phase_timings" in update:
+                record["phase_timings"] = update["phase_timings"]
+        state["execution_progress"] = update.get("execution_progress", state.get("execution_progress", {}))
+        save_state()
+        emit({**{key: value for key, value in update.items() if key != "execution_job_result"},
+              "progress": .92 * fraction, "stage": "optimize",
+              "optimization_stage": update.get("stage"), "optimization_trial": trial_number,
+              "optimization_max_trials": settings["max_trials"],
+              "optimization_config": state["trials"][trial_number - 1]["config"] if isinstance(trial_number, int) and 1 <= trial_number <= len(plan) else None})
+    try:
+        batch = execute_jobs(jobs, config, search_progress, axis="trials")
+        state["execution"] = batch["execution"]
+        for outcome in batch["outcomes"]:
+            if outcome["index"] not in finalized:
+                finish_trial(outcome, 1.)
+    except BaseException as exc:
+        for record in state["trials"]:
+            if record["status"] in ("queued", "running"):
+                record["status"] = "interrupted"
+        state["status"] = "interrupted"
+        state["stop_reason"] = "user_cancellation" if "Cancel" in type(exc).__name__ else "interrupted"
+        state["interruption_reason"] = str(exc) or type(exc).__name__
+        save_state()
+        raise
     state["stop_reason"] = state["stop_reason"] or ("search_space_exhausted" if len(plan) < settings["max_trials"] else "max_trials")
     state["search_elapsed_seconds"] = time.perf_counter() - started
     if not completed:
@@ -1300,7 +1528,7 @@ def _run_optimization(config, output_dir, progress=None):
             state["stop_reason"] = "all_trials_failed"
         save_state()
         raise ValueError("Automatische Suche lieferte keinen abgeschlossenen validierten Versuch. Zeitbudget erhöhen oder Datensatz/Suchraum prüfen; Teilberichte stehen in optimization.json.")
-    best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"]))
+    best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"], -trial["trial"]))
     report = copy.deepcopy(best["report"])
     report["candidates"] = [{**trial["report"]["candidates"][0], "candidate": trial["trial"], "optimization_trial": trial["trial"]} for trial in completed]
     report["selected_candidate"] = best["trial"]
@@ -1323,6 +1551,7 @@ def _run_optimization(config, output_dir, progress=None):
     state.update(status="completed", best_trial=best["trial"], best_config=best["config"], test_evaluations=1, final_test_seconds=final_seconds)
     save_state()
     report["optimization"] = copy.deepcopy(state)
+    report["execution"] = state.get("execution", {})
     report["metrics"]["search_training_seconds"] = state["total_training_seconds"]
     report["metrics"]["search_preprocessing_seconds"] = state["total_preprocessing_seconds"]
     report["metrics"]["search_elapsed_seconds"] = state["search_elapsed_seconds"]
@@ -1350,6 +1579,7 @@ def run_comparison(config: dict, output_dir, progress=None) -> dict:
     entries = []
     started = time.perf_counter()
     total = len(c["topologies"])
+    jobs = []
     for index, topology in enumerate(c["topologies"]):
         identifier = topology["id"]
         child_config = {key: value for key, value in c.items() if key not in ("topologies", "topology_ids", "topology")}
@@ -1357,14 +1587,31 @@ def run_comparison(config: dict, output_dir, progress=None) -> dict:
         # The linear CPU baseline remains usable in a CUDA comparison batch.
         if topology["family"] == "feature_lda":
             child_config["device"] = "cpu"
-        def child_progress(update, position=index, selected=topology):
-            if progress is None:
-                return
-            completed = float(update.get("progress", 0))
-            progress({**update, "progress": (position + max(0., min(1., completed))) / total,
-                      "topology_id": selected["id"], "topology_index": position + 1, "topology_count": total,
-                      "message": f"{selected['name']} ({position + 1}/{total}): {update.get('message', '')}"})
-        subreport = run_experiment(child_config, output / f"topology-{index + 1:02d}-{identifier}", child_progress)
+        jobs.append({"id": identifier, "topology_id": identifier, "config": child_config,
+                     "output_dir": output / f"topology-{index + 1:02d}-{identifier}"})
+    if len(jobs) == 1 and c["optimization"]["enabled"] and not _worker_settings().get("nested_parallelism_disabled"):
+        # Single-topology studies use their process parallelism for independent
+        # trials. Multi-topology studies use only the outer process axis.
+        def single_progress(update):
+            if progress:
+                progress({**update, "topology_id": c["topologies"][0]["id"], "topology_index": 1, "topology_count": 1})
+        only = run_experiment(jobs[0]["config"], jobs[0]["output_dir"], single_progress)
+        execution = {"outcomes": [{"id": jobs[0]["id"], "index": 0, "status": "completed", "report": only}],
+                     "execution": only.get("execution", {})}
+    else:
+        def execution_progress(update):
+            if progress:
+                progress({key: value for key, value in update.items() if key != "execution_job_result"})
+        execution = execute_jobs(jobs, c, execution_progress, axis="topologies")
+    for index, outcome in enumerate(execution["outcomes"]):
+        topology = c["topologies"][index]
+        identifier = topology["id"]
+        if outcome["status"] != "completed":
+            raise ValueError(f"{identifier}: Ausführungsjob {outcome['status']}: {outcome.get('error', '')}. Fertige Teilberichte bleiben erhalten.")
+        subreport = outcome["report"]
+        if subreport.get("execution_worker"):
+            _json(Path(jobs[index]["output_dir"]) / "report.json", subreport)
+            _json(Path(subreport["model_path"]) / "report.json", subreport)
         selected_candidate = next((candidate for candidate in subreport["candidates"]
                                    if candidate["candidate"] == subreport["selected_candidate"]), None)
         validation = selected_candidate.get("validation") if selected_candidate else None
@@ -1407,6 +1654,7 @@ def run_comparison(config: dict, output_dir, progress=None) -> dict:
     safe_config = {key: value for key, value in c.items() if key != "recordings"}
     safe_config["recording_groups"] = report["config"].get("recording_groups", [])
     report.update(config=safe_config, topology_ids=list(c["topology_ids"]), comparison=entries,
+                  execution=execution["execution"],
                   comparison_schema_version=1, comparison_wall_seconds=time.perf_counter() - started,
                   score=entries[chosen]["score"], score_definition=score_definition(),
                   rankings={"score": [entries[index]["topology_id"] for index in score_order],
@@ -1417,7 +1665,7 @@ def run_comparison(config: dict, output_dir, progress=None) -> dict:
                   selected_comparison_index=None if training_only else chosen,
                   selection="Keine Qualitätsrangfolge ohne Validierung; erstes Modell nur als Standardreferenz gespeichert" if training_only
                             else f"Höchstes Validierungsziel {selection_objective} der gewählten Kandidaten; bei Gleichstand kleinere Modelldateien. Testwerte bestimmen die Auswahl nicht.")
-    report["comparison_policy"] = {"sequential": True, "seed": c["seed"], "same_recording_groups": True,
+    report["comparison_policy"] = {"sequential": execution["execution"].get("resolved", {}).get("max_workers", 1) <= 1, "seed": c["seed"], "same_recording_groups": True,
                                    "same_augmentation_configuration": True, "selection_uses_test_metrics": False,
                                    "quality_ranking_available": bool(score_order),
                                    "selection_objective": selection_objective,
@@ -1528,7 +1776,7 @@ def _load_inference(path):
             import torch
         except ImportError as exc:
             raise ValueError("Dieses Modell benötigt PyTorch; ./setup.sh --neural-cpu oder --neural verwenden.") from exc
-        torch.set_num_threads(min(4, os.cpu_count() or 1))
+        torch.set_num_threads(_worker_settings()["resolved_cpu_threads"])
         model = _torch_model(topology, nclasses)
         # weights_only rejects executable pickle payloads; only tensor state_dict is supported.
         state = torch.load(root / "weights.pt", map_location="cpu", weights_only=True)
@@ -1587,6 +1835,14 @@ def validate_model(path):
 @functools.lru_cache(maxsize=4)
 def _cached_inference(path, signature):
     return _load_inference(path)
+
+
+def release_execution_job():
+    """Drop job-local inference models before a persistent slot accepts work."""
+    _cached_inference.cache_clear()
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_initialized():
+        torch.cuda.empty_cache()
 
 
 def classify(iq, sample_rate, center_frequency_hz=None, use_priors=False, model_path=None, explain=False, attribution=True) -> dict:

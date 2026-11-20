@@ -486,6 +486,48 @@ def _generic_csv(items):
     return _csv(rows, columns)
 
 
+def _resource_csv(events):
+    rows = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("event") != "resources":
+            continue
+        data = _object(event.get("data"))
+        cpu, gpu = _object(data.get("cpu")), _object(data.get("gpu"))
+        for device in _array(gpu.get("devices")) or [{}]:
+            device = _object(device)
+            rows.append({"timestamp_utc": data.get("sampled_at", event.get("timestamp_utc")),
+                "elapsed_seconds": event.get("elapsed_seconds"), "cpu_system_percent": cpu.get("system_percent"),
+                "cpu_app_percent": cpu.get("process_percent"), "cpu_app_system_percent": cpu.get("app_system_percent"),
+                "cpu_app_scope": cpu.get("process_percent_scope"), "process_count": cpu.get("process_count"),
+                "gpu_index": device.get("index"), "gpu_name": device.get("name"),
+                "gpu_utilization_percent": device.get("utilization_percent"), "vram_used_bytes": device.get("memory_used_bytes"),
+                "vram_total_bytes": device.get("memory_total_bytes"), "gpu_provider": gpu.get("provider"),
+                "gpu_scope": gpu.get("scope"), "gpu_reason": gpu.get("reason"), "raw_json": event})
+    return _csv(rows, ["timestamp_utc", "elapsed_seconds", "cpu_system_percent", "cpu_app_percent", "cpu_app_system_percent",
+        "cpu_app_scope", "process_count", "gpu_index", "gpu_name", "gpu_utilization_percent", "vram_used_bytes", "vram_total_bytes",
+        "gpu_provider", "gpu_scope", "gpu_reason", "raw_json"])
+
+
+def _phase_csv(views):
+    rows = []
+    def add(view, holder, scope, trial=None):
+        phases = _object(holder.get("phase_timings")) or _object(_object(holder.get("metrics")).get("phase_timings"))
+        if not phases:
+            phases = _object(_object(holder.get("report")).get("phase_timings"))
+        for name, value in phases.items():
+            if name.endswith("_seconds") and isinstance(value, (int, float)) and not isinstance(value, bool):
+                rows.append({"topology_id": view["topology_id"], "model_name": view["name"], "scope": scope,
+                             "trial": trial, "phase": name, "seconds": value,
+                             "timing_scope": phases.get("scope", holder.get("phase_timing_scope") or _object(holder.get("report")).get("phase_timing_scope")), "raw_json": phases})
+    for view in views:
+        report = view["report"]
+        add(view, report, "selected_model")
+        for trial in _array(_object(report.get("optimization")).get("trials")):
+            if isinstance(trial, dict):
+                add(view, trial, "optimization_trial", trial.get("trial"))
+    return _csv(rows, ["topology_id", "model_name", "scope", "trial", "phase", "seconds", "timing_scope", "raw_json"])
+
+
 def _markdown(experiment, views, comparison, tables, inventory, events, charts, warnings):
     config = _object(experiment.get("config"))
     report = _object(experiment.get("report")) or (views[0]["report"] if views else {})
@@ -519,12 +561,16 @@ def _markdown(experiment, views, comparison, tables, inventory, events, charts, 
         lines += ["## Versuchsziel und Messaufbau", "", _literal(notes), ""]
     lines += ["## Konfiguration und Datenherkunft", "", "| Parameter | Gespeicherter Wert |", "| --- | --- |"]
     for key in ("source", "evaluation_mode", "seed", "topology_ids", "topology_id", "segment_lengths", "segment_length",
-                "learning_rates", "learning_rate", "batch_sizes", "batch_size", "epochs", "snr_db", "jitter", "augmentation", "optimization"):
+                "learning_rates", "learning_rate", "batch_sizes", "batch_size", "epochs", "snr_db", "jitter", "augmentation", "optimization", "execution"):
         if key in config:
             lines.append(f"| `{key}` | {_md(_cell(config[key]))} |")
     lines += ["", f"Datensatzinventar: **{len(inventory)} Einträge**. Vollständige Labels, Gruppen, SigMF-Metadaten und vorliegende Dateifingerprints: `dataset_inventory.json` und `.csv`.",
               "Die Inventur behauptet keine vollständige IQ-Prüfsumme, wenn lediglich Metadaten-SHA oder Stat-Fingerprints vorliegen.", "",
               "Software-/Abhängigkeitsversionen, Quellprüfsummen, Hardware und Einstellungen bleiben vollständig in `provenance.json` und `report.json` erhalten.", ""]
+    if report.get("execution") or report.get("resource_telemetry"):
+        lines += ["## Parallelisierung und gemessene Ressourcen", "",
+                  "Ausführungsplan, tatsächlich verwendete Worker und Geräte stehen vollständig in `report.json`. Phasenzeiten: `phase_timings.csv`; zeitlich abgetastete CPU-/GPU-Werte: `resource_usage.csv`.",
+                  "Parallel summierte Job-/Trainingsarbeit ist keine Experimentwandzeit. CPU-Benchmarks pausieren andere Experimentworker; externe Hostlast ist nicht als ausgeschlossen verifiziert. GPU-Auslastung betrifft das gesamte Gerät und kann Arbeit anderer Programme enthalten. Fehlende Messwerte bleiben unbekannt.", ""]
     if inventory:
         omitted = sum(bool(_object(item).get("metadata_omitted_reason")) for item in inventory)
         if omitted:
@@ -678,6 +724,8 @@ def build_report_bundle(experiment: dict, destination: Path, events: list[dict] 
             put("events.json", (_json(event_data, pretty=True) + "\n").encode("utf-8"))
             put("events.jsonl", "".join(_json(item) + "\n" for item in event_data).encode("utf-8"))
             put("events.csv", _generic_csv(event_data))
+            put("resource_usage.csv", _resource_csv(event_data))
+            put("phase_timings.csv", _phase_csv(views))
             put("model_comparison.csv", _csv(comparison, COMPARISON_COLUMNS))
             for name, rows in tables.items():
                 put(name + ".csv", _csv(rows, TABLE_COLUMNS[name]))

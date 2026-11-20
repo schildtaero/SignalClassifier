@@ -417,8 +417,266 @@
       mode === "wideband" && estimate.budgetSeconds < seconds,
     );
   }
+  function telemetrySummary(sample, now = Date.now()) {
+    const source =
+      sample && typeof sample === "object" && !Array.isArray(sample)
+        ? sample
+        : {};
+    const numeric = (value, minimum = 0, maximum = Infinity) =>
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= minimum &&
+      value <= maximum
+        ? value
+        : null;
+    const timestamp =
+      typeof source.sampled_at === "string" && source.sampled_at.trim()
+        ? Date.parse(source.sampled_at)
+        : NaN;
+    const validTime =
+      Number.isFinite(timestamp) &&
+      typeof now === "number" &&
+      Number.isFinite(now);
+    const interval = numeric(source.interval_seconds, Number.MIN_VALUE);
+    const staleAfterSeconds = Math.max(10, 3 * (interval ?? 0));
+    const backendAge = numeric(source.age_seconds);
+    const ageSeconds =
+      backendAge ?? (validTime ? (now - timestamp) / 1000 : null);
+    const future = backendAge === null && ageSeconds !== null && ageSeconds < 0;
+    const stale =
+      source.stale === true ||
+      (ageSeconds !== null && ageSeconds > staleAfterSeconds);
+    const fresh = validTime && !future && !stale;
+    let reason = !validTime
+      ? "Keine gültige Messzeit verfügbar."
+      : future
+        ? "Die Messzeit liegt in der Zukunft. Der Uhrversatz zwischen Browser und Backend verhindert eine verlässliche Altersangabe."
+        : stale
+          ? "Die Messung ist als veraltet gemeldet oder liegt außerhalb des Aktualitätsfensters. Auslastungswerte sind nicht mehr aktuell."
+          : "";
+    if (typeof source.sampler_error === "string" && source.sampler_error)
+      reason = `${reason ? `${reason} ` : ""}Messfehler: ${source.sampler_error}`;
+    const cpu = source.cpu && typeof source.cpu === "object" ? source.cpu : {};
+    const gpu = source.gpu && typeof source.gpu === "object" ? source.gpu : {};
+    const available = gpu.available === true;
+    const devices =
+      available && Array.isArray(gpu.devices)
+        ? gpu.devices.map((device) => {
+            const d = device && typeof device === "object" ? device : {};
+            let used = numeric(d.memory_used_bytes),
+              total = numeric(d.memory_total_bytes, Number.MIN_VALUE);
+            const inconsistentMemory =
+              used !== null && total !== null && used > total;
+            if (!fresh || inconsistentMemory) {
+              used = null;
+              total = null;
+            }
+            return {
+              index: Number.isInteger(d.index) && d.index >= 0 ? d.index : null,
+              name: typeof d.name === "string" && d.name ? d.name : "GPU-Gerät",
+              utilizationPercent: fresh
+                ? numeric(d.utilization_percent, 0, 100)
+                : null,
+              memoryUsedBytes: used,
+              memoryTotalBytes: total,
+              inconsistentMemory,
+            };
+          })
+        : [];
+    return {
+      fresh,
+      stale,
+      future,
+      reason,
+      sampledAt: validTime ? new Date(timestamp).toISOString() : null,
+      ageSeconds: ageSeconds !== null && !future ? ageSeconds : null,
+      intervalSeconds: interval,
+      staleAfterSeconds,
+      cpu: {
+        systemPercent: fresh ? numeric(cpu.system_percent, 0, 100) : null,
+        processPercent: fresh ? numeric(cpu.process_percent) : null,
+        processScope:
+          typeof cpu.process_percent_scope === "string"
+            ? cpu.process_percent_scope
+            : null,
+        appSystemPercent: fresh
+          ? numeric(cpu.app_system_percent, 0, 100)
+          : null,
+        processCount:
+          Number.isInteger(cpu.process_count) && cpu.process_count > 0
+            ? cpu.process_count
+            : null,
+        warmingProcesses:
+          Number.isInteger(cpu.warming_processes) && cpu.warming_processes >= 0
+            ? cpu.warming_processes
+            : null,
+        reason:
+          typeof cpu.reason === "string" && cpu.reason ? cpu.reason : null,
+        logicalCpus:
+          Number.isInteger(cpu.logical_cpus) && cpu.logical_cpus > 0
+            ? cpu.logical_cpus
+            : null,
+      },
+      gpu: {
+        available,
+        provider:
+          typeof gpu.provider === "string" && gpu.provider
+            ? gpu.provider
+            : null,
+        scope: typeof gpu.scope === "string" ? gpu.scope : null,
+        reason:
+          typeof gpu.reason === "string" && gpu.reason
+            ? gpu.reason
+            : !available
+              ? "GPU-Messquelle nicht verfügbar."
+              : !devices.length
+                ? "Die Messquelle hat keine GPU-Gerätedaten geliefert."
+                : null,
+        devices,
+      },
+    };
+  }
+  function renderTelemetry(sample) {
+    const holder = $("#resource-telemetry-content");
+    if (!holder) return;
+    const summary = telemetrySummary(sample);
+    const value = (percentValue) =>
+      percentValue === null ? "—" : `${num(percentValue, 1)} %`;
+    const status = $("#resource-telemetry-status");
+    status.textContent = summary.fresh
+      ? "Aktuelle Messung"
+      : summary.future
+        ? "Uhrversatz"
+        : summary.stale
+          ? "Messung veraltet"
+          : "Keine aktuelle Messung";
+    status.className = `pill ${summary.fresh ? "cyan" : "amber"}`;
+    const timestamp = summary.sampledAt
+      ? `${new Date(summary.sampledAt).toLocaleTimeString("de-DE", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })} UTC`
+      : "—";
+    $("#resource-telemetry-time").textContent =
+      `Messung ${timestamp}${summary.ageSeconds === null ? "" : ` · vor ${num(summary.ageSeconds, 1)} s`}${summary.intervalSeconds === null ? " · Messintervall nicht angegeben" : ` · Messintervall ${num(summary.intervalSeconds, 1)} s`}`;
+    const notice = $("#resource-telemetry-notice");
+    notice.hidden = !summary.reason;
+    notice.textContent = summary.reason;
+    const cpuCard = el(
+      "article",
+      { class: "resource-telemetry-card resource-cpu-card" },
+      [
+        el("div", { class: "resource-telemetry-card-heading" }, [
+          el("h3", { text: "CPU-Auslastung" }),
+          el("span", {
+            class: "resource-device-caption",
+            text: summary.cpu.logicalCpus
+              ? `${num(summary.cpu.logicalCpus, 0)} logische CPUs`
+              : "CPU-Anzahl nicht gemeldet",
+          }),
+        ]),
+        el("div", { class: "resource-cpu-metrics" }, [
+          el("div", {}, [
+            el("span", { class: "metric-label", text: "SYSTEM" }),
+            el("strong", { text: value(summary.cpu.systemPercent) }),
+            el("small", { text: "Gesamtsystem · 0–100 %" }),
+          ]),
+          el("div", {}, [
+            el("span", { class: "metric-label", text: "APP / GESAMTSYSTEM" }),
+            el("strong", { text: value(summary.cpu.appSystemPercent) }),
+            el("small", {
+              text: "App und Trainingworker · auf 0–100 % der verfügbaren CPU-Kapazität normiert",
+            }),
+          ]),
+          el("div", {}, [
+            el("span", { class: "metric-label", text: "APP + WORKER" }),
+            el("strong", { text: value(summary.cpu.processPercent) }),
+            el("small", {
+              text: [
+                "one_logical_cpu=100%",
+                "application_process_tree_one_logical_cpu=100%",
+              ].includes(summary.cpu.processScope)
+                ? `100 % entsprechen einem logischen CPU-Kern; der Wert kann über 100 % liegen.${summary.cpu.processCount ? ` ${summary.cpu.processCount} Prozesse gemessen.` : ""}`
+                : "Der Messbereich des Prozesswerts wurde nicht angegeben.",
+            }),
+          ]),
+        ]),
+        summary.cpu.reason
+          ? el("p", { class: "field-help", text: summary.cpu.reason })
+          : null,
+      ],
+    );
+    const gpu = summary.gpu;
+    const gpuCards = gpu.devices.length
+      ? gpu.devices.map((device) =>
+          el(
+            "article",
+            { class: "resource-telemetry-card resource-gpu-card" },
+            [
+              el("div", { class: "resource-telemetry-card-heading" }, [
+                el("h3", { text: device.name }),
+                el("span", {
+                  class: "resource-device-caption",
+                  text:
+                    device.index === null
+                      ? "GPU-Gerätemessung"
+                      : `GPU ${device.index} · Gerätemessung`,
+                }),
+              ]),
+              el("strong", {
+                class: "resource-gpu-utilization",
+                text: value(device.utilizationPercent),
+              }),
+              device.utilizationPercent === null
+                ? el("p", {
+                    class: "field-help",
+                    text:
+                      gpu.reason ||
+                      (!summary.fresh
+                        ? "Keine aktuelle Auslastungsmessung."
+                        : "Der GPU-Auslastungswert wurde von der Messquelle nicht geliefert."),
+                  })
+                : null,
+              el("div", { class: "resource-vram" }, [
+                el("span", {
+                  class: "metric-label",
+                  text: "VRAM BELEGT / GESAMT",
+                }),
+                el("strong", {
+                  text: `${bytes(device.memoryUsedBytes)} / ${bytes(device.memoryTotalBytes)}`,
+                }),
+              ]),
+              el("small", {
+                class: "resource-device-caption",
+                text: device.inconsistentMemory
+                  ? "Inkonsistente VRAM-Messwerte; keine Belegung angezeigt."
+                  : `Quelle: ${gpu.provider || "nicht angegeben"}${gpu.scope === "whole_device" ? " · gesamtes Gerät einschließlich anderer Prozesse" : " · Messbereich nicht angegeben"}`,
+              }),
+            ],
+          ),
+        )
+      : [
+          el(
+            "article",
+            { class: "resource-telemetry-card resource-gpu-card" },
+            [
+              el("div", { class: "resource-telemetry-card-heading" }, [
+                el("h3", { text: "GPU-Gerätemessung" }),
+                el("span", {
+                  class: "resource-device-caption",
+                  text: gpu.provider || "Messquelle nicht verfügbar",
+                }),
+              ]),
+              el("strong", { class: "resource-gpu-utilization", text: "—" }),
+              el("p", {
+                class: "field-help",
+                text: gpu.reason || "Noch keine GPU-Messwerte vorhanden.",
+              }),
+            ],
+          ),
+        ];
+    holder.replaceChildren(cpuCard, ...gpuCards);
+  }
   function renderStatus() {
     const status = state.status;
+    renderTelemetry(status.telemetry);
     const rx = status.receiver || {};
     const config = rx.config || rx;
     const running = receiverRunning(rx);
@@ -2772,6 +3030,61 @@
       throw new Error(`${name}: bitte gültige Zahlen mit Komma trennen.`);
     return values;
   }
+  function normalizeExecutionConfig(value) {
+    const defaults = {
+      mode: "auto",
+      max_workers: 0,
+      cpu_threads: 0,
+      preprocessing_workers: 0,
+      gpu_workers: 0,
+    };
+    if (value === undefined || value === null) return defaults;
+    if (typeof value !== "object" || Array.isArray(value))
+      throw new Error("execution muss ein JSON-Objekt sein.");
+    if (Object.keys(value).some((key) => !Object.hasOwn(defaults, key)))
+      throw new Error(
+        "Unbekannte Ausführungsparameter; bitte Feldnamen prüfen.",
+      );
+    const execution = { ...defaults, ...value };
+    if (!["auto", "serial", "parallel"].includes(execution.mode))
+      throw new Error("Ausführung muss auto, serial oder parallel sein.");
+    for (const [key, maximum] of Object.entries({
+      max_workers: 8,
+      cpu_threads: 32,
+      preprocessing_workers: 8,
+      gpu_workers: 4,
+    }))
+      if (
+        !Number.isInteger(execution[key]) ||
+        execution[key] < 0 ||
+        execution[key] > maximum
+      )
+        throw new Error(
+          `execution.${key}: ganze Zahl von 0 (automatisch) bis ${maximum} erforderlich.`,
+        );
+    return execution;
+  }
+  function executionConfigFromForm(form) {
+    return normalizeExecutionConfig({
+      mode: form.elements.execution_mode.value,
+      ...Object.fromEntries(
+        [
+          "max_workers",
+          "cpu_threads",
+          "preprocessing_workers",
+          "gpu_workers",
+        ].map((key) => [
+          key,
+          finiteNumber(form.elements[`execution_${key}`].value),
+        ]),
+      ),
+    });
+  }
+  function populateExecutionForm(execution) {
+    const form = $("#experiment-form");
+    for (const [key, value] of Object.entries(execution))
+      form.elements[`execution_${key}`].value = String(value);
+  }
   function normalizeOptimizationConfig(value, baseLength = 2048) {
     const base =
       Number.isInteger(baseLength) && baseLength >= 256 && baseLength <= 65536
@@ -3087,6 +3400,7 @@
       use_priors: f.has("use_priors"),
     };
     config.optimization = optimization;
+    config.execution = executionConfigFromForm(form);
     if (
       config.optimization.enabled &&
       config.evaluation_mode === "training_only"
@@ -3643,6 +3957,503 @@
     }
     return [...found.values()];
   }
+  function executionModeLabel(mode) {
+    return (
+      { auto: "Automatisch", serial: "Seriell", parallel: "Parallel" }[mode] ||
+      text(mode)
+    );
+  }
+  function executionPhaseLabel(phase) {
+    return (
+      {
+        queued: "Warteschlange",
+        initializing: "Initialisierung",
+        starting: "Worker startet",
+        prepare: "Vorbereitung / Vorverarbeitung",
+        evaluate: "Auswertung",
+        compute: "Berechnung",
+        execution: "Koordination",
+        waiting_for_cpu_benchmark: "Warten auf CPU-Benchmarkfreigabe",
+        paused_for_cpu_benchmark: "Für CPU-Benchmark pausiert",
+        preprocessing: "CPU-Vorverarbeitung",
+        device_transfer: "Geräteübertragung",
+        training: "Training",
+        train: "Training",
+        validation: "Validierung",
+        checkpoint: "Modell speichern",
+        validation_grid: "Validierungsraster",
+        cpu_benchmark: "CPU-Inferenzbenchmark",
+        benchmark_wait: "Warten auf Benchmarkfreigabe",
+        optimize: "HPO-Suche",
+        complete: "Abgeschlossen",
+        completed: "Abgeschlossen",
+      }[phase] || text(phase, "Noch keine Phase gemeldet")
+    );
+  }
+  function phaseTimingRows(report) {
+    const timings = report?.phase_timings || {};
+    const labels = {
+      source_loading_seconds: "Quellen laden / Signale vorbereiten",
+      fingerprint_seconds: "Datenfingerprints berechnen",
+      preprocessing_seconds: "Vorverarbeitung",
+      device_transfer_seconds: "Übertragung aufs Trainingsgerät",
+      training_epoch_seconds: "Trainingsepochen",
+      validation_seconds: "Validierung",
+      checkpoint_seconds: "Modell speichern",
+      validation_grid_seconds: "Robustheitsraster der Validierung",
+      cpu_benchmark_seconds: "CPU-Inferenzbenchmark",
+      benchmark_wait_seconds: "Warten auf Benchmarkfreigabe",
+    };
+    return Object.entries(labels)
+      .filter(
+        ([key]) =>
+          typeof timings[key] === "number" &&
+          Number.isFinite(timings[key]) &&
+          timings[key] >= 0,
+      )
+      .map(([key, label]) => ({ key, label, seconds: timings[key] }));
+  }
+  function phaseTime(value) {
+    return typeof value !== "number" || !Number.isFinite(value) || value < 0
+      ? "—"
+      : value < 1
+        ? `${num(value * 1000, 2)} ms`
+        : duration(value);
+  }
+  function trainingPhasesNode(report, compact = false) {
+    const rows = phaseTimingRows(report),
+      training = report.training_execution || {};
+    const details = el(
+      "details",
+      { class: `training-phase-details${compact ? " compact" : ""}` },
+      [
+        el("summary", {
+          text: compact
+            ? "Ressourcen und Abschnittszeiten"
+            : "Tatsächliche Trainingsressourcen und Abschnittszeiten",
+        }),
+        el("div", { class: "training-execution-facts" }, [
+          ...[
+            ["TRAININGSGERÄT", training.device],
+            ["TRAININGSBATCH", training.training_batch_size],
+            ["VALIDIERUNGSBATCH", training.validation_batch_size],
+            ["CPU-THREADS / WORKER", training.cpu_threads],
+            ["VORVERARBEITER / WORKER", training.preprocessing_workers],
+            ["CHECKPOINT-GERÄT", training.checkpoint_device],
+            ["TRAININGSBATCHES", training.training_batches],
+            ["VALIDIERUNGSBATCHES", training.validation_batches],
+            ["LOSS-KOPIEN ZUR CPU", training.loss_host_transfers],
+            ["VALIDIERUNGSÜBERTRAGUNGEN", training.validation_tensor_transfers],
+          ]
+            .filter(([, value]) => value !== undefined && value !== null)
+            .map(([label, value]) =>
+              el("div", {}, [
+                el("span", { class: "metric-label", text: label }),
+                el("strong", { text: text(value) }),
+              ]),
+            ),
+        ]),
+        el("p", {
+          class: "field-help training-phase-note",
+          text: "Gemessene Abschnittszeiten dieses Modells beziehungsweise Trials. Bei parallelen Workern überlappen Zeiten; ihre Summe ist keine Gesamtwandzeit.",
+        }),
+        Number.isFinite(report.metrics?.training_wall_seconds) &&
+        Number.isFinite(report.metrics?.managed_training_pause_seconds)
+          ? el("p", {
+              class: "field-help training-phase-note",
+              text: `Trainingswandzeit ${phaseTime(report.metrics.training_wall_seconds)} · davon verwaltete Koordinationspausen ${phaseTime(report.metrics.managed_training_pause_seconds)} · aktive Trainingszeit ${phaseTime(report.metrics.training_seconds)}. Der Trainingsanteil des Scores verwendet die um diese Pausen bereinigte Zeit.`,
+            })
+          : null,
+        report.phase_timing_scope
+          ? el("p", {
+              class: "field-help training-phase-note",
+              text: `Messbereich: ${typeof report.phase_timing_scope === "string" ? report.phase_timing_scope : JSON.stringify(report.phase_timing_scope)}`,
+            })
+          : null,
+      ],
+    );
+    details.append(
+      rows.length
+        ? el("div", { class: "table-scroll" }, [
+            el("table", { class: "data-table training-phases-table" }, [
+              el("thead", {}, [
+                el("tr", {}, [
+                  el("th", { text: "Abschnitt" }),
+                  el("th", { text: "Gemessene Zeit" }),
+                ]),
+              ]),
+              el(
+                "tbody",
+                {},
+                rows.map((row) =>
+                  el("tr", {}, [
+                    el("td", { text: row.label }),
+                    el("td", { class: "mono", text: phaseTime(row.seconds) }),
+                  ]),
+                ),
+              ),
+            ]),
+          ])
+        : el("p", {
+            class: "field-help training-phase-note",
+            text: "Für diesen Bericht wurden noch keine Abschnittszeiten gemeldet.",
+          }),
+    );
+    return details;
+  }
+  function executionProgressNode(experiment) {
+    const progress = experiment.execution_progress;
+    if (!progress || typeof progress !== "object") return null;
+    const current = ["queued", "running", "cancelling"].includes(
+      experiment.status,
+    );
+    const workers = arr(progress.workers);
+    return el(
+      "section",
+      {
+        class: "execution-progress-panel",
+        "aria-label": "Gemeldete Worker und Verarbeitungsphasen",
+      },
+      [
+        el("div", { class: "execution-report-heading" }, [
+          el("h3", {
+            text: current
+              ? "Worker und laufende Phasen"
+              : "Letzter gemeldeter Workerstand",
+          }),
+          pill(
+            `${num(progress.active_workers, 0)} aktive Worker`,
+            current ? "cyan" : "",
+          ),
+        ]),
+        el("p", {
+          class: "field-help execution-report-note",
+          text: `Jobs: ${num(progress.completed_jobs, 0)} / ${num(progress.total_jobs, 0)} abgeschlossen · ${num(progress.queued_jobs, 0)} in der Warteschlange. Workerzahlen stammen vom Coordinator; sie sind keine Anzahl ausgewählter Topologien.`,
+        }),
+        workers.length
+          ? el("div", { class: "table-scroll" }, [
+              el("table", { class: "data-table execution-workers-table" }, [
+                el("thead", {}, [
+                  el(
+                    "tr",
+                    {},
+                    [
+                      "Job / Topologie",
+                      "Trial",
+                      "Status / Phase",
+                      "Trainingsgerät",
+                      "Fortschritt",
+                      "Prozess",
+                    ].map((label) => el("th", { text: label })),
+                  ),
+                ]),
+                el(
+                  "tbody",
+                  {},
+                  workers.slice(0, 64).map((worker) => {
+                    const percentage =
+                      typeof worker.progress === "number" &&
+                      Number.isFinite(worker.progress)
+                        ? `${num(Math.max(0, Math.min(100, worker.progress <= 1 ? worker.progress * 100 : worker.progress)), 1)} %`
+                        : "—";
+                    const topology = state.topologies.find(
+                      (t) => t.id === worker.topology_id,
+                    );
+                    return el("tr", {}, [
+                      detailCell(
+                        topology?.name || worker.topology_id,
+                        worker.job_index !== undefined
+                          ? `Job ${worker.job_index}`
+                          : undefined,
+                      ),
+                      el("td", { class: "mono", text: text(worker.trial) }),
+                      detailCell(
+                        statusName(worker.status),
+                        executionPhaseLabel(worker.phase),
+                      ),
+                      el("td", { class: "mono", text: text(worker.device) }),
+                      el("td", { class: "mono", text: percentage }),
+                      el("td", { class: "mono", text: text(worker.pid) }),
+                    ]);
+                  }),
+                ),
+              ]),
+            ])
+          : el("p", {
+              class: "field-help execution-report-note",
+              text: "Noch keine einzelnen Worker gemeldet.",
+            }),
+        workers.length > 64
+          ? el("p", {
+              class: "field-help execution-report-note",
+              text: `64 von ${workers.length} Worker-Einträgen angezeigt.`,
+            })
+          : null,
+      ],
+    );
+  }
+  function resourceMetricSummary(metric) {
+    const count =
+      Number.isInteger(metric?.sample_count) && metric.sample_count > 0
+        ? metric.sample_count
+        : 0;
+    const measured = (value) =>
+      count > 0 &&
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= 0
+        ? value
+        : null;
+    return {
+      count,
+      mean: measured(metric?.mean),
+      maximum: measured(metric?.maximum),
+    };
+  }
+  function resourceHistoryNode(summary) {
+    const cpu = summary.cpu || {},
+      gpu = arr(summary.gpu_devices);
+    const percentage = (value) => (value === null ? "—" : `${num(value, 1)} %`);
+    const cpuMetrics = [
+      ["CPU · Gesamtsystem", cpu.system_percent],
+      ["CPU · App + Worker je logischem Kern", cpu.process_percent],
+      ["CPU · App / Gesamtsystem", cpu.app_system_percent],
+    ];
+    const stamp = (value) =>
+      typeof value === "string" && Number.isFinite(Date.parse(value))
+        ? new Date(value).toISOString().replace("T", " ").replace("Z", " UTC")
+        : "—";
+    return el(
+      "section",
+      {
+        class: "resource-history-panel",
+        "aria-label": "Historische CPU- und GPU-Messreihe dieses Experiments",
+      },
+      [
+        el("div", { class: "execution-report-heading" }, [
+          el("div", {}, [
+            el("span", {
+              class: "panel-kicker",
+              text: "GEMESSEN WÄHREND DIESES EXPERIMENTS",
+            }),
+            el("h3", { text: "CPU / GPU im Versuchszeitraum" }),
+          ]),
+          pill(`${num(summary.sample_count, 0)} Stichproben`),
+        ]),
+        el("p", {
+          class: "field-help execution-report-note",
+          text: `${stamp(summary.first_sample_utc)} bis ${stamp(summary.last_sample_utc)}. Werte umfassen den gesamten Versuch einschließlich CPU- und Wartephasen; sie sind keine reine GPU-Trainingsauslastung.`,
+        }),
+        el("div", { class: "table-scroll" }, [
+          el("table", { class: "data-table resource-history-table" }, [
+            el("thead", {}, [
+              el(
+                "tr",
+                {},
+                ["CPU-Messgröße", "Mittelwert", "Maximum", "Messpunkte"].map(
+                  (label) => el("th", { text: label }),
+                ),
+              ),
+            ]),
+            el(
+              "tbody",
+              {},
+              cpuMetrics.map(([label, metric]) => {
+                const value = resourceMetricSummary(metric);
+                return el("tr", {}, [
+                  el("td", { text: label }),
+                  el("td", { class: "mono", text: percentage(value.mean) }),
+                  el("td", { class: "mono", text: percentage(value.maximum) }),
+                  el("td", { class: "mono", text: num(value.count, 0) }),
+                ]);
+              }),
+            ),
+          ]),
+        ]),
+        gpu.length
+          ? el("div", { class: "table-scroll" }, [
+              el(
+                "table",
+                {
+                  class: "data-table resource-history-table gpu-history-table",
+                },
+                [
+                  el("thead", {}, [
+                    el(
+                      "tr",
+                      {},
+                      [
+                        "GPU-Gerät",
+                        "Auslastung Ø / max.",
+                        "VRAM belegt Ø / max.",
+                        "VRAM gesamt max.",
+                        "GPU-Messpunkte",
+                      ].map((label) => el("th", { text: label })),
+                    ),
+                  ]),
+                  el(
+                    "tbody",
+                    {},
+                    gpu.map((device) => {
+                      const utilization = resourceMetricSummary(
+                          device.utilization_percent,
+                        ),
+                        used = resourceMetricSummary(device.memory_used_bytes),
+                        total = resourceMetricSummary(
+                          device.memory_total_bytes,
+                        );
+                      return el("tr", {}, [
+                        detailCell(
+                          device.name,
+                          device.index !== undefined
+                            ? `GPU ${device.index}`
+                            : undefined,
+                        ),
+                        el("td", {
+                          class: "mono",
+                          text: `${percentage(utilization.mean)} / ${percentage(utilization.maximum)}`,
+                        }),
+                        el("td", {
+                          class: "mono",
+                          text: `${bytes(used.mean)} / ${bytes(used.maximum)}`,
+                        }),
+                        el("td", { class: "mono", text: bytes(total.maximum) }),
+                        el("td", {
+                          class: "mono",
+                          text: num(utilization.count, 0),
+                        }),
+                      ]);
+                    }),
+                  ),
+                ],
+              ),
+            ])
+          : el("p", {
+              class: "field-help execution-report-note",
+              text: "Im Versuchszeitraum lagen keine GPU-Gerätemessungen vor.",
+            }),
+        el("p", {
+          class: "field-help execution-report-note",
+          text: "GPU-Werte beziehen sich auf das gesamte Gerät einschließlich anderer Anwendungen. Der rohe App-Prozessbaumwert kann über 100 % liegen: Ein logischer CPU-Kern entspricht 100 %. Kurzzeitige Rechenbursts können zwischen Messpunkten fehlen.",
+        }),
+        summary.sampling_note
+          ? el("p", {
+              class: "field-help execution-report-note",
+              text: text(summary.sampling_note),
+            })
+          : null,
+        el("details", { class: "result-details" }, [
+          el("summary", {
+            text: "Messumfang und vollständige Ressourcenstatistik",
+          }),
+          el("pre", { text: JSON.stringify(summary, null, 2) }),
+        ]),
+      ],
+    );
+  }
+  function executionReportNode(execution) {
+    const requested = execution.requested || {},
+      resolved = execution.resolved || {};
+    const options = [
+      ["Ausführungsmodus", "mode"],
+      ["Maximale Trainingworker", "max_workers"],
+      ["CPU-Threads je Trainingworker", "cpu_threads"],
+      ["Vorverarbeiter je Trainingworker", "preprocessing_workers"],
+      ["Maximale GPU-Worker", "gpu_workers"],
+    ];
+    const requestedValue = (key) =>
+      key === "mode"
+        ? executionModeLabel(requested[key])
+        : requested[key] === 0
+          ? "Automatisch"
+          : num(requested[key], 0);
+    return el(
+      "section",
+      {
+        class: "execution-report-panel",
+        "aria-label": "Tatsächlich verwendeter Ausführungsplan",
+      },
+      [
+        el("div", { class: "execution-report-heading" }, [
+          el("div", {}, [
+            el("span", {
+              class: "panel-kicker",
+              text: "AUSFÜHRUNGSPLAN / GEMESSENE GESAMTDAUER",
+            }),
+            el("h3", { text: "Angefordert und tatsächlich verwendet" }),
+          ]),
+          pill(
+            { topologies: "Jobtyp: Topologien", trials: "Jobtyp: Suchtrials" }[
+              execution.axis
+            ] || text(execution.axis, "Ausführung"),
+          ),
+        ]),
+        el("div", { class: "execution-report-metrics" }, [
+          metric(
+            "JOB-WANDZEIT",
+            phaseTime(execution.wall_seconds),
+            "Verstrichene Dauer des Coordinatorlaufs",
+          ),
+          metric(
+            "WORKER-SPITZE",
+            num(execution.peak_active_workers, 0),
+            "Höchste gemeldete Zahl gleichzeitig aktiver Worker",
+          ),
+          metric(
+            "JOBS ABGESCHLOSSEN",
+            num(execution.completed_jobs, 0),
+            `${num(execution.failed_jobs, 0)} fehlgeschlagen · ${num(execution.timed_out_jobs, 0)} Zeitlimit · ${num(execution.cancelled_jobs, 0)} abgebrochen`,
+          ),
+        ]),
+        el("div", { class: "table-scroll" }, [
+          el("table", { class: "data-table execution-plan-table" }, [
+            el("thead", {}, [
+              el(
+                "tr",
+                {},
+                ["Einstellung", "Angefordert", "Aufgelöst"].map((label) =>
+                  el("th", { text: label }),
+                ),
+              ),
+            ]),
+            el(
+              "tbody",
+              {},
+              options.map(([label, key]) =>
+                el("tr", {}, [
+                  el("td", { text: label }),
+                  el("td", { text: requestedValue(key) }),
+                  el("td", {
+                    text:
+                      key === "mode"
+                        ? executionModeLabel(resolved[key])
+                        : num(resolved[key], 0),
+                  }),
+                ]),
+              ),
+            ),
+          ]),
+        ]),
+        el("p", {
+          class: "field-help execution-report-note",
+          text: `CPU-Budget ${num(resolved.cpu_budget, 0)} · RAM-Budget ${bytes(resolved.ram_budget_bytes)} · geschätzt ${bytes(resolved.estimated_ram_per_worker_bytes)} je Worker. GPU-Speicherbudget ${bytes(resolved.gpu_memory_budget_bytes)} · geschätzt ${bytes(resolved.estimated_gpu_per_worker_bytes)} je GPU-Worker.`,
+        }),
+        ...arr(execution.warnings).map((warning) =>
+          el("p", { class: "execution-warning", text: text(warning) }),
+        ),
+        el("p", {
+          class: "field-help execution-report-note",
+          text: "Angeforderte Obergrenzen und tatsächliche Auflösung können abweichen. Abschnitts- und HPO-Zeiten mehrerer Worker sind summierte Arbeitszeiten und überlappen bei Parallelität; mit der Job-Wandzeit oben vergleichen. Fremdlast auf dem Rechner ist dadurch nicht ausgeschlossen.",
+        }),
+        el("details", { class: "result-details" }, [
+          el("summary", {
+            text: "Ressourcen-Snapshot und vollständiger Ausführungsplan",
+          }),
+          el("pre", { text: JSON.stringify(execution, null, 2) }),
+        ]),
+      ],
+    );
+  }
   function optimizationSummaryNode(summary) {
     return el(
       "section",
@@ -3664,14 +4475,14 @@
         ]),
         el("div", { class: "optimization-report-metrics" }, [
           metric(
-            "SUCHDAUER · ALLE",
+            "SUCHZEIT · SUMMIERT",
             duration(summary.elapsed_seconds),
-            "Summe der Suchläufe aller Topologien",
+            "Summe der Suchläufe; parallel überlappend",
           ),
           metric(
-            "TRAINING · ALLE",
+            "TRAINING · SUMMIERT",
             duration(summary.total_training_seconds),
-            "Alle Suchtrials, nicht nur Gewinner",
+            "Summierte Workerzeit aller Suchtrials",
           ),
           metric(
             "TRIALS · ALLE",
@@ -3745,7 +4556,7 @@
           metric(
             "TRAINING GESAMT",
             duration(optimization.total_training_seconds),
-            "Training über alle Suchtrials",
+            "Summierte Trainingszeit aller Suchtrials",
           ),
           metric(
             "TRIALS ABGESCHLOSSEN",
@@ -3817,14 +4628,23 @@
                     },
                     [
                       el("td", { class: "mono", text: text(trial.trial) }),
-                      detailCell(
-                        {
-                          completed: "Abgeschlossen",
-                          failed: "Fehlgeschlagen",
-                          timed_out: "Zeitlimit",
-                        }[trial.status] || text(trial.status),
-                        trial.error,
-                      ),
+                      el("td", {}, [
+                        el("strong", {
+                          text:
+                            {
+                              completed: "Abgeschlossen",
+                              failed: "Fehlgeschlagen",
+                              timed_out: "Zeitlimit",
+                            }[trial.status] || text(trial.status),
+                        }),
+                        trial.error
+                          ? el("small", { text: text(trial.error) })
+                          : null,
+                        trial.training_execution ||
+                        phaseTimingRows(trial).length
+                          ? trainingPhasesNode(trial, true)
+                          : null,
+                      ]),
                       ...[
                         config.segment_length,
                         config.learning_rate,
@@ -3962,6 +4782,10 @@
             statusName(experiment.status),
         }),
       );
+      const lastWorkers = executionProgressNode(experiment);
+      if (lastWorkers) body.append(lastWorkers);
+      if (experiment.resource_telemetry)
+        body.append(resourceHistoryNode(experiment.resource_telemetry));
       for (const partial of partialOptimizationReports(experiment, report))
         body.append(
           el("div", {}, [
@@ -4007,9 +4831,15 @@
           }),
         ]),
       );
+      const workers = executionProgressNode(experiment);
+      if (workers) body.append(workers);
       return;
     }
     const n = el("div");
+    if (fullReport.execution)
+      n.append(executionReportNode(fullReport.execution));
+    if (fullReport.resource_telemetry)
+      n.append(resourceHistoryNode(fullReport.resource_telemetry));
     if (fullReport.optimization_summary?.scope === "all_topologies")
       n.append(optimizationSummaryNode(fullReport.optimization_summary));
     if (comparison.length) {
@@ -4025,6 +4855,8 @@
         ]),
       );
     }
+    if (report.training_execution || phaseTimingRows(report).length)
+      n.append(trainingPhasesNode(report));
     if (report.optimization?.enabled === true && !trainingOnly(report))
       n.append(optimizationReportNode(report.optimization));
     if (
@@ -4927,6 +5759,7 @@
       throw new Error("Ungültiger Bewertungsmodus.");
     if (c.device !== undefined && !["auto", "cpu", "cuda"].includes(c.device))
       throw new Error("Ungültiges Rechengerät.");
+    const execution = normalizeExecutionConfig(c.execution);
     const optimization = normalizeOptimizationConfig(
       c.optimization,
       c.segment_length || arr(c.segment_lengths)[0] || 2048,
@@ -5041,6 +5874,7 @@
     return {
       config: c,
       optimization,
+      execution,
       topologyIds,
       recordingIds: [...new Set(ids)].filter((id) => available.has(id)),
       missingRecordingIds: [...new Set(ids)].filter((id) => !available.has(id)),
@@ -5099,6 +5933,7 @@
     form.elements.use_priors.checked = c.use_priors === true;
     form.elements.experiment_notes.value = c.experiment_notes || "";
     populateOptimizationForm(prepared.optimization);
+    populateExecutionForm(prepared.execution);
     setExperimentRecordingSelection(prepared.recordingIds);
     $("#experiment-recordings-field").hidden =
       form.elements.source.value !== "recordings";

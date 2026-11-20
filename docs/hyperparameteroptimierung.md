@@ -1,12 +1,12 @@
 # Automatische Hyperparameteroptimierung
 
-Im Experiment-Setup kann die automatische Suche eingeschaltet werden. Sie läuft lokal auf CPU beziehungsweise mit der gewählten PyTorch/CUDA-Trainingsoption und benötigt keine zusätzliche Optimierungsbibliothek. Ohne PyTorch bleibt die Suche für Feature-LDA verfügbar. Mehrere ausgewählte Topologien werden nacheinander optimiert.
+Im Experiment-Setup kann die automatische Suche eingeschaltet werden. Sie läuft lokal auf CPU beziehungsweise mit der gewählten PyTorch/CUDA-Trainingsoption und benötigt keine zusätzliche Optimierungsbibliothek. Ohne PyTorch bleibt die Suche für Feature-LDA verfügbar. Die [Ausführungssteuerung](parallelisierung.md) kann mehrere Topologien parallel optimieren; bei nur einer Topologie können deren unabhängige Suchversuche parallel laufen. Es werden keine verschachtelten Trainingspools erzeugt.
 
 ## Suchverfahren und Suchraum
 
 Das Verfahren ist **Random Search**, keine behauptete bayessche Optimierung: Ein gespeicherter Seed erzeugt eindeutige Vorschläge. Die Lernrate wird logarithmisch gleichverteilt gezogen; Segmentlänge, Batchgröße und Epochenbudget stammen aus den gewählten Listen. Die Suche ist vorab durch Versuchszahl und Zeitbudget begrenzt. Feature-LDA variiert ausschließlich Segmentlängen, weil Lernrate, Batchgröße und Epochen dort keine Wirkung haben.
 
-Standard sind zwölf Versuche und 300 Sekunden **je Topologie**. Der Standard-Suchraum umfasst halbe, aktuelle und doppelte Segmentlänge innerhalb 256–65536 Samples, Lernraten von `1e-5` bis `1e-2`, Batchgrößen 16/32/64 und Epochenbudgets 5/10/20. Die Oberfläche erlaubt eigene Werte. Ungeeignete Segmentlängen werden mit einer dokumentierten Begründung aus dem wirksamen Suchraum ausgeschlossen; Aufnahmen werden dadurch nicht heimlich weggelassen. Bestehende Speicher-, Segment- und Gruppenregeln gelten weiterhin.
+Standard sind zwölf Versuche und 300 Sekunden **je Topologie**. Parallel laufende Topologiebudgets können sich zeitlich überlappen; die Summe aller Jobzeiten ist keine Experimentwandzeit. Der Standard-Suchraum umfasst halbe, aktuelle und doppelte Segmentlänge innerhalb 256–65536 Samples, Lernraten von `1e-5` bis `1e-2`, Batchgrößen 16/32/64 und Epochenbudgets 5/10/20. Die Oberfläche erlaubt eigene Werte. Ungeeignete Segmentlängen werden mit einer dokumentierten Begründung aus dem wirksamen Suchraum ausgeschlossen; Aufnahmen werden dadurch nicht heimlich weggelassen. Bestehende Speicher-, Segment- und Gruppenregeln gelten weiterhin.
 
 Beispiel für die Experiment-API:
 

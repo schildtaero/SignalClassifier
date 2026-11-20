@@ -933,6 +933,45 @@
           hidden
           aria-label="Experimente"
         >
+          <section
+            class="panel resource-telemetry-panel"
+            aria-label="Aktuell gemessene CPU- und GPU-Auslastung des Backends"
+          >
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker"
+                  >AKTUELLER BACKENDRECHNER / MESSWERTE</span
+                >
+                <h2>Rechenressourcen</h2>
+              </div>
+              <span class="pill" id="resource-telemetry-status"
+                >Keine aktuelle Messung</span
+              >
+            </div>
+            <p class="resource-telemetry-time" id="resource-telemetry-time">
+              Noch keine Messung verfügbar.
+            </p>
+            <p
+              class="notice resource-telemetry-notice"
+              id="resource-telemetry-notice"
+              hidden
+            ></p>
+            <div
+              class="resource-telemetry-content"
+              id="resource-telemetry-content"
+            >
+              <div class="empty-state compact">
+                CPU- und GPU-Werte erscheinen mit der nächsten Statusmessung.
+              </div>
+            </div>
+            <p class="panel-note resource-telemetry-scope">
+              Aktuelle Messung des Rechners, auf dem das Backend läuft.
+              GPU-Werte sind Gerätemessungen, keine CUDA-Occupancy. Die
+              Windows-3D-Anzeige misst eine andere Grafik-Engine. Historische
+              Trainings- und Bewertungswerte in Berichten und Modellpaketen
+              gehören zum jeweils dokumentierten Versuchsrechner.
+            </p>
+          </section>
           <div class="experiment-layout">
             <article class="panel experiment-config">
               <div class="panel-heading">
@@ -1264,6 +1303,83 @@
                       Bis zu 12 Kombinationen aus Segmentlänge, Lernrate und
                       Batchgröße. Auswahl anhand der Validierung.
                     </p>
+                  </details>
+                  <details class="advanced-settings execution-settings">
+                    <summary>Ressourcen / Parallelisierung</summary>
+                    <div class="execution-settings-body">
+                      <label
+                        >Ausführungsmodus<select name="execution_mode">
+                          <option value="auto">
+                            Automatisch · Ressourcenbudget beachten
+                          </option>
+                          <option value="serial">
+                            Seriell · ein Trainingworker
+                          </option>
+                          <option value="parallel">
+                            Parallel · mehrere Trainingworker
+                          </option>
+                        </select></label
+                      >
+                      <div class="form-pair">
+                        <label
+                          >Max. Trainingworker <em>0 = automatisch</em
+                          ><input
+                            name="execution_max_workers"
+                            type="number"
+                            min="0"
+                            max="8"
+                            step="1"
+                            value="0"
+                            required /></label
+                        ><label
+                          >CPU-Threads je Worker <em>0 = automatisch</em
+                          ><input
+                            name="execution_cpu_threads"
+                            type="number"
+                            min="0"
+                            max="32"
+                            step="1"
+                            value="0"
+                            required
+                        /></label>
+                      </div>
+                      <div class="form-pair">
+                        <label
+                          >Vorverarbeiter je Worker <em>0 = automatisch</em
+                          ><input
+                            name="execution_preprocessing_workers"
+                            type="number"
+                            min="0"
+                            max="8"
+                            step="1"
+                            value="0"
+                            required /></label
+                        ><label
+                          >Max. GPU-Worker <em>0 = automatisch</em
+                          ><input
+                            name="execution_gpu_workers"
+                            type="number"
+                            min="0"
+                            max="4"
+                            step="1"
+                            value="0"
+                            required
+                        /></label>
+                      </div>
+                      <p class="field-help">
+                        Auto stimmt CPU-, RAM- und GPU-Budgets gemeinsam ab. Die
+                        angeforderten Grenzen können vom Ausführungsplan
+                        reduziert werden; vier GPU-Worker sind keine Zusage für
+                        eine GPU mit 8 GiB. CPU-Threads und Vorverarbeiter
+                        gelten jeweils pro Trainingworker.
+                      </p>
+                      <p class="field-help">
+                        Diese Einstellungen gelten für das nächste Experiment.
+                        Der Bericht zeigt die tatsächlich aufgelöste
+                        Parallelität, Training-Batches und gemessene
+                        Abschnittszeiten.
+                      </p>
+                    </div>
                   </details>
                   <details class="advanced-settings">
                     <summary>Kanalstörungen & Hardwareeffekte</summary>

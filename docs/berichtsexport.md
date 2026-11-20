@@ -13,6 +13,8 @@ Der Export ist auch für laufende, fehlgeschlagene und abgebrochene Experimente 
 | `provenance.json` | Übergebene Provenienz, beispielsweise Queue-Zeitpunkt, Software-/Abhängigkeitsversionen, Quell-SHA, Hardware und Einstellungen |
 | `dataset_inventory.json`, `.csv` | Übergebenes Aufnahmeinventar mit Labels, Gruppen, RF-Parametern, verfügbaren SigMF-Metadaten und Fingerprints |
 | `events.json`, `.jsonl`, `.csv` | Vollständige übergebene Ablaufereignisse in ihrer Reihenfolge; JSONL wird normalisiert neu serialisiert |
+| `resource_usage.csv` | Abgetastete System-/App-Prozessbaum-CPU, GPU-Geräteauslastung und VRAM mit Messzeit, Quelle und Geltungsbereich; fehlende Werte bleiben leer |
+| `phase_timings.csv` | Phasenzeiten ausgewählter Modelle und Optimierungsversuche, einschließlich CPU-Benchmark-Wartezeiten |
 | `model_comparison.csv` | Validierung und abschließender Test getrennt, Score, CPU-/Trainingszeiten, Modellgröße und Hardwarekontext |
 | `candidates.csv` | Alle vorhandenen Such-/Sweepkandidaten mit Konfiguration und Originalzusatzfeldern |
 | `optimization_trials.csv` | Alle HPO-Versuche, einschließlich fehlgeschlagener, abgebrochener und zeitlich begrenzter Versuche |
@@ -49,6 +51,8 @@ Die Prüfsummen haben unterschiedliche Geltungsbereiche: Das ZIP-Manifest hasht 
 5. Vorhandene SVGs verwenden oder anhand der CSVs eigene, klar beschriftete Abbildungen erstellen. Fehlende HF-, Hardware- oder Generalisierungserfolge dürfen nicht ergänzt werden.
 
 Für reale Aufnahmen bleibt der ursprüngliche absolute RF-SNR häufig unbekannt. Das Augmentations-SNR beschreibt zusätzlich injiziertes Rauschen; Jitter wird in Sampleeinheiten angegeben. Latenz und Echtzeitfaktor gelten für den dokumentierten Rechner und Messpfad, einschließlich Batchgröße, Warmup, Featuregate und Modellladeumfang. Eine Referenznormierung ist kein universeller Umrechnungsfaktor zwischen Workstation und Laptop.
+
+Parallele Jobzeiten dürfen nicht als Experimentwandzeit addiert werden. CUDA-Trainingsphasen und Hostphasen können unterschiedliche Zeitquellen verwenden; `phase_timing_scope` beschreibt sie. Die CPU-Benchmark-Barriere pausiert verwaltete Experimentworker, kontrolliert aber keine fremden Anwendungen. GPU-Telemetrie betrifft das gesamte Gerät und enthält gegebenenfalls andere Programme; kurze Rechenbursts können zwischen Messpunkten fehlen. CPU-App-Prozentwerte enthalten Kindworker und können vor Normalisierung über 100 % liegen. Die normalisierte App-Anzeige berücksichtigt verfügbare CPU-Kapazität einschließlich lesbarer Affinitäts-/cgroup-Grenzen.
 
 ## Programmierschnittstelle
 

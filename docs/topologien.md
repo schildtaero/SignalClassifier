@@ -29,7 +29,7 @@ Die Zahlen bezeichnen die Anfangsbreite bzw. Hidden Size. Tiefe und Kernel sind 
 
 ## Mehrere Topologien in einem Experiment vergleichen
 
-Ein Experiment kann **1–50 unterschiedliche Topologien** umfassen. Alle ausgewählten Ansätze werden nacheinander mit denselben Aufnahmen, Aufnahmegruppen, Seeds und Augmentationskonfigurationen trainiert. Damit bleibt der GPU-/RAM-Bedarf auf einen Trainingslauf begrenzt. Bei gleicher Segmentlänge stimmt auch der Fingerabdruck der verwendeten IQ-Segmente überein. Feature-LDA läuft auf CPU, auch wenn die neuronalen Läufe CUDA verwenden.
+Ein Experiment kann **1–50 unterschiedliche Topologien** umfassen. Die [Ausführungssteuerung](parallelisierung.md) trainiert ausgewählte Ansätze seriell oder in begrenzten unabhängigen Prozessen mit denselben Aufnahmen, Aufnahmegruppen, Seeds und Augmentationskonfigurationen. CPU-, RAM- und GPU-Budgets begrenzen gleichzeitige Jobs. Bei gleicher Segmentlänge stimmt auch der Fingerabdruck der verwendeten IQ-Segmente überein. Feature-LDA läuft auf CPU, auch wenn die neuronalen Läufe CUDA verwenden.
 
 Jeder Ansatz erhält eigene Modelle, Konfigurationen und einen vollständigen Bericht. Der gemeinsame Bericht enthält eine Vergleichstabelle mit Metriken, Validierung und Links auf alle Modellartefakte. Topologieauswahl, Konfiguration und Fortschritt gehören zu einem gemeinsamen Experiment; es ist kein manuelles Anlegen eines separaten Experiments pro Netz erforderlich.
 

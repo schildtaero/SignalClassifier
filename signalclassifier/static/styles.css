@@ -3703,3 +3703,365 @@ html[data-theme="light"] {
   padding-top: 0;
   padding-bottom: 18px;
 }
+
+.execution-settings-body {
+  padding: 0 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.execution-settings .execution-settings-body > .form-pair {
+  margin: 0;
+}
+.execution-settings-body > .field-help {
+  font-size: 0.75rem;
+  line-height: 1.65;
+}
+.execution-settings-body label em {
+  font-size: 0.625rem;
+}
+@media (max-width: 800px) {
+  .execution-settings {
+    grid-column: 1/-1;
+  }
+}
+
+/* Coordinator-reported worker state and historical execution timing. */
+.execution-progress-panel,
+.execution-report-panel {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-soft);
+}
+.execution-report-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px 0;
+}
+.execution-report-heading h3 {
+  font-size: 1rem;
+}
+.execution-report-note {
+  padding: 12px 20px 16px;
+  font-size: 0.8125rem;
+  line-height: 1.65;
+}
+.execution-report-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 15px;
+  padding: 18px 20px;
+}
+.execution-report-metrics .result-metric > strong {
+  font-size: 1.5rem;
+}
+.execution-workers-table {
+  min-width: 650px;
+}
+.execution-workers-table td {
+  vertical-align: top;
+}
+.execution-workers-table td:first-child {
+  min-width: 190px;
+  overflow-wrap: anywhere;
+}
+.execution-plan-table td:last-child {
+  font-family: var(--mono);
+  color: var(--cyan);
+}
+.execution-warning {
+  margin: 0 20px 12px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--amber);
+  background: var(--panel);
+  color: var(--amber);
+  font-size: 0.8125rem;
+}
+.execution-report-panel pre {
+  padding: 0 20px 18px;
+}
+.training-phase-details {
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+.training-execution-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 5px 20px 14px;
+}
+.training-execution-facts > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.training-execution-facts .metric-label {
+  font-size: 0.625rem;
+}
+.training-execution-facts strong {
+  font: 0.875rem var(--mono);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.training-phase-note {
+  padding: 0 20px 15px;
+  font-size: 0.8125rem;
+}
+.training-phase-details.compact {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+}
+.training-phase-details.compact summary {
+  padding: 7px 8px;
+  font-size: 0.6875rem;
+}
+.training-phase-details.compact .training-execution-facts {
+  grid-template-columns: 1fr;
+  padding: 5px 8px;
+}
+.training-phase-details.compact .training-phase-note {
+  padding: 0 8px 10px;
+  font-size: 0.6875rem;
+}
+.training-phase-details.compact .training-phases-table {
+  min-width: 330px;
+}
+.training-phase-details.compact .training-phases-table td,
+.training-phase-details.compact .training-phases-table th {
+  padding: 7px 8px;
+}
+@media (max-width: 800px) {
+  .execution-report-metrics,
+  .training-execution-facts {
+    grid-template-columns: 1fr 1fr;
+  }
+  .execution-report-heading {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 600px) {
+  .execution-report-heading {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .execution-report-note {
+    padding-left: 16px;
+    padding-right: 16px;
+    font-size: 0.75rem;
+  }
+  .execution-report-metrics {
+    padding: 16px;
+    gap: 18px 12px;
+  }
+  .execution-report-metrics .result-metric > strong {
+    font-size: 1.25rem;
+  }
+  .execution-warning {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
+  .training-execution-facts {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .training-phase-note {
+    padding-left: 16px;
+    padding-right: 16px;
+    font-size: 0.75rem;
+  }
+}
+
+/* Current measured resources stay separate from requested execution limits and historical results. */
+.resource-telemetry-panel {
+  margin-bottom: 22px;
+}
+.resource-telemetry-panel > .panel-heading {
+  min-height: 74px;
+}
+.resource-telemetry-time {
+  padding: 13px 20px 0;
+  font: 0.75rem/1.6 var(--mono);
+  color: var(--muted);
+}
+.resource-telemetry-notice {
+  margin: 13px 20px 0;
+  font-size: 0.8125rem;
+}
+.resource-telemetry-content {
+  display: grid;
+  grid-template-columns: minmax(290px, 1.25fr) repeat(
+      auto-fit,
+      minmax(225px, 1fr)
+    );
+  gap: 15px;
+  padding: 16px 20px 20px;
+}
+.resource-telemetry-card {
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  border-radius: 5px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.resource-telemetry-card-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.resource-telemetry-card-heading h3 {
+  font-size: 0.9375rem;
+  overflow-wrap: anywhere;
+}
+.resource-device-caption {
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.resource-cpu-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+.resource-cpu-metrics > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.resource-cpu-metrics .metric-label,
+.resource-vram .metric-label {
+  font-size: 0.6875rem;
+}
+.resource-cpu-metrics strong,
+.resource-gpu-utilization {
+  font: 400 1.8rem/1.25 var(--mono);
+  color: var(--cyan);
+  letter-spacing: -0.04em;
+  overflow-wrap: anywhere;
+}
+.resource-cpu-metrics small {
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.resource-vram {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.resource-vram > strong {
+  font: 0.875rem/1.5 var(--mono);
+  font-weight: 400;
+}
+.resource-telemetry-scope {
+  font-size: 0.75rem;
+  line-height: 1.65;
+}
+@media (max-width: 1100px) {
+  .resource-telemetry-content {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .resource-cpu-card {
+    grid-column: 1/-1;
+  }
+  .resource-cpu-card .resource-cpu-metrics {
+    grid-template-columns: 1fr 1fr;
+  }
+  .resource-cpu-metrics strong {
+    font-size: 1.6rem;
+  }
+  .resource-gpu-utilization {
+    font-size: 1.7rem;
+  }
+}
+@media (max-width: 600px) {
+  .resource-telemetry-panel {
+    margin-bottom: 16px;
+  }
+  .resource-telemetry-panel > .panel-heading {
+    flex-wrap: wrap;
+  }
+  .resource-telemetry-time {
+    padding-left: 16px;
+    padding-right: 16px;
+    font-size: 0.6875rem;
+  }
+  .resource-telemetry-notice {
+    margin-left: 16px;
+    margin-right: 16px;
+    font-size: 0.75rem;
+  }
+  .resource-telemetry-content {
+    grid-template-columns: 1fr;
+    padding: 15px 16px 16px;
+    gap: 12px;
+  }
+  .resource-telemetry-card {
+    padding: 15px;
+  }
+  .resource-cpu-card {
+    grid-column: auto;
+  }
+  .resource-cpu-metrics {
+    gap: 14px;
+  }
+  .resource-cpu-metrics strong,
+  .resource-gpu-utilization {
+    font-size: 1.5rem;
+  }
+  .resource-telemetry-scope {
+    font-size: 0.6875rem;
+  }
+}
+
+.resource-cpu-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 1100px) {
+  .resource-cpu-card .resource-cpu-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  .resource-cpu-card .resource-cpu-metrics {
+    grid-template-columns: 1fr;
+  }
+  .resource-cpu-metrics > div {
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .resource-cpu-metrics > div:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+}
+
+.resource-history-panel {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-soft);
+}
+.resource-history-table td {
+  vertical-align: top;
+}
+.gpu-history-table {
+  min-width: 780px;
+}
+.resource-history-panel pre {
+  padding: 0 20px 18px;
+}
+
+.execution-settings-body label em,
+.optimization-settings fieldset label em {
+  position: static;
+  font-size: 0.6875rem;
+  margin-top: -3px;
+}

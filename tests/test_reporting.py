@@ -227,6 +227,29 @@ class ReportingTests(unittest.TestCase):
             self.assertFalse(any("_test.svg" in name for name in archive.namelist()))
             self.assertEqual(json.loads(archive.read("dataset_inventory.json")), state["config"]["recordings"])
 
+    def test_resource_observations_and_parallel_phase_times_export_without_zero_filling(self):
+        report = child_report()
+        report["phase_timings"] = {"training_epoch_seconds": .25, "benchmark_wait_seconds": .1}
+        report["phase_timing_scope"] = "CUDA events for training; wall time for benchmark waits"
+        report["optimization"]["trials"][0]["phase_timings"] = {"preprocessing_seconds": .2}
+        report["execution"] = {"resolved": {"max_workers": 2}}
+        report["resource_telemetry"] = {"sample_count": 2}
+        events = [{"event": "resources", "timestamp_utc": "2026-11-20T12:00:00Z", "elapsed_seconds": 2,
+                   "data": {"cpu": {"system_percent": 50, "process_percent": 200, "app_system_percent": 25},
+                            "gpu": {"provider": "nvidia-smi", "scope": "whole_device", "devices": [{"index": 0, "name": "GPU", "utilization_percent": 0}]}}},
+                  {"event": "resources", "elapsed_seconds": 4,
+                   "data": {"cpu": {"system_percent": None}, "gpu": {"available": False, "reason": "not available", "devices": []}}}]
+        with zipfile.ZipFile(self.export({"status": "completed", "report": report}, events=events)) as archive:
+            resources = csv_rows(archive, "resource_usage.csv")
+            self.assertEqual(resources[0]["gpu_utilization_percent"], "0")
+            self.assertEqual(resources[0]["cpu_app_percent"], "200")
+            self.assertEqual(resources[1]["gpu_utilization_percent"], "")
+            self.assertEqual(resources[1]["cpu_system_percent"], "")
+            phases = csv_rows(archive, "phase_timings.csv")
+            self.assertEqual(len(phases), 3)
+            self.assertTrue(any(row["scope"] == "optimization_trial" for row in phases))
+            self.assertIn("Parallelisierung und gemessene Ressourcen", archive.read("report.md").decode())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,8 @@ const source = original.replace(
   observationTrack, captureBudgetEstimate, stopReasonText, trainingOnly,
   rankedComparisonEntries, liveModelRecommendations, liveSampleMetrics, recordingSelectionWithAdditions,
   topologyAvailable, validateTopologyIds, selectedTopologyIds, prepareExperimentDraft, cleanupDeletionPlan,
-  normalizeOptimizationConfig, optimizationBaseConfig, optimizationBestConfig, selectionObjectiveLabel, partialOptimizationReports
+  normalizeOptimizationConfig, optimizationBaseConfig, optimizationBestConfig, selectionObjectiveLabel, partialOptimizationReports,
+  normalizeExecutionConfig, telemetrySummary, phaseTimingRows, phaseTime, resourceMetricSummary
 };`,
 );
 const sandbox = { Intl, console, Set, Map, Date, window: {}, document: {} };
@@ -777,6 +778,250 @@ assert.throws(
   /unvollständig/,
 );
 
+// Resource limits are portable requests; zero remains Auto and is not resolved in the UI.
+const automaticExecution = f.normalizeExecutionConfig();
+assert.equal(automaticExecution.mode, "auto");
+for (const key of [
+  "max_workers",
+  "cpu_threads",
+  "preprocessing_workers",
+  "gpu_workers",
+])
+  assert.equal(automaticExecution[key], 0);
+const execution = {
+  mode: "parallel",
+  max_workers: 4,
+  cpu_threads: 6,
+  preprocessing_workers: 2,
+  gpu_workers: 1,
+};
+const executionDraft = f.prepareExperimentDraft(
+  { ...hpoDraft, execution },
+  catalog,
+  ["available-a"],
+  false,
+);
+assert.equal(executionDraft.execution.mode, "parallel");
+assert.equal(executionDraft.execution.max_workers, 4);
+assert.equal(executionDraft.execution.cpu_threads, 6);
+assert.equal(executionDraft.execution.preprocessing_workers, 2);
+assert.equal(executionDraft.execution.gpu_workers, 1);
+assert.equal(
+  f.prepareExperimentDraft(draft, catalog, ["available-a"], false).execution
+    .mode,
+  "auto",
+  "Legacy drafts default to automatic scheduling",
+);
+assert.equal(
+  execution.max_workers,
+  4,
+  "Validation does not mutate requested resources",
+);
+assert.equal(f.normalizeExecutionConfig(null).mode, "auto");
+for (const invalid of [
+  [],
+  { mode: "threads" },
+  { max_workers: 9 },
+  { max_workers: 1.5 },
+  { cpu_threads: 33 },
+  { preprocessing_workers: 9 },
+  { gpu_workers: 5 },
+  { gpu_workers: -1 },
+  { max_workers: true },
+  { max_worker: 2 },
+  { max_workers: NaN },
+])
+  assert.throws(() => f.normalizeExecutionConfig(invalid));
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      { ...hpoDraft, execution: { mode: "parallel", max_workers: 9 } },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /execution.max_workers/,
+);
+
+// Current resource telemetry distinguishes missing, stale and actual zero values.
+const sampledAt = "2026-11-20T12:00:00Z",
+  now = Date.parse(sampledAt) + 1000;
+const measurement = {
+  sampled_at: sampledAt,
+  interval_seconds: 2,
+  cpu: {
+    system_percent: 0,
+    process_percent: 0,
+    app_system_percent: 0,
+    process_count: 1,
+    process_percent_scope: "application_process_tree_one_logical_cpu=100%",
+    logical_cpus: 8,
+  },
+  gpu: {
+    available: true,
+    provider: "nvidia-smi",
+    scope: "whole_device",
+    devices: [
+      {
+        index: 0,
+        name: "Measured GPU",
+        utilization_percent: 0,
+        memory_used_bytes: 0,
+        memory_total_bytes: 8 * 1024 ** 3,
+      },
+    ],
+  },
+};
+const measured = f.telemetrySummary(measurement, now);
+assert.equal(measured.fresh, true);
+assert.equal(measured.cpu.systemPercent, 0);
+assert.equal(measured.cpu.processPercent, 0);
+assert.equal(measured.cpu.appSystemPercent, 0);
+assert.equal(measured.cpu.processCount, 1);
+assert.equal(measured.gpu.devices[0].utilizationPercent, 0);
+assert.equal(measured.gpu.devices[0].memoryUsedBytes, 0);
+const busyTree = f.telemetrySummary(
+  {
+    ...measurement,
+    cpu: {
+      ...measurement.cpu,
+      process_percent: 250,
+      app_system_percent: 31.25,
+      process_count: 5,
+    },
+  },
+  now,
+);
+assert.equal(busyTree.cpu.processPercent, 250);
+assert.equal(busyTree.cpu.appSystemPercent, 31.25);
+const stale = f.telemetrySummary(measurement, Date.parse(sampledAt) + 11000);
+assert.equal(stale.stale, true);
+assert.equal(stale.cpu.systemPercent, null);
+assert.equal(stale.gpu.devices[0].utilizationPercent, null);
+assert.equal(stale.gpu.devices[0].memoryUsedBytes, null);
+assert.equal(
+  f.telemetrySummary(measurement, Date.parse(sampledAt) - 1000).future,
+  true,
+);
+const backendAgeSample = f.telemetrySummary(
+  { ...measurement, age_seconds: 1, stale: false },
+  Date.parse(sampledAt) - 1000,
+);
+assert.equal(backendAgeSample.fresh, true);
+assert.equal(backendAgeSample.future, false);
+assert.equal(backendAgeSample.ageSeconds, 1);
+const backendStale = f.telemetrySummary(
+  { ...measurement, age_seconds: 7, stale: true },
+  now,
+);
+assert.equal(backendStale.stale, true);
+assert.equal(backendStale.cpu.systemPercent, null);
+assert.equal(f.telemetrySummary({}, now).cpu.systemPercent, null);
+const unavailable = f.telemetrySummary(
+  {
+    ...measurement,
+    gpu: {
+      available: false,
+      provider: "nvidia-smi",
+      reason: "Not installed",
+      devices: measurement.gpu.devices,
+    },
+  },
+  now,
+);
+assert.equal(unavailable.gpu.devices.length, 0);
+assert.equal(unavailable.gpu.reason, "Not installed");
+const unsupported = f.telemetrySummary(
+  {
+    ...measurement,
+    gpu: {
+      ...measurement.gpu,
+      devices: [
+        {
+          index: 0,
+          name: "Known GPU",
+          utilization_percent: null,
+          memory_used_bytes: null,
+          memory_total_bytes: null,
+        },
+      ],
+    },
+  },
+  now,
+);
+assert.equal(unsupported.gpu.available, true);
+assert.equal(unsupported.gpu.devices[0].utilizationPercent, null);
+assert.equal(
+  f.telemetrySummary(
+    { ...measurement, cpu: { system_percent: NaN, process_percent: -1 } },
+    now,
+  ).cpu.systemPercent,
+  null,
+);
+
+// Missing phase measurements are not turned into zero or added into a fake wall time.
+const phases = f.phaseTimingRows({
+  phase_timings: {
+    preprocessing_seconds: 0,
+    device_transfer_seconds: 0.0002,
+    training_epoch_seconds: 1.5,
+    validation_seconds: null,
+    cpu_benchmark_seconds: NaN,
+    checkpoint_seconds: -1,
+  },
+});
+assert.deepEqual(
+  Array.from(phases, (row) => row.key),
+  [
+    "preprocessing_seconds",
+    "device_transfer_seconds",
+    "training_epoch_seconds",
+  ],
+);
+assert.equal(f.phaseTime(null), "—");
+assert.equal(f.phaseTime(0), "0 ms");
+assert.equal(f.phaseTime(0.0002), "0,2 ms");
+
+const noSamples = f.resourceMetricSummary({
+  sample_count: 0,
+  mean: 0,
+  maximum: 0,
+});
+assert.equal(noSamples.mean, null);
+assert.equal(noSamples.maximum, null);
+const realZero = f.resourceMetricSummary({
+  sample_count: 2,
+  mean: 0,
+  maximum: 0,
+});
+assert.equal(realZero.mean, 0);
+assert.equal(realZero.maximum, 0);
+assert.equal(realZero.count, 2);
+assert.equal(
+  f.resourceMetricSummary({ sample_count: 2, mean: NaN, maximum: null }).mean,
+  null,
+);
+assert.equal(f.resourceMetricSummary(undefined).count, 0);
+
+const warmProcesses = f.telemetrySummary(
+  {
+    ...measurement,
+    cpu: {
+      ...measurement.cpu,
+      warming_processes: 2,
+      reason: "Neu gestartete Prozesse benötigen zwei Messpunkte.",
+    },
+  },
+  now,
+);
+assert.equal(warmProcesses.cpu.warmingProcesses, 2);
+assert.ok(warmProcesses.cpu.reason.includes("zwei Messpunkte"));
+const samplerError = f.telemetrySummary(
+  { ...measurement, sampler_error: "Messfehler" },
+  now,
+);
+assert.ok(samplerError.reason.includes("Messfehler"));
+
 console.log(
-  "Frontend pure-logic regressions passed: waterfall, selection/drafts, reviewed cleanup, automatic HPO, capture budget, validation rankings and live warmup.",
+  "Frontend pure-logic regressions passed: waterfall, selection/drafts, reviewed cleanup, automatic HPO, execution/telemetry, capture budget, validation rankings and live warmup.",
 );

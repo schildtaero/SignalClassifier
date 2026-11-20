@@ -1,0 +1,351 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-11-20T20:24:00.026031+00:00",
+  "profile_kind": "dataset_worker_microbenchmark",
+  "source_root": "/tmp/signalclassifier-dataset-threads-before",
+  "source_files_sha256": {
+    "__init__.py": "a7c4efce74b304db633c48cf5712ff13930d7f3f25a8f17fa5cebdeee1c53fa9",
+    "__main__.py": "0ef85220ad86bfcd48148965dfae3e85373d38fc0f2e6578d947dd5fade596c1",
+    "app.py": "a6a10cddce20249ea1d357db0cdeae6fc7009dc4126b2f39173fa748174a5c9d",
+    "db.py": "945337308b5cecc993d22915aa057302b6ea2c2636aa8b1ee9ce6c4de5b7167d",
+    "drones.py": "7962b9d1fe1bdb2a9b04ac77dfee95691c341709448913c14869691c1af57bfb",
+    "execution.py": "cfe2205ca2a2fb803d6894f3b60d42ff10efb2e172698deaab6ab00a8d158c12",
+    "experiment_log.py": "e02b09c8f270e43e62c466bea3ac3d15cc4185edd0792073915902dffac9b650",
+    "labels.py": "10f9489458a658d89e786ea58bd981f0eef9c2a5d64c227b13f072cf5e52209d",
+    "ml.py": "ad9e388a53e3eb67eb626fb899af32a2007597bb2e1f532a631c65cf82bebe0b",
+    "optimization.py": "c3f62a8982efc0560cd11c0b46c53fcc1a409e388cf275b3ccbfeb06ba66e91e",
+    "receivers.py": "a68419b3507a7014bae2c18e926660140723dda2d4e678c71a3e5710a75112b3",
+    "reporting.py": "c4a2e389b7d3086591257c2215e6785e2ca3548c4850035257764c2fed22b1b1",
+    "sigmf.py": "4dd45bb5fa8a1ed19c9f83799c584c7b40ab98f007c5746b942f78851a6b407b",
+    "telemetry.py": "47799889b2ac29ba4a5f95e2c832d7b3261d9b3355d8b5cf3e7ebc41a35b0873",
+    "topologies.py": "debe8af3029fa3e5fa11af2db337ce465fe1ec48b5752e4fb80321ac6fb806d1"
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "logical_cpus": 3,
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "scipy": "1.17.0",
+    "signalclassifier": "0.3.0",
+    "precision": "float32 (features accumulated in float64)",
+    "torch_available": true,
+    "gpu": null,
+    "cuda_available": false,
+    "ram_bytes": 10452459520,
+    "available_ram_bytes": 9438175232,
+    "process_rss_bytes": 87752704,
+    "torch_version": "2.15.0+cpu",
+    "torch_threads": 1
+  },
+  "numpy": "2.3.5",
+  "scipy": "1.17.0",
+  "parallel_threshold": 32,
+  "config": {
+    "segment_length": 2048,
+    "sample_rate": 256000,
+    "seed": 42,
+    "snr_db": [
+      -5,
+      5,
+      15
+    ],
+    "jitter": [
+      0,
+      0.1
+    ],
+    "augmentation": {
+      "frequency_offset_hz": 1200,
+      "sample_clock_ppm": 10,
+      "iq_gain_db": 1,
+      "iq_phase_deg": 3,
+      "dc_offset": 0.01,
+      "echo_amplitude": 0.1,
+      "echo_delay_samples": 8
+    }
+  },
+  "environment": {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1"
+  },
+  "warmup_per_cell": 1,
+  "repetitions": 3,
+  "rows": [
+    {
+      "representation": "features",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 1,
+      "workers_used": 1,
+      "median_seconds": 0.13736332899861736,
+      "seconds": [
+        0.13736332899861736,
+        0.14567102900036843,
+        0.1356213840044802
+      ],
+      "speedup_vs_serial": 1.0,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "features",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 2,
+      "workers_used": 2,
+      "median_seconds": 0.1286101680016145,
+      "seconds": [
+        0.13767334599833703,
+        0.1286101680016145,
+        0.12594833799812477
+      ],
+      "speedup_vs_serial": 1.0680596342654103,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "features",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 4,
+      "workers_used": 4,
+      "median_seconds": 0.16365169799973955,
+      "seconds": [
+        0.1648644439992495,
+        0.16110496199689806,
+        0.16365169799973955
+      ],
+      "speedup_vs_serial": 0.839363909312056,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "iq",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 1,
+      "workers_used": 1,
+      "median_seconds": 0.06306045200471999,
+      "seconds": [
+        0.06364931500138482,
+        0.05812344399600988,
+        0.06306045200471999
+      ],
+      "speedup_vs_serial": 1.0,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "iq",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 2,
+      "workers_used": 2,
+      "median_seconds": 0.0799144510019687,
+      "seconds": [
+        0.0799144510019687,
+        0.06979470600344939,
+        0.0887082850022125
+      ],
+      "speedup_vs_serial": 0.7890994834359369,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "iq",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 4,
+      "workers_used": 4,
+      "median_seconds": 0.09698460000072373,
+      "seconds": [
+        0.10255541399965296,
+        0.08506546600256115,
+        0.09698460000072373
+      ],
+      "speedup_vs_serial": 0.6502109819935269,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "spectrogram",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 1,
+      "workers_used": 1,
+      "median_seconds": 0.08402288499928545,
+      "seconds": [
+        0.08193872900301358,
+        0.08402288499928545,
+        0.09073553800408263
+      ],
+      "speedup_vs_serial": 1.0,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "spectrogram",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 2,
+      "workers_used": 2,
+      "median_seconds": 0.09938071899523493,
+      "seconds": [
+        0.09938071899523493,
+        0.0976844750039163,
+        0.1253210329959984
+      ],
+      "speedup_vs_serial": 0.8454646519845983,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "spectrogram",
+      "segments": 128,
+      "segment_length": 2048,
+      "workers_requested": 4,
+      "workers_used": 4,
+      "median_seconds": 0.1328597589963465,
+      "seconds": [
+        0.13490527399699204,
+        0.12419322099594865,
+        0.1328597589963465
+      ],
+      "speedup_vs_serial": 0.6324178640245463,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "features",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 1,
+      "workers_used": 1,
+      "median_seconds": 0.6239167180028744,
+      "seconds": [
+        0.6189013420007541,
+        0.6239167180028744,
+        0.6828573009988759
+      ],
+      "speedup_vs_serial": 1.0,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "features",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 2,
+      "workers_used": 2,
+      "median_seconds": 0.6396809729994857,
+      "seconds": [
+        0.6396809729994857,
+        0.5505281019941322,
+        0.6823836000039591
+      ],
+      "speedup_vs_serial": 0.9753560670677882,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "features",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 4,
+      "workers_used": 4,
+      "median_seconds": 0.744812067001476,
+      "seconds": [
+        0.7764354590035509,
+        0.7194487729939283,
+        0.744812067001476
+      ],
+      "speedup_vs_serial": 0.8376834179321078,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "iq",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 1,
+      "workers_used": 1,
+      "median_seconds": 0.2582408289963496,
+      "seconds": [
+        0.2686829550002585,
+        0.23578727299900493,
+        0.2582408289963496
+      ],
+      "speedup_vs_serial": 1.0,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "iq",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 2,
+      "workers_used": 2,
+      "median_seconds": 0.36869821699656313,
+      "seconds": [
+        0.38984374099527486,
+        0.36869821699656313,
+        0.2948345379991224
+      ],
+      "speedup_vs_serial": 0.7004124703937932,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "iq",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 4,
+      "workers_used": 4,
+      "median_seconds": 0.4331874359995709,
+      "seconds": [
+        0.48839935599971795,
+        0.4331874359995709,
+        0.4121946890008985
+      ],
+      "speedup_vs_serial": 0.596141087057302,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "spectrogram",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 1,
+      "workers_used": 1,
+      "median_seconds": 0.3333604599974933,
+      "seconds": [
+        0.3315990310002235,
+        0.34328061899577733,
+        0.3333604599974933
+      ],
+      "speedup_vs_serial": 1.0,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "spectrogram",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 2,
+      "workers_used": 2,
+      "median_seconds": 0.4397073250001995,
+      "seconds": [
+        0.45701406799344113,
+        0.4250693069989211,
+        0.4397073250001995
+      ],
+      "speedup_vs_serial": 0.7581417025457605,
+      "outputs_bit_identical": true
+    },
+    {
+      "representation": "spectrogram",
+      "segments": 512,
+      "segment_length": 2048,
+      "workers_requested": 4,
+      "workers_used": 4,
+      "median_seconds": 0.566458600005717,
+      "seconds": [
+        0.5589857640006812,
+        0.6144306210044306,
+        0.566458600005717
+      ],
+      "speedup_vs_serial": 0.5884992477722624,
+      "outputs_bit_identical": true
+    }
+  ],
+  "limitations": [
+    "One CPU host; no training started by this harness, external host load not controlled. This does not predict every workstation or GPU workload.",
+    "Times include executor construction, deterministic job planning, augmentation and final stacking; synthetic source generation is outside the measured interval.",
+    "No feature cache is built. All worker settings use the same prebuilt IQ, RNG seed and augmentation configuration.",
+    "Worker order rotates between repetitions. Median values are diagnostic, not isolated production inference ranking measurements."
+  ]
+}

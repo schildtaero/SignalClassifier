@@ -60,6 +60,11 @@ class ExperimentLoggingTests(unittest.TestCase):
         identifier = self.start()
         state = self.wait(identifier)
         self.assertEqual(state["status"], "completed", state.get("error"))
+        self.assertEqual(state["report"]["execution"]["process_start_method"], "spawn")
+        self.assertIn("resource_telemetry", state["report"])
+        live = self.client.get("/api/status").json()["telemetry"]
+        self.assertTrue(live["cached"])
+        self.assertEqual(live["gpu"]["scope"], "whole_device")
         provenance = state["provenance"]
         self.assertEqual(len(provenance["software"]["source_files_sha256"]["ml.py"]), 64)
         self.assertIn("numpy", provenance["software"]["dependencies"])
@@ -78,6 +83,8 @@ class ExperimentLoggingTests(unittest.TestCase):
             self.assertEqual(exported["provenance"], provenance)
             self.assertTrue(exported["export_snapshot"]["complete"])
             self.assertIn(b"queued", archive.read("events.json"))
+            self.assertIn(b"source_loading_seconds", archive.read("phase_timings.csv"))
+            self.assertIn("resource_usage.csv", archive.namelist())
 
     def test_api_automatic_search_saves_models_trials_and_report_bundle(self):
         topologies = ["feature-lda"] + (["feature-mlp-16"] if importlib.util.find_spec("torch") else [])
@@ -108,7 +115,9 @@ class ExperimentLoggingTests(unittest.TestCase):
 
     def test_public_configuration_rejects_internal_flags_and_invalid_notes(self):
         for config in ({"_evaluate_test": False}, {"_reference_length": 10**9},
-                       {"experiment_notes": []}, {"experiment_notes": "x" * 12001}):
+                       {"experiment_notes": []}, {"experiment_notes": "x" * 12001},
+                       {"execution": {"mode": "unbounded"}}, {"execution": {"max_workers": 9}},
+                       {"execution": {"cpu_threads": -1}}, {"execution": {"preprocessing_workers": True}}):
             response = self.client.post("/api/experiments", json=config)
             self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.client.get("/api/experiments").json(), [])

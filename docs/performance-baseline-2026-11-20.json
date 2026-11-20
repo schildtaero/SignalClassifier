@@ -1,0 +1,3086 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-11-20T20:10:15.409089+00:00",
+  "profile_kind": "instrumented_cpu_diagnostic",
+  "cuda_available": false,
+  "source_root": "/tmp/signalclassifier-benchmark-before",
+  "source_files_sha256": {
+    "__init__.py": "a7c4efce74b304db633c48cf5712ff13930d7f3f25a8f17fa5cebdeee1c53fa9",
+    "__main__.py": "0ef85220ad86bfcd48148965dfae3e85373d38fc0f2e6578d947dd5fade596c1",
+    "app.py": "ac7620ab209ebb3d4367707ee28139333e1afbe5d366d25c10cb8677dd1cb98f",
+    "db.py": "945337308b5cecc993d22915aa057302b6ea2c2636aa8b1ee9ce6c4de5b7167d",
+    "drones.py": "7962b9d1fe1bdb2a9b04ac77dfee95691c341709448913c14869691c1af57bfb",
+    "experiment_log.py": "e02b09c8f270e43e62c466bea3ac3d15cc4185edd0792073915902dffac9b650",
+    "labels.py": "10f9489458a658d89e786ea58bd981f0eef9c2a5d64c227b13f072cf5e52209d",
+    "ml.py": "fb7b257a8b83ae1a9200ad92bcf81817907e72ceb5b7b750de16934fe3f5985c",
+    "optimization.py": "c3f62a8982efc0560cd11c0b46c53fcc1a409e388cf275b3ccbfeb06ba66e91e",
+    "receivers.py": "a68419b3507a7014bae2c18e926660140723dda2d4e678c71a3e5710a75112b3",
+    "reporting.py": "c4a2e389b7d3086591257c2215e6785e2ca3548c4850035257764c2fed22b1b1",
+    "sigmf.py": "4dd45bb5fa8a1ed19c9f83799c584c7b40ab98f007c5746b942f78851a6b407b",
+    "topologies.py": "debe8af3029fa3e5fa11af2db337ce465fe1ec48b5752e4fb80321ac6fb806d1"
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "logical_cpus": 3,
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "scipy": "1.17.0",
+    "signalclassifier": "0.3.0",
+    "precision": "float32 (features accumulated in float64)",
+    "torch_available": true,
+    "gpu": null,
+    "cuda_available": false,
+    "ram_bytes": 10452459520,
+    "available_ram_bytes": 9245896704,
+    "process_rss_bytes": 364552192,
+    "torch_version": "2.15.0+cpu",
+    "torch_threads": 3
+  },
+  "warmup_seconds": 2.2394523420007317,
+  "environment": {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "2"
+  },
+  "limitations": [
+    "CPU only; no CUDA utilisation or GPU speed-up measured.",
+    "cProfile and Python phase wrappers add overhead; these latency values must not populate production model rankings.",
+    "One small run per topology, fixed synthetic dataset, warmed Python/Torch optimizer imports; no repeated statistical benchmark.",
+    "Host contention is not controlled; phase wall times overlap with their cumulative function totals and must not be added twice."
+  ],
+  "runs": [
+    {
+      "topology_id": "feature-lda",
+      "status": "completed",
+      "config": {
+        "source": "synthetic",
+        "topology_id": "feature-lda",
+        "seed": 42,
+        "samples_per_class": 48,
+        "segment_length": 2048,
+        "epochs": 3,
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "snr_db": [
+          -5,
+          5,
+          15
+        ],
+        "jitter": [
+          0,
+          0.1
+        ],
+        "device": "cpu"
+      },
+      "elapsed_seconds": 0.5124359210021794,
+      "reported_training_seconds": 0.0006685799962724559,
+      "reported_preprocessing_seconds": 0.14660428700153716,
+      "phases": {
+        "generate_signal": {
+          "calls": 97,
+          "wall_seconds": 0.032729942016885616
+        },
+        "_dataset:train:random": {
+          "calls": 1,
+          "wall_seconds": 0.0632024430015008
+        },
+        "_dataset:validation:random": {
+          "calls": 1,
+          "wall_seconds": 0.02134573999501299
+        },
+        "_dataset:train:clean": {
+          "calls": 1,
+          "wall_seconds": 0.045449912002368364
+        },
+        "_dataset:validation:clean": {
+          "calls": 1,
+          "wall_seconds": 0.016281862997857388
+        },
+        "_dataset:validation:grid": {
+          "calls": 6,
+          "wall_seconds": 0.12809838200337254
+        },
+        "_dataset:test:grid": {
+          "calls": 6,
+          "wall_seconds": 0.1302659319990198
+        },
+        "classify": {
+          "calls": 23,
+          "wall_seconds": 0.033486101994640194
+        }
+      },
+      "other_wall_seconds": 0.36516305400436977,
+      "training_segments": 56,
+      "training_examples": 112,
+      "parameter_count": 22,
+      "model_bytes": 7329,
+      "timing_repetitions": 20,
+      "dataset_sha256": "ccaed557c421d24c6946cee04c1c7afec98e02e1ba1dbe9b2cac9b708a7ff3b6",
+      "top_functions": [
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 857,
+          "function": "run_experiment",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.0006849400000000001,
+          "cumulative_seconds": 0.511931494
+        },
+        {
+          "file": "/workspace/SignalClassifier/scripts/benchmark_experiments.py",
+          "line": 82,
+          "function": "measured",
+          "calls": 136,
+          "primitive_calls": 136,
+          "self_seconds": 0.000854121,
+          "cumulative_seconds": 0.47138334200000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 673,
+          "function": "_dataset",
+          "calls": 16,
+          "primitive_calls": 16,
+          "self_seconds": 0.004046790000000001,
+          "cumulative_seconds": 0.40452840100000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 47,
+          "function": "extract_features",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.243774753,
+          "cumulative_seconds": 0.37506838200000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 145,
+          "function": "_representation",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.000201091,
+          "cumulative_seconds": 0.33785163900000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 86,
+          "function": "_feature_vector",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.0006864480000000001,
+          "cumulative_seconds": 0.337650548
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 543,
+          "function": "augment",
+          "calls": 316,
+          "primitive_calls": 316,
+          "self_seconds": 0.041338557000000005,
+          "cumulative_seconds": 0.061089389
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 3735,
+          "function": "mean",
+          "calls": 6479,
+          "primitive_calls": 6479,
+          "self_seconds": 0.005659811000000001,
+          "cumulative_seconds": 0.042162884000000005
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 117,
+          "function": "_mean",
+          "calls": 6538,
+          "primitive_calls": 6538,
+          "self_seconds": 0.012718744,
+          "cumulative_seconds": 0.036921804
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1592,
+          "function": "classify",
+          "calls": 23,
+          "primitive_calls": 23,
+          "self_seconds": 0.0006752500000000001,
+          "cumulative_seconds": 0.033346526
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 518,
+          "function": "generate_signal",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.026260543,
+          "cumulative_seconds": 0.03252473
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 574,
+          "function": "_synthetic_groups",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.00034754100000000004,
+          "cumulative_seconds": 0.032281349
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 150,
+          "function": "_var",
+          "calls": 1721,
+          "primitive_calls": 1721,
+          "self_seconds": 0.015219927000000001,
+          "cumulative_seconds": 0.02469837
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 750,
+          "function": "benchmark_hardware",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 7.128700000000001e-05,
+          "cumulative_seconds": 0.023137622
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'reduce' of 'numpy.ufunc' objects>",
+          "calls": 11922,
+          "primitive_calls": 11922,
+          "self_seconds": 0.021228266000000003,
+          "cumulative_seconds": 0.021228266000000003
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 3869,
+          "function": "std",
+          "calls": 860,
+          "primitive_calls": 860,
+          "self_seconds": 0.0009010540000000001,
+          "cumulative_seconds": 0.015175451000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/fft/_pocketfft.py",
+          "line": 120,
+          "function": "fft",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.00045415200000000004,
+          "cumulative_seconds": 0.014703365000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 220,
+          "function": "_std",
+          "calls": 861,
+          "primitive_calls": 861,
+          "self_seconds": 0.001675201,
+          "cumulative_seconds": 0.014310030000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/fft/_pocketfft.py",
+          "line": 58,
+          "function": "_raw_fft",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.013958368,
+          "cumulative_seconds": 0.014182423000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 4073,
+          "function": "var",
+          "calls": 860,
+          "primitive_calls": 860,
+          "self_seconds": 0.0010709930000000001,
+          "cumulative_seconds": 0.013367834
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py",
+          "line": 3285,
+          "function": "hanning",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.011393489000000001,
+          "cumulative_seconds": 0.01318293
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 75,
+          "function": "_count_reduce_items",
+          "calls": 8259,
+          "primitive_calls": 8259,
+          "self_seconds": 0.009364564,
+          "cumulative_seconds": 0.010442191
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py",
+          "line": 1671,
+          "function": "angle",
+          "calls": 1290,
+          "primitive_calls": 1290,
+          "self_seconds": 0.009988472,
+          "cumulative_seconds": 0.010384491000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py",
+          "line": 1527,
+          "function": "interp",
+          "calls": 322,
+          "primitive_calls": 322,
+          "self_seconds": 0.000420092,
+          "cumulative_seconds": 0.009093675
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 36,
+          "function": "_json",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 2.5159e-05,
+          "cumulative_seconds": 0.008944832
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/fft/_helper.py",
+          "line": 19,
+          "function": "fftshift",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.0012398490000000001,
+          "cumulative_seconds": 0.00869381
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method numpy._core._multiarray_umath.interp>",
+          "calls": 322,
+          "primitive_calls": 322,
+          "self_seconds": 0.008407433,
+          "cumulative_seconds": 0.008407433
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/__init__.py",
+          "line": 183,
+          "function": "dumps",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 6.787e-05,
+          "cumulative_seconds": 0.008069125
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 183,
+          "function": "encode",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 0.000593278,
+          "cumulative_seconds": 0.007996249
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 51,
+          "function": "_wrapfunc",
+          "calls": 1538,
+          "primitive_calls": 1538,
+          "self_seconds": 0.0009495800000000001,
+          "cumulative_seconds": 0.007912323
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/numeric.py",
+          "line": 1219,
+          "function": "roll",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.0058776110000000005,
+          "cumulative_seconds": 0.007361652000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 414,
+          "function": "_iterencode",
+          "calls": 7295,
+          "primitive_calls": 7295,
+          "self_seconds": 0.000917762,
+          "cumulative_seconds": 0.007304536
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1440,
+          "function": "load_model_metadata",
+          "calls": 26,
+          "primitive_calls": 26,
+          "self_seconds": 0.000507445,
+          "cumulative_seconds": 0.006837513000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 334,
+          "function": "_iterencode_dict",
+          "calls": 18354,
+          "primitive_calls": 7295,
+          "self_seconds": 0.0035125050000000004,
+          "cumulative_seconds": 0.006385054
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 2879,
+          "function": "cumsum",
+          "calls": 478,
+          "primitive_calls": 478,
+          "self_seconds": 0.00039564900000000003,
+          "cumulative_seconds": 0.00579345
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_ufunc_config.py",
+          "line": 472,
+          "function": "inner",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.0046289650000000005,
+          "cumulative_seconds": 0.0052262
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'cumsum' of 'numpy.ndarray' objects>",
+          "calls": 478,
+          "primitive_calls": 478,
+          "self_seconds": 0.004906354,
+          "cumulative_seconds": 0.004906354
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 278,
+          "function": "_iterencode_list",
+          "calls": 6911,
+          "primitive_calls": 4781,
+          "self_seconds": 0.001510953,
+          "cumulative_seconds": 0.003985606
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 40,
+          "function": "_iq",
+          "calls": 453,
+          "primitive_calls": 453,
+          "self_seconds": 0.0018258310000000002,
+          "cumulative_seconds": 0.0034301880000000002
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 90,
+          "function": "_vector_from_features",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.002219042,
+          "cumulative_seconds": 0.0034167840000000004
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 69,
+          "function": "_wrapreduction",
+          "calls": 755,
+          "primitive_calls": 755,
+          "self_seconds": 0.0012020750000000001,
+          "cumulative_seconds": 0.002896767
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.isinstance>",
+          "calls": 20456,
+          "primitive_calls": 20456,
+          "self_seconds": 0.002517327,
+          "cumulative_seconds": 0.00253974
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/scipy/signal/_signaltools.py",
+          "line": 2043,
+          "function": "lfilter",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.000364393,
+          "cumulative_seconds": 0.0025368540000000003
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/pathlib.py",
+          "line": 835,
+          "function": "stat",
+          "calls": 276,
+          "primitive_calls": 276,
+          "self_seconds": 9.831500000000001e-05,
+          "cumulative_seconds": 0.0025278410000000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 697,
+          "function": "_metrics",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 0.0009697070000000001,
+          "cumulative_seconds": 0.0024663410000000004
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method posix.stat>",
+          "calls": 279,
+          "primitive_calls": 279,
+          "self_seconds": 0.0006476,
+          "cumulative_seconds": 0.0024496970000000002
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1587,
+          "function": "_cached_inference",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 9.183e-06,
+          "cumulative_seconds": 0.002426432
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1495,
+          "function": "_load_inference",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 3.6084e-05,
+          "cumulative_seconds": 0.0024167280000000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/topologies.py",
+          "line": 90,
+          "function": "validate_topology",
+          "calls": 27,
+          "primitive_calls": 27,
+          "self_seconds": 0.000331519,
+          "cumulative_seconds": 0.002356609
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 2338,
+          "function": "sum",
+          "calls": 445,
+          "primitive_calls": 445,
+          "self_seconds": 0.000564267,
+          "cumulative_seconds": 0.002116083
+        }
+      ],
+      "selected_ml_functions": [
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 857,
+          "function": "run_experiment",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.0006849400000000001,
+          "cumulative_seconds": 0.511931494
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 673,
+          "function": "_dataset",
+          "calls": 16,
+          "primitive_calls": 16,
+          "self_seconds": 0.004046790000000001,
+          "cumulative_seconds": 0.40452840100000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 47,
+          "function": "extract_features",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.243774753,
+          "cumulative_seconds": 0.37506838200000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 145,
+          "function": "_representation",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.000201091,
+          "cumulative_seconds": 0.33785163900000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 86,
+          "function": "_feature_vector",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.0006864480000000001,
+          "cumulative_seconds": 0.337650548
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 543,
+          "function": "augment",
+          "calls": 316,
+          "primitive_calls": 316,
+          "self_seconds": 0.041338557000000005,
+          "cumulative_seconds": 0.061089389
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1592,
+          "function": "classify",
+          "calls": 23,
+          "primitive_calls": 23,
+          "self_seconds": 0.0006752500000000001,
+          "cumulative_seconds": 0.033346526
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 518,
+          "function": "generate_signal",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.026260543,
+          "cumulative_seconds": 0.03252473
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 574,
+          "function": "_synthetic_groups",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.00034754100000000004,
+          "cumulative_seconds": 0.032281349
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 750,
+          "function": "benchmark_hardware",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 7.128700000000001e-05,
+          "cumulative_seconds": 0.023137622
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 36,
+          "function": "_json",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 2.5159e-05,
+          "cumulative_seconds": 0.008944832
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1440,
+          "function": "load_model_metadata",
+          "calls": 26,
+          "primitive_calls": 26,
+          "self_seconds": 0.000507445,
+          "cumulative_seconds": 0.006837513000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 40,
+          "function": "_iq",
+          "calls": 453,
+          "primitive_calls": 453,
+          "self_seconds": 0.0018258310000000002,
+          "cumulative_seconds": 0.0034301880000000002
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 90,
+          "function": "_vector_from_features",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.002219042,
+          "cumulative_seconds": 0.0034167840000000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 697,
+          "function": "_metrics",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 0.0009697070000000001,
+          "cumulative_seconds": 0.0024663410000000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1587,
+          "function": "_cached_inference",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 9.183e-06,
+          "cumulative_seconds": 0.002426432
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1495,
+          "function": "_load_inference",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 3.6084e-05,
+          "cumulative_seconds": 0.0024167280000000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1471,
+          "function": "_bounded_npz",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 5.9583e-05,
+          "cumulative_seconds": 0.001250882
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 918,
+          "function": "<genexpr>",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.000141163,
+          "cumulative_seconds": 0.001151288
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1626,
+          "function": "<genexpr>",
+          "calls": 69,
+          "primitive_calls": 69,
+          "self_seconds": 9.5698e-05,
+          "cumulative_seconds": 0.000987712
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 723,
+          "function": "hardware_profile",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 9.068800000000001e-05,
+          "cumulative_seconds": 0.0007562090000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 155,
+          "function": "_softmax",
+          "calls": 36,
+          "primitive_calls": 36,
+          "self_seconds": 0.000247374,
+          "cumulative_seconds": 0.000696029
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1514,
+          "function": "predict",
+          "calls": 23,
+          "primitive_calls": 23,
+          "self_seconds": 0.00027595800000000003,
+          "cumulative_seconds": 0.0006802370000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 685,
+          "function": "_fit_lda",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.000255902,
+          "cumulative_seconds": 0.0006620300000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 946,
+          "function": "predict",
+          "calls": 13,
+          "primitive_calls": 13,
+          "self_seconds": 0.000183114,
+          "cumulative_seconds": 0.000474864
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 902,
+          "function": "sample_rss",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 2.0320000000000002e-05,
+          "cumulative_seconds": 0.000326544
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 244,
+          "function": "_validate_config",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 3.6746000000000004e-05,
+          "cumulative_seconds": 0.000185114
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 665,
+          "function": "_data_usage",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 2.4315e-05,
+          "cumulative_seconds": 0.00012149
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 786,
+          "function": "score_candidate",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 2.6382000000000003e-05,
+          "cumulative_seconds": 6.6989e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1015,
+          "function": "<genexpr>",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 6.792e-06,
+          "cumulative_seconds": 6.405500000000001e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 249,
+          "function": "scalar",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 5.8646e-05,
+          "cumulative_seconds": 6.1219e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 668,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 2.7942e-05,
+          "cumulative_seconds": 4.2340000000000005e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1453,
+          "function": "<genexpr>",
+          "calls": 78,
+          "primitive_calls": 78,
+          "self_seconds": 3.0281e-05,
+          "cumulative_seconds": 3.969e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 667,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 1.7853e-05,
+          "cumulative_seconds": 3.2847e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1512,
+          "function": "<genexpr>",
+          "calls": 5,
+          "primitive_calls": 5,
+          "self_seconds": 1.5523e-05,
+          "cumulative_seconds": 2.5908e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 998,
+          "function": "<genexpr>",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 1.6094000000000002e-05,
+          "cumulative_seconds": 1.6094000000000002e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 798,
+          "function": "finite",
+          "calls": 9,
+          "primitive_calls": 9,
+          "self_seconds": 1.232e-05,
+          "cumulative_seconds": 1.4112000000000001e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 267,
+          "function": "<genexpr>",
+          "calls": 13,
+          "primitive_calls": 13,
+          "self_seconds": 1.1887000000000002e-05,
+          "cumulative_seconds": 1.3268e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1023,
+          "function": "<genexpr>",
+          "calls": 57,
+          "primitive_calls": 57,
+          "self_seconds": 9.202000000000001e-06,
+          "cumulative_seconds": 1.2400000000000002e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 369,
+          "function": "dataset_readiness",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 7.072e-06,
+          "cumulative_seconds": 1.0576e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 730,
+          "function": "<genexpr>",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 5.799000000000001e-06,
+          "cumulative_seconds": 9.383e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 823,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 2.071e-06,
+          "cumulative_seconds": 9.203e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1011,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 8.550000000000001e-06,
+          "cumulative_seconds": 8.550000000000001e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 765,
+          "function": "score_definition",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 3.7750000000000003e-06,
+          "cumulative_seconds": 3.7750000000000003e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 831,
+          "function": "normalized",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 2.3030000000000002e-06,
+          "cumulative_seconds": 3.255e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1063,
+          "function": "<genexpr>",
+          "calls": 21,
+          "primitive_calls": 21,
+          "self_seconds": 2.725e-06,
+          "cumulative_seconds": 2.725e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 873,
+          "function": "emit",
+          "calls": 11,
+          "primitive_calls": 11,
+          "self_seconds": 2.256e-06,
+          "cumulative_seconds": 2.256e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 283,
+          "function": "<genexpr>",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 1.0310000000000002e-06,
+          "cumulative_seconds": 1.241e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1504,
+          "function": "<genexpr>",
+          "calls": 5,
+          "primitive_calls": 5,
+          "self_seconds": 1.102e-06,
+          "cumulative_seconds": 1.102e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 269,
+          "function": "<genexpr>",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 1.0110000000000001e-06,
+          "cumulative_seconds": 1.0110000000000001e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 848,
+          "function": "<genexpr>",
+          "calls": 5,
+          "primitive_calls": 5,
+          "self_seconds": 8.12e-07,
+          "cumulative_seconds": 8.12e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 382,
+          "function": "<genexpr>",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 7.410000000000001e-07,
+          "cumulative_seconds": 7.410000000000001e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1071,
+          "function": "<lambda>",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.2e-07,
+          "cumulative_seconds": 4.2e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 289,
+          "function": "<genexpr>",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 1.61e-07,
+          "cumulative_seconds": 1.61e-07
+        }
+      ]
+    },
+    {
+      "topology_id": "feature-mlp-32",
+      "status": "completed",
+      "config": {
+        "source": "synthetic",
+        "topology_id": "feature-mlp-32",
+        "seed": 42,
+        "samples_per_class": 48,
+        "segment_length": 2048,
+        "epochs": 3,
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "snr_db": [
+          -5,
+          5,
+          15
+        ],
+        "jitter": [
+          0,
+          0.1
+        ],
+        "device": "cpu"
+      },
+      "elapsed_seconds": 0.682764799996221,
+      "reported_training_seconds": 0.08107145500252955,
+      "reported_preprocessing_seconds": 0.14784872000018368,
+      "phases": {
+        "generate_signal": {
+          "calls": 97,
+          "wall_seconds": 0.03219643799820915
+        },
+        "_dataset:train:random": {
+          "calls": 1,
+          "wall_seconds": 0.06129507899458986
+        },
+        "_dataset:validation:random": {
+          "calls": 1,
+          "wall_seconds": 0.021387069995398633
+        },
+        "_dataset:train:clean": {
+          "calls": 1,
+          "wall_seconds": 0.047429623002244625
+        },
+        "_dataset:validation:clean": {
+          "calls": 1,
+          "wall_seconds": 0.017508979995909613
+        },
+        "_dataset:validation:grid": {
+          "calls": 6,
+          "wall_seconds": 0.1363360579998698
+        },
+        "_dataset:test:grid": {
+          "calls": 6,
+          "wall_seconds": 0.13150247099838452
+        },
+        "classify": {
+          "calls": 23,
+          "wall_seconds": 0.047673013992607594
+        }
+      },
+      "other_wall_seconds": 0.45384462499350775,
+      "training_segments": 56,
+      "training_examples": 112,
+      "parameter_count": 1474,
+      "model_bytes": 15072,
+      "timing_repetitions": 20,
+      "dataset_sha256": "ccaed557c421d24c6946cee04c1c7afec98e02e1ba1dbe9b2cac9b708a7ff3b6",
+      "top_functions": [
+        {
+          "file": "/workspace/SignalClassifier/scripts/benchmark_experiments.py",
+          "line": 82,
+          "function": "measured",
+          "calls": 113,
+          "primitive_calls": 113,
+          "self_seconds": 0.00065665,
+          "cumulative_seconds": 0.448115166
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 673,
+          "function": "_dataset",
+          "calls": 16,
+          "primitive_calls": 16,
+          "self_seconds": 0.004242133,
+          "cumulative_seconds": 0.41533626900000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 47,
+          "function": "extract_features",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.249379062,
+          "cumulative_seconds": 0.38535663400000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 145,
+          "function": "_representation",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.000215132,
+          "cumulative_seconds": 0.344817072
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 86,
+          "function": "_feature_vector",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.000741283,
+          "cumulative_seconds": 0.34460194
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/autograd/grad_mode.py",
+          "line": 290,
+          "function": "__enter__",
+          "calls": 37,
+          "primitive_calls": 1,
+          "self_seconds": 0.009344927000000001,
+          "cumulative_seconds": 0.326475192
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 543,
+          "function": "augment",
+          "calls": 316,
+          "primitive_calls": 316,
+          "self_seconds": 0.044701268,
+          "cumulative_seconds": 0.064659465
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/linecache.py",
+          "line": 36,
+          "function": "getlines",
+          "calls": 31,
+          "primitive_calls": 31,
+          "self_seconds": 4.5888000000000005e-05,
+          "cumulative_seconds": 0.051858038
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/linecache.py",
+          "line": 83,
+          "function": "updatecache",
+          "calls": 10,
+          "primitive_calls": 10,
+          "self_seconds": 7.095300000000001e-05,
+          "cumulative_seconds": 0.051809118
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/_compile.py",
+          "line": 42,
+          "function": "inner",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 4.0151e-05,
+          "cumulative_seconds": 0.051214267
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py",
+          "line": 1527,
+          "function": "_fn",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 5.667100000000001e-05,
+          "cumulative_seconds": 0.051089871
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/random.py",
+          "line": 49,
+          "function": "manual_seed",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 3.0140000000000003e-06,
+          "cumulative_seconds": 0.050543152
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/random.py",
+          "line": 62,
+          "function": "_manual_seed_impl",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.673e-05,
+          "cumulative_seconds": 0.050540138000000005
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/traceback.py",
+          "line": 214,
+          "function": "format_stack",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 1.7335000000000003e-05,
+          "cumulative_seconds": 0.050354102000000005
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/traceback.py",
+          "line": 221,
+          "function": "extract_stack",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 1.8447e-05,
+          "cumulative_seconds": 0.050090804
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/traceback.py",
+          "line": 377,
+          "function": "extract",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 1.0126000000000001e-05,
+          "cumulative_seconds": 0.050071484000000006
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/traceback.py",
+          "line": 399,
+          "function": "_extract_from_extended_frame_gen",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 9.668e-05,
+          "cumulative_seconds": 0.050061358
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/traceback.py",
+          "line": 318,
+          "function": "line",
+          "calls": 150,
+          "primitive_calls": 150,
+          "self_seconds": 5.2343000000000004e-05,
+          "cumulative_seconds": 0.049797739
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/linecache.py",
+          "line": 26,
+          "function": "getline",
+          "calls": 30,
+          "primitive_calls": 30,
+          "self_seconds": 3.1447e-05,
+          "cumulative_seconds": 0.049703609
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 3735,
+          "function": "mean",
+          "calls": 6485,
+          "primitive_calls": 6485,
+          "self_seconds": 0.005897391,
+          "cumulative_seconds": 0.044047222000000004
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py",
+          "line": 1783,
+          "function": "_wrapped_call_impl",
+          "calls": 312,
+          "primitive_calls": 52,
+          "self_seconds": 0.000425461,
+          "cumulative_seconds": 0.042090005
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py",
+          "line": 1791,
+          "function": "_call_impl",
+          "calls": 312,
+          "primitive_calls": 52,
+          "self_seconds": 0.00047641000000000003,
+          "cumulative_seconds": 0.042011393
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/container.py",
+          "line": 254,
+          "function": "forward",
+          "calls": 52,
+          "primitive_calls": 52,
+          "self_seconds": 0.00030043,
+          "cumulative_seconds": 0.041861039
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/cuda/random.py",
+          "line": 112,
+          "function": "manual_seed_all",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 5.208e-06,
+          "cumulative_seconds": 0.039555316
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/cuda/__init__.py",
+          "line": 532,
+          "function": "_lazy_call",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 1.5582e-05,
+          "cumulative_seconds": 0.039550108
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 117,
+          "function": "_mean",
+          "calls": 6542,
+          "primitive_calls": 6542,
+          "self_seconds": 0.013337834000000002,
+          "cumulative_seconds": 0.038630564
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'readlines' of '_io._IOBase' objects>",
+          "calls": 10,
+          "primitive_calls": 10,
+          "self_seconds": 0.03779838,
+          "cumulative_seconds": 0.037927487
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/activation.py",
+          "line": 813,
+          "function": "forward",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 6.9479e-05,
+          "cumulative_seconds": 0.032157923000000005
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method torch._C._nn.gelu>",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.032088444,
+          "cumulative_seconds": 0.032088444
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 518,
+          "function": "generate_signal",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.025784474,
+          "cumulative_seconds": 0.031998165
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 574,
+          "function": "_synthetic_groups",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.000293636,
+          "cumulative_seconds": 0.031739887
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 150,
+          "function": "_var",
+          "calls": 1721,
+          "primitive_calls": 1721,
+          "self_seconds": 0.016421808,
+          "cumulative_seconds": 0.026260635
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 750,
+          "function": "benchmark_hardware",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.8822e-05,
+          "cumulative_seconds": 0.022770078000000003
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'reduce' of 'numpy.ufunc' objects>",
+          "calls": 11847,
+          "primitive_calls": 11847,
+          "self_seconds": 0.021820728,
+          "cumulative_seconds": 0.021820728
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 3869,
+          "function": "std",
+          "calls": 860,
+          "primitive_calls": 860,
+          "self_seconds": 0.001062788,
+          "cumulative_seconds": 0.016565568000000003
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 220,
+          "function": "_std",
+          "calls": 861,
+          "primitive_calls": 861,
+          "self_seconds": 0.001904819,
+          "cumulative_seconds": 0.015529770000000002
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/fft/_pocketfft.py",
+          "line": 120,
+          "function": "fft",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.00047925400000000003,
+          "cumulative_seconds": 0.014417746
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 4073,
+          "function": "var",
+          "calls": 860,
+          "primitive_calls": 860,
+          "self_seconds": 0.001074569,
+          "cumulative_seconds": 0.013951237
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/fft/_pocketfft.py",
+          "line": 58,
+          "function": "_raw_fft",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.013590806,
+          "cumulative_seconds": 0.013869748000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tokenize.py",
+          "line": 453,
+          "function": "open",
+          "calls": 10,
+          "primitive_calls": 10,
+          "self_seconds": 0.00010552700000000001,
+          "cumulative_seconds": 0.013666491000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py",
+          "line": 3285,
+          "function": "hanning",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.011656377,
+          "cumulative_seconds": 0.013527265
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tokenize.py",
+          "line": 360,
+          "function": "detect_encoding",
+          "calls": 11,
+          "primitive_calls": 11,
+          "self_seconds": 6.7889e-05,
+          "cumulative_seconds": 0.013409832
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'readline' of '_io.BufferedReader' objects>",
+          "calls": 25,
+          "primitive_calls": 25,
+          "self_seconds": 0.013288098000000002,
+          "cumulative_seconds": 0.013288098000000002
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tokenize.py",
+          "line": 384,
+          "function": "read_or_stop",
+          "calls": 18,
+          "primitive_calls": 18,
+          "self_seconds": 1.0196e-05,
+          "cumulative_seconds": 0.013277445
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/utils/clip_grad.py",
+          "line": 39,
+          "function": "_no_grad_wrapper",
+          "calls": 36,
+          "primitive_calls": 12,
+          "self_seconds": 0.000126961,
+          "cumulative_seconds": 0.012932836000000001
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/utils/clip_grad.py",
+          "line": 184,
+          "function": "clip_grad_norm_",
+          "calls": 12,
+          "primitive_calls": 12,
+          "self_seconds": 7.635400000000001e-05,
+          "cumulative_seconds": 0.012793287
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 75,
+          "function": "_count_reduce_items",
+          "calls": 8263,
+          "primitive_calls": 8263,
+          "self_seconds": 0.010176526,
+          "cumulative_seconds": 0.011323326
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/utils/clip_grad.py",
+          "line": 48,
+          "function": "_get_total_norm",
+          "calls": 12,
+          "primitive_calls": 12,
+          "self_seconds": 0.000107113,
+          "cumulative_seconds": 0.010659863
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py",
+          "line": 1671,
+          "function": "angle",
+          "calls": 1290,
+          "primitive_calls": 1290,
+          "self_seconds": 0.010082814,
+          "cumulative_seconds": 0.010537569
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 36,
+          "function": "_json",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 2.5127000000000002e-05,
+          "cumulative_seconds": 0.010188853000000001
+        }
+      ],
+      "selected_ml_functions": [
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 673,
+          "function": "_dataset",
+          "calls": 16,
+          "primitive_calls": 16,
+          "self_seconds": 0.004242133,
+          "cumulative_seconds": 0.41533626900000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 47,
+          "function": "extract_features",
+          "calls": 430,
+          "primitive_calls": 430,
+          "self_seconds": 0.249379062,
+          "cumulative_seconds": 0.38535663400000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 145,
+          "function": "_representation",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.000215132,
+          "cumulative_seconds": 0.344817072
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 86,
+          "function": "_feature_vector",
+          "calls": 392,
+          "primitive_calls": 392,
+          "self_seconds": 0.000741283,
+          "cumulative_seconds": 0.34460194
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 543,
+          "function": "augment",
+          "calls": 316,
+          "primitive_calls": 316,
+          "self_seconds": 0.044701268,
+          "cumulative_seconds": 0.064659465
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 518,
+          "function": "generate_signal",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.025784474,
+          "cumulative_seconds": 0.031998165
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 574,
+          "function": "_synthetic_groups",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.000293636,
+          "cumulative_seconds": 0.031739887
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 750,
+          "function": "benchmark_hardware",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.8822e-05,
+          "cumulative_seconds": 0.022770078000000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 36,
+          "function": "_json",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 2.5127000000000002e-05,
+          "cumulative_seconds": 0.010188853000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1440,
+          "function": "load_model_metadata",
+          "calls": 26,
+          "primitive_calls": 26,
+          "self_seconds": 0.000560899,
+          "cumulative_seconds": 0.008092716
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 40,
+          "function": "_iq",
+          "calls": 453,
+          "primitive_calls": 453,
+          "self_seconds": 0.0019652470000000003,
+          "cumulative_seconds": 0.003785866
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 90,
+          "function": "_vector_from_features",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.0023344520000000003,
+          "cumulative_seconds": 0.003632891
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 697,
+          "function": "_metrics",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 0.0012154520000000001,
+          "cumulative_seconds": 0.003108631
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1538,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 6.828800000000001e-05,
+          "cumulative_seconds": 0.0025105450000000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1626,
+          "function": "<genexpr>",
+          "calls": 92,
+          "primitive_calls": 92,
+          "self_seconds": 0.00014241700000000002,
+          "cumulative_seconds": 0.00142456
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 161,
+          "function": "_torch_model",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 8.274500000000001e-05,
+          "cumulative_seconds": 0.001345733
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 918,
+          "function": "<genexpr>",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.000150735,
+          "cumulative_seconds": 0.0011726640000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1471,
+          "function": "_bounded_npz",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 3.9663e-05,
+          "cumulative_seconds": 0.000927574
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 723,
+          "function": "hardware_profile",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 7.4652e-05,
+          "cumulative_seconds": 0.0008827170000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 902,
+          "function": "sample_rss",
+          "calls": 6,
+          "primitive_calls": 6,
+          "self_seconds": 3.1889e-05,
+          "cumulative_seconds": 0.00070146
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 244,
+          "function": "_validate_config",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 7.407e-05,
+          "cumulative_seconds": 0.00016849900000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 665,
+          "function": "_data_usage",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 2.2994e-05,
+          "cumulative_seconds": 0.00012584600000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 786,
+          "function": "score_candidate",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 3.0707e-05,
+          "cumulative_seconds": 7.790600000000001e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1015,
+          "function": "<genexpr>",
+          "calls": 5,
+          "primitive_calls": 5,
+          "self_seconds": 5.557e-06,
+          "cumulative_seconds": 7.640400000000001e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1453,
+          "function": "<genexpr>",
+          "calls": 78,
+          "primitive_calls": 78,
+          "self_seconds": 3.4649e-05,
+          "cumulative_seconds": 4.5586e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1022,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 4.446e-06,
+          "cumulative_seconds": 4.4926e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 668,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 2.8476000000000003e-05,
+          "cumulative_seconds": 4.2613e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 667,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 1.8137000000000003e-05,
+          "cumulative_seconds": 3.8255000000000006e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 249,
+          "function": "scalar",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 2.5958e-05,
+          "cumulative_seconds": 2.8291e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 187,
+          "function": "Recurrent",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 1.7927e-05,
+          "cumulative_seconds": 1.7927e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 798,
+          "function": "finite",
+          "calls": 9,
+          "primitive_calls": 9,
+          "self_seconds": 1.3990000000000002e-05,
+          "cumulative_seconds": 1.6272e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1536,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 1.2800000000000001e-05,
+          "cumulative_seconds": 1.6024e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1023,
+          "function": "<genexpr>",
+          "calls": 57,
+          "primitive_calls": 57,
+          "self_seconds": 9.857e-06,
+          "cumulative_seconds": 1.3833000000000001e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 998,
+          "function": "<genexpr>",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 1.3044e-05,
+          "cumulative_seconds": 1.3044e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 823,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 2.255e-06,
+          "cumulative_seconds": 1.1677e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 267,
+          "function": "<genexpr>",
+          "calls": 13,
+          "primitive_calls": 13,
+          "self_seconds": 1.0295e-05,
+          "cumulative_seconds": 1.1497e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 730,
+          "function": "<genexpr>",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 6.3420000000000004e-06,
+          "cumulative_seconds": 1.0236e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 369,
+          "function": "dataset_readiness",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 6.477e-06,
+          "cumulative_seconds": 9.354e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1011,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 7.875e-06,
+          "cumulative_seconds": 7.875e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 765,
+          "function": "score_definition",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 4.106e-06,
+          "cumulative_seconds": 4.106e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1063,
+          "function": "<genexpr>",
+          "calls": 21,
+          "primitive_calls": 21,
+          "self_seconds": 3.807e-06,
+          "cumulative_seconds": 3.807e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 171,
+          "function": "CausalConv",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 3.796e-06,
+          "cumulative_seconds": 3.796e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 831,
+          "function": "normalized",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 2.0830000000000002e-06,
+          "cumulative_seconds": 3.2340000000000003e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 873,
+          "function": "emit",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 3.035e-06,
+          "cumulative_seconds": 3.035e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 197,
+          "function": "PatchTransformer",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 2.624e-06,
+          "cumulative_seconds": 2.624e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 179,
+          "function": "Residual",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 1.9930000000000002e-06,
+          "cumulative_seconds": 1.9930000000000002e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1504,
+          "function": "<genexpr>",
+          "calls": 13,
+          "primitive_calls": 13,
+          "self_seconds": 1.6230000000000002e-06,
+          "cumulative_seconds": 1.6230000000000002e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1546,
+          "function": "<genexpr>",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 1.432e-06,
+          "cumulative_seconds": 1.432e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 848,
+          "function": "<genexpr>",
+          "calls": 5,
+          "primitive_calls": 5,
+          "self_seconds": 9.410000000000001e-07,
+          "cumulative_seconds": 9.410000000000001e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 283,
+          "function": "<genexpr>",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 6.2e-07,
+          "cumulative_seconds": 7.5e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 269,
+          "function": "<genexpr>",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 7.310000000000001e-07,
+          "cumulative_seconds": 7.310000000000001e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 382,
+          "function": "<genexpr>",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 6.420000000000001e-07,
+          "cumulative_seconds": 6.420000000000001e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1071,
+          "function": "<lambda>",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 5.61e-07,
+          "cumulative_seconds": 5.61e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 289,
+          "function": "<genexpr>",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 2.2e-07,
+          "cumulative_seconds": 2.2e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1555,
+          "function": "predict",
+          "calls": 22,
+          "primitive_calls": 0,
+          "self_seconds": 6.0031e-05,
+          "cumulative_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "topology_id": "iq-cnn-16",
+      "status": "completed",
+      "config": {
+        "source": "synthetic",
+        "topology_id": "iq-cnn-16",
+        "seed": 42,
+        "samples_per_class": 48,
+        "segment_length": 2048,
+        "epochs": 3,
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "snr_db": [
+          -5,
+          5,
+          15
+        ],
+        "jitter": [
+          0,
+          0.1
+        ],
+        "device": "cpu"
+      },
+      "elapsed_seconds": 0.7702091690007364,
+      "reported_training_seconds": 0.3613772690005135,
+      "reported_preprocessing_seconds": 0.05645567499595927,
+      "phases": {
+        "generate_signal": {
+          "calls": 97,
+          "wall_seconds": 0.032132897940755356
+        },
+        "_dataset:train:random": {
+          "calls": 1,
+          "wall_seconds": 0.027872131002368405
+        },
+        "_dataset:validation:random": {
+          "calls": 1,
+          "wall_seconds": 0.008103936997940764
+        },
+        "_dataset:train:clean": {
+          "calls": 1,
+          "wall_seconds": 0.011500864995468874
+        },
+        "_dataset:validation:clean": {
+          "calls": 1,
+          "wall_seconds": 0.004026160000648815
+        },
+        "_dataset:validation:grid": {
+          "calls": 6,
+          "wall_seconds": 0.08163964700361248
+        },
+        "_dataset:test:grid": {
+          "calls": 6,
+          "wall_seconds": 0.044944863991986495
+        },
+        "classify": {
+          "calls": 23,
+          "wall_seconds": 0.08021393503440777
+        }
+      },
+      "other_wall_seconds": 0.3523762250042637,
+      "training_segments": 56,
+      "training_examples": 112,
+      "parameter_count": 3922,
+      "model_bytes": 24932,
+      "timing_repetitions": 20,
+      "dataset_sha256": "ccaed557c421d24c6946cee04c1c7afec98e02e1ba1dbe9b2cac9b708a7ff3b6",
+      "top_functions": [
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py",
+          "line": 1783,
+          "function": "_wrapped_call_impl",
+          "calls": 572,
+          "primitive_calls": 52,
+          "self_seconds": 0.0007047910000000001,
+          "cumulative_seconds": 0.25714581400000003
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py",
+          "line": 1791,
+          "function": "_call_impl",
+          "calls": 572,
+          "primitive_calls": 52,
+          "self_seconds": 0.001312395,
+          "cumulative_seconds": 0.257062981
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/container.py",
+          "line": 254,
+          "function": "forward",
+          "calls": 52,
+          "primitive_calls": 52,
+          "self_seconds": 0.000722883,
+          "cumulative_seconds": 0.25690000500000004
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/autograd/grad_mode.py",
+          "line": 290,
+          "function": "__enter__",
+          "calls": 37,
+          "primitive_calls": 1,
+          "self_seconds": 0.005955443,
+          "cumulative_seconds": 0.255256191
+        },
+        {
+          "file": "/workspace/SignalClassifier/scripts/benchmark_experiments.py",
+          "line": 82,
+          "function": "measured",
+          "calls": 113,
+          "primitive_calls": 113,
+          "self_seconds": 0.00071402,
+          "cumulative_seconds": 0.21073918100000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 673,
+          "function": "_dataset",
+          "calls": 16,
+          "primitive_calls": 16,
+          "self_seconds": 0.0037693320000000002,
+          "cumulative_seconds": 0.17795622800000002
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/_tensor.py",
+          "line": 566,
+          "function": "backward",
+          "calls": 12,
+          "primitive_calls": 12,
+          "self_seconds": 6.0774000000000005e-05,
+          "cumulative_seconds": 0.158859587
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/autograd/__init__.py",
+          "line": 255,
+          "function": "backward",
+          "calls": 12,
+          "primitive_calls": 12,
+          "self_seconds": 0.000285507,
+          "cumulative_seconds": 0.158795614
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/autograd/graph.py",
+          "line": 1100,
+          "function": "_engine_run_backward",
+          "calls": 12,
+          "primitive_calls": 12,
+          "self_seconds": 0.000208735,
+          "cumulative_seconds": 0.158101497
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'run_backward' of 'torch._C._EngineBase' objects>",
+          "calls": 12,
+          "primitive_calls": 12,
+          "self_seconds": 0.15776689200000002,
+          "cumulative_seconds": 0.15776689200000002
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/conv.py",
+          "line": 384,
+          "function": "forward",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.000281096,
+          "cumulative_seconds": 0.140292892
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/conv.py",
+          "line": 366,
+          "function": "_conv_forward",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.00017775400000000002,
+          "cumulative_seconds": 0.139883326
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method torch.conv1d>",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.139705572,
+          "cumulative_seconds": 0.139705572
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 543,
+          "function": "augment",
+          "calls": 316,
+          "primitive_calls": 316,
+          "self_seconds": 0.06976976700000001,
+          "cumulative_seconds": 0.089748651
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 145,
+          "function": "_representation",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.000357114,
+          "cumulative_seconds": 0.083904557
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 98,
+          "function": "_standard_iq",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.030418767000000003,
+          "cumulative_seconds": 0.083547443
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 47,
+          "function": "extract_features",
+          "calls": 38,
+          "primitive_calls": 38,
+          "self_seconds": 0.031407164,
+          "cumulative_seconds": 0.045391903000000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 36,
+          "function": "_json",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 3.5626e-05,
+          "cumulative_seconds": 0.043931394000000006
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/__init__.py",
+          "line": 183,
+          "function": "dumps",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 5.5870000000000005e-05,
+          "cumulative_seconds": 0.043314399
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 183,
+          "function": "encode",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 0.000824776,
+          "cumulative_seconds": 0.043254924
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 414,
+          "function": "_iterencode",
+          "calls": 7519,
+          "primitive_calls": 7519,
+          "self_seconds": 0.0009709440000000001,
+          "cumulative_seconds": 0.042332023
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 334,
+          "function": "_iterencode_dict",
+          "calls": 18905,
+          "primitive_calls": 7519,
+          "self_seconds": 0.0037537570000000004,
+          "cumulative_seconds": 0.041359306000000005
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/activation.py",
+          "line": 813,
+          "function": "forward",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.000117362,
+          "cumulative_seconds": 0.040582495
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method torch._C._nn.gelu>",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.040465133,
+          "cumulative_seconds": 0.040465133
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/json/encoder.py",
+          "line": 278,
+          "function": "_iterencode_list",
+          "calls": 7217,
+          "primitive_calls": 4989,
+          "self_seconds": 0.0014632050000000002,
+          "cumulative_seconds": 0.038788574
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/pooling.py",
+          "line": 668,
+          "function": "forward",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.000125183,
+          "cumulative_seconds": 0.037711807
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method torch.avg_pool1d>",
+          "calls": 104,
+          "primitive_calls": 104,
+          "self_seconds": 0.037586624,
+          "cumulative_seconds": 0.037586624
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method _json.encode_basestring>",
+          "calls": 2009,
+          "primitive_calls": 2009,
+          "self_seconds": 0.035117381,
+          "cumulative_seconds": 0.035117381
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/scipy/signal/_signaltools.py",
+          "line": 3568,
+          "function": "resample",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.0071724020000000005,
+          "cumulative_seconds": 0.034079487000000006
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 518,
+          "function": "generate_signal",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.025961065000000002,
+          "cumulative_seconds": 0.031935798
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/modules/dropout.py",
+          "line": 69,
+          "function": "forward",
+          "calls": 52,
+          "primitive_calls": 52,
+          "self_seconds": 0.00011060300000000001,
+          "cumulative_seconds": 0.031845732
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 574,
+          "function": "_synthetic_groups",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.000298426,
+          "cumulative_seconds": 0.031774317
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/nn/functional.py",
+          "line": 1473,
+          "function": "dropout",
+          "calls": 52,
+          "primitive_calls": 52,
+          "self_seconds": 0.000391295,
+          "cumulative_seconds": 0.031735129
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method torch.dropout>",
+          "calls": 52,
+          "primitive_calls": 52,
+          "self_seconds": 0.031245483,
+          "cumulative_seconds": 0.031245483
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 750,
+          "function": "benchmark_hardware",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.6327000000000006e-05,
+          "cumulative_seconds": 0.025819011000000003
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/scipy/fft/_backend.py",
+          "line": 19,
+          "function": "__ua_function__",
+          "calls": 830,
+          "primitive_calls": 830,
+          "self_seconds": 0.000829533,
+          "cumulative_seconds": 0.021662714000000003
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/scipy/fft/_basic_backend.py",
+          "line": 27,
+          "function": "_execute_1D",
+          "calls": 830,
+          "primitive_calls": 830,
+          "self_seconds": 0.0014419830000000002,
+          "cumulative_seconds": 0.020211312000000002
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/scipy/fft/_pocketfft/basic.py",
+          "line": 11,
+          "function": "c2c",
+          "calls": 830,
+          "primitive_calls": 830,
+          "self_seconds": 0.001471705,
+          "cumulative_seconds": 0.018510937
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/fromnumeric.py",
+          "line": 3735,
+          "function": "mean",
+          "calls": 1827,
+          "primitive_calls": 1827,
+          "self_seconds": 0.002090064,
+          "cumulative_seconds": 0.017353510000000003
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_methods.py",
+          "line": 117,
+          "function": "_mean",
+          "calls": 1883,
+          "primitive_calls": 1883,
+          "self_seconds": 0.0061901510000000005,
+          "cumulative_seconds": 0.015817094
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/scipy/fft/_basic_backend.py",
+          "line": 77,
+          "function": "fft",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.00026467,
+          "cumulative_seconds": 0.013182879000000002
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method scipy.fft._pocketfft.pypocketfft.c2c>",
+          "calls": 830,
+          "primitive_calls": 830,
+          "self_seconds": 0.012299924,
+          "cumulative_seconds": 0.012328446000000002
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/lib/_function_base_impl.py",
+          "line": 1527,
+          "function": "interp",
+          "calls": 322,
+          "primitive_calls": 322,
+          "self_seconds": 0.000454974,
+          "cumulative_seconds": 0.009305387
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method numpy._core._multiarray_umath.interp>",
+          "calls": 322,
+          "primitive_calls": 322,
+          "self_seconds": 0.008561163,
+          "cumulative_seconds": 0.008561163
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'reduce' of 'numpy.ufunc' objects>",
+          "calls": 3287,
+          "primitive_calls": 3287,
+          "self_seconds": 0.007789760000000001,
+          "cumulative_seconds": 0.007789760000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/scipy/fft/_basic_backend.py",
+          "line": 83,
+          "function": "ifft",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.000202234,
+          "cumulative_seconds": 0.007495337
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1440,
+          "function": "load_model_metadata",
+          "calls": 26,
+          "primitive_calls": 26,
+          "self_seconds": 0.0005238920000000001,
+          "cumulative_seconds": 0.007135815
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/shape_base.py",
+          "line": 380,
+          "function": "stack",
+          "calls": 454,
+          "primitive_calls": 454,
+          "self_seconds": 0.004944902,
+          "cumulative_seconds": 0.005275008
+        },
+        {
+          "file": "/workspace/SignalClassifier/.venv/lib/python3.12/site-packages/torch/optim/optimizer.py",
+          "line": 546,
+          "function": "wrapper",
+          "calls": 12,
+          "primitive_calls": 12,
+          "self_seconds": 0.00024020600000000002,
+          "cumulative_seconds": 0.005019872000000001
+        },
+        {
+          "file": "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/site-packages/numpy/_core/_ufunc_config.py",
+          "line": 472,
+          "function": "inner",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.0038736570000000004,
+          "cumulative_seconds": 0.004437911
+        }
+      ],
+      "selected_ml_functions": [
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 673,
+          "function": "_dataset",
+          "calls": 16,
+          "primitive_calls": 16,
+          "self_seconds": 0.0037693320000000002,
+          "cumulative_seconds": 0.17795622800000002
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 543,
+          "function": "augment",
+          "calls": 316,
+          "primitive_calls": 316,
+          "self_seconds": 0.06976976700000001,
+          "cumulative_seconds": 0.089748651
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 145,
+          "function": "_representation",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.000357114,
+          "cumulative_seconds": 0.083904557
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 98,
+          "function": "_standard_iq",
+          "calls": 415,
+          "primitive_calls": 415,
+          "self_seconds": 0.030418767000000003,
+          "cumulative_seconds": 0.083547443
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 47,
+          "function": "extract_features",
+          "calls": 38,
+          "primitive_calls": 38,
+          "self_seconds": 0.031407164,
+          "cumulative_seconds": 0.045391903000000004
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 36,
+          "function": "_json",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 3.5626e-05,
+          "cumulative_seconds": 0.043931394000000006
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 518,
+          "function": "generate_signal",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.025961065000000002,
+          "cumulative_seconds": 0.031935798
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 574,
+          "function": "_synthetic_groups",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 0.000298426,
+          "cumulative_seconds": 0.031774317
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 750,
+          "function": "benchmark_hardware",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.6327000000000006e-05,
+          "cumulative_seconds": 0.025819011000000003
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1440,
+          "function": "load_model_metadata",
+          "calls": 26,
+          "primitive_calls": 26,
+          "self_seconds": 0.0005238920000000001,
+          "cumulative_seconds": 0.007135815
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 40,
+          "function": "_iq",
+          "calls": 476,
+          "primitive_calls": 476,
+          "self_seconds": 0.002106684,
+          "cumulative_seconds": 0.003939041
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 697,
+          "function": "_metrics",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 0.001313162,
+          "cumulative_seconds": 0.0034464730000000002
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 161,
+          "function": "_torch_model",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 9.7688e-05,
+          "cumulative_seconds": 0.0020974550000000002
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 918,
+          "function": "<genexpr>",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 0.000111859,
+          "cumulative_seconds": 0.001373572
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1626,
+          "function": "<genexpr>",
+          "calls": 92,
+          "primitive_calls": 92,
+          "self_seconds": 0.000127681,
+          "cumulative_seconds": 0.001192443
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 723,
+          "function": "hardware_profile",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 0.00011674600000000001,
+          "cumulative_seconds": 0.0007956090000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 902,
+          "function": "sample_rss",
+          "calls": 6,
+          "primitive_calls": 6,
+          "self_seconds": 4.1441000000000005e-05,
+          "cumulative_seconds": 0.000751633
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1471,
+          "function": "_bounded_npz",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 3.5207000000000004e-05,
+          "cumulative_seconds": 0.0006280890000000001
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 665,
+          "function": "_data_usage",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 2.7752e-05,
+          "cumulative_seconds": 0.000180618
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 244,
+          "function": "_validate_config",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 2.8865000000000002e-05,
+          "cumulative_seconds": 0.00013879500000000002
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1538,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 1.7335000000000003e-05,
+          "cumulative_seconds": 0.000122371
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 786,
+          "function": "score_candidate",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.8193000000000004e-05,
+          "cumulative_seconds": 9.090500000000001e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1022,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 8.456e-06,
+          "cumulative_seconds": 7.8114e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1015,
+          "function": "<genexpr>",
+          "calls": 5,
+          "primitive_calls": 5,
+          "self_seconds": 7.452000000000001e-06,
+          "cumulative_seconds": 7.7914e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 668,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 5.4037000000000005e-05,
+          "cumulative_seconds": 6.9758e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 667,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 2.5782e-05,
+          "cumulative_seconds": 5.8151000000000006e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1023,
+          "function": "<genexpr>",
+          "calls": 57,
+          "primitive_calls": 57,
+          "self_seconds": 3.825e-05,
+          "cumulative_seconds": 4.2055e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 249,
+          "function": "scalar",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 3.8145e-05,
+          "cumulative_seconds": 4.0429e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1453,
+          "function": "<genexpr>",
+          "calls": 78,
+          "primitive_calls": 78,
+          "self_seconds": 3.1399e-05,
+          "cumulative_seconds": 4.0121000000000004e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 998,
+          "function": "<genexpr>",
+          "calls": 97,
+          "primitive_calls": 97,
+          "self_seconds": 2.3425e-05,
+          "cumulative_seconds": 2.3425e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 798,
+          "function": "finite",
+          "calls": 9,
+          "primitive_calls": 9,
+          "self_seconds": 1.1639000000000002e-05,
+          "cumulative_seconds": 1.337e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1011,
+          "function": "<genexpr>",
+          "calls": 99,
+          "primitive_calls": 99,
+          "self_seconds": 1.2389000000000001e-05,
+          "cumulative_seconds": 1.2389000000000001e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 267,
+          "function": "<genexpr>",
+          "calls": 13,
+          "primitive_calls": 13,
+          "self_seconds": 1.0761e-05,
+          "cumulative_seconds": 1.2177e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1536,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 9.595e-06,
+          "cumulative_seconds": 1.1959e-05
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 730,
+          "function": "<genexpr>",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 6.229e-06,
+          "cumulative_seconds": 9.994000000000001e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 823,
+          "function": "<genexpr>",
+          "calls": 7,
+          "primitive_calls": 7,
+          "self_seconds": 2.1230000000000003e-06,
+          "cumulative_seconds": 9.814000000000001e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 369,
+          "function": "dataset_readiness",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 6.189e-06,
+          "cumulative_seconds": 9.064e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 765,
+          "function": "score_definition",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 3.9470000000000005e-06,
+          "cumulative_seconds": 3.9470000000000005e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 171,
+          "function": "CausalConv",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 3.7860000000000003e-06,
+          "cumulative_seconds": 3.7860000000000003e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 873,
+          "function": "emit",
+          "calls": 14,
+          "primitive_calls": 14,
+          "self_seconds": 3.633e-06,
+          "cumulative_seconds": 3.633e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 831,
+          "function": "normalized",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 1.773e-06,
+          "cumulative_seconds": 2.955e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1063,
+          "function": "<genexpr>",
+          "calls": 21,
+          "primitive_calls": 21,
+          "self_seconds": 2.905e-06,
+          "cumulative_seconds": 2.905e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 197,
+          "function": "PatchTransformer",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 2.6140000000000003e-06,
+          "cumulative_seconds": 2.6140000000000003e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 187,
+          "function": "Recurrent",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 2.3440000000000003e-06,
+          "cumulative_seconds": 2.3440000000000003e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 179,
+          "function": "Residual",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 1.972e-06,
+          "cumulative_seconds": 1.972e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1504,
+          "function": "<genexpr>",
+          "calls": 13,
+          "primitive_calls": 13,
+          "self_seconds": 1.553e-06,
+          "cumulative_seconds": 1.553e-06
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 283,
+          "function": "<genexpr>",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 7.71e-07,
+          "cumulative_seconds": 9.62e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 269,
+          "function": "<genexpr>",
+          "calls": 4,
+          "primitive_calls": 4,
+          "self_seconds": 7.820000000000001e-07,
+          "cumulative_seconds": 7.820000000000001e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 848,
+          "function": "<genexpr>",
+          "calls": 5,
+          "primitive_calls": 5,
+          "self_seconds": 7.000000000000001e-07,
+          "cumulative_seconds": 7.000000000000001e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 382,
+          "function": "<genexpr>",
+          "calls": 2,
+          "primitive_calls": 2,
+          "self_seconds": 6.22e-07,
+          "cumulative_seconds": 6.22e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1546,
+          "function": "<genexpr>",
+          "calls": 3,
+          "primitive_calls": 3,
+          "self_seconds": 5.5e-07,
+          "cumulative_seconds": 5.5e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1071,
+          "function": "<lambda>",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 4.21e-07,
+          "cumulative_seconds": 4.21e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 289,
+          "function": "<genexpr>",
+          "calls": 1,
+          "primitive_calls": 1,
+          "self_seconds": 1.8100000000000002e-07,
+          "cumulative_seconds": 1.8100000000000002e-07
+        },
+        {
+          "file": "/tmp/signalclassifier-benchmark-before/signalclassifier/ml.py",
+          "line": 1555,
+          "function": "predict",
+          "calls": 22,
+          "primitive_calls": 0,
+          "self_seconds": 6.5349e-05,
+          "cumulative_seconds": 0.0
+        }
+      ]
+    }
+  ]
+}

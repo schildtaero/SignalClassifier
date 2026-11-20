@@ -31,6 +31,7 @@ from .db import Store, utcnow
 from .drones import Bridge, DroneStore, capabilities, example_payload
 from .receivers import CaptureManager
 from .sigmf import read_recording
+from .telemetry import ResourceSummary, ResourceTelemetry
 
 LOG = logging.getLogger(__name__)
 IDENTIFIER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
@@ -142,6 +143,7 @@ class Runtime:
         self.live_timings = {}
         self.event_sequences = {}
         self.run_clocks = {}
+        self.resource_summaries = {}
         # A previous process cannot still execute these jobs.
         for run in self.store.all("experiment"):
             if run.get("status") in ("running", "queued", "cancelling"):
@@ -153,6 +155,15 @@ class Runtime:
                     LOG.exception("Unterbrechung konnte nicht im Experimentjournal gespeichert werden")
         if self.store.get("settings", "main") is None:
             self.store.put("settings", "main", SettingsInput().model_dump())
+        self.telemetry = ResourceTelemetry(on_sample=self.resource_sample)
+
+    def resource_sample(self, sample):
+        with self.lock:
+            identifier = self.active_experiment
+            state = self.store.get("experiment", identifier) if identifier else None
+            if state and state.get("status") in ("queued", "running", "cancelling"):
+                self.resource_summaries.setdefault(identifier, ResourceSummary()).add(sample)
+                self.log_event(identifier, "resources", sample)
 
     def recording(self, identifier: str) -> dict:
         clean_id(identifier)
@@ -582,6 +593,8 @@ class Runtime:
                     shutil.rmtree(path, ignore_errors=True)
                 raise
             model_ids = [value["id"] for value in model_records]
+            with self.lock:
+                report["resource_telemetry"] = self.resource_summaries.get(identifier, ResourceSummary()).snapshot()
             state = self.store.get("experiment", identifier)
             state.update(status="completed", progress=1, report=report, metrics=report.get("metrics", {}), model_id=selected_model_id, model_ids=model_ids, finished_at=utcnow())
             self.store.put("experiment", identifier, state)
@@ -611,6 +624,7 @@ class Runtime:
             event.set()
         self.capture.stop()
         self.bridge.stop()
+        self.telemetry.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -743,6 +757,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         recordings = runtime.capture.list_recordings()
         annotations = {row["id"]: row for row in runtime.store.all("label")}
         return finite_json({"version": __version__, "receiver": runtime.capture.status(), "hardware": hardware_info(),
+            "telemetry": runtime.telemetry.snapshot(),
             "counts": {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r, annotations, with_suggestions=False).get("annotation")) for r in recordings),
                        "experiments": len(runtime.store.all("experiment")), "models": len(runtime.store.all("model"))},
             "active_experiment": runtime.store.get("experiment", runtime.active_experiment) if runtime.active_experiment else None,

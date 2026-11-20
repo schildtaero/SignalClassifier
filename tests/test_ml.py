@@ -9,6 +9,45 @@ import numpy as np
 
 from signalclassifier import ml
 from signalclassifier.topologies import list_topologies, save_topology, validate_topology
+from signalclassifier.execution import JobDeadlineExceeded
+from signalclassifier.execution import probe_resources
+
+
+def inline_execution(jobs, config, progress=None, *, axis="topologies", **_):
+    """Deterministic coordinator stub for tests that mock the ML runner itself.
+
+    Real process/RNG/gate behavior is covered by execution and integration tests.
+    """
+    outcomes = []
+    if progress:
+        progress({"stage": "execution", "progress": 0.})
+    for index, job in enumerate(jobs):
+        deadline = job.get("deadline")
+        def forward(update):
+            if deadline is not None and ml.time.monotonic() >= deadline:
+                raise JobDeadlineExceeded("test deadline")
+            if progress:
+                progress({**update, "progress": (index + update.get("progress", 0)) / len(jobs),
+                          "job_index": index, "trial": job.get("trial"), "topology_id": job.get("topology_id")})
+        outcome = {"id": job["id"], "index": index, "pid": 123, "device": "cpu", "elapsed_seconds": 0.}
+        try:
+            if deadline is not None and ml.time.monotonic() >= deadline:
+                outcome["pid"] = None
+                raise JobDeadlineExceeded("test deadline before start")
+            report = ml.run_experiment(job["config"], job["output_dir"], forward, **job.get("kwargs", {}))
+            path = Path(job["output_dir"]) / "execution-result.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            outcome.update(status="completed", report=report, report_path=str(path))
+        except JobDeadlineExceeded as exc:
+            outcome.update(status="timed_out", error=str(exc))
+        except (ValueError, RuntimeError, OSError) as exc:
+            outcome.update(status="failed", error=str(exc))
+        outcomes.append(outcome)
+        if progress:
+            progress({"stage": "execution_job_complete", "progress": (index + 1) / len(jobs),
+                      "execution_job_result": {key: value for key, value in outcome.items() if key != "report"}})
+    return {"outcomes": outcomes, "execution": {"axis": axis, "resolved": {"max_workers": 1}, "process_start_method": "test_inline"}}
 
 
 class ModulationTests(unittest.TestCase):
@@ -249,7 +288,8 @@ class ModulationTests(unittest.TestCase):
                     "evaluation_available": True, "metrics": {"accuracy": .99 if first else .2, "model_bytes": 100},
                     "candidates": [{"candidate": 1, "validation": {"macro_f1": .6 if first else .8}}],
                     "selected_candidate": 1, "classes": ["AM", "FM"], "confusion_matrix": []}
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=fake_run), \
+             mock.patch.object(ml, "execute_jobs", side_effect=inline_execution):
             report = ml.run_comparison(config, directory)
             self.assertEqual(report["selected_topology_id"], custom["id"])
             self.assertEqual(report["selected_comparison_index"], 1)
@@ -338,7 +378,8 @@ class ModulationTests(unittest.TestCase):
                     "candidates": [{"candidate": 1, "validation": validation, "validation_trials": trials}],
                     "selected_candidate": 1, "validation_trials": trials}
         config = {"topology_ids": [topology["id"] for topology in topologies], "topologies": topologies}
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=fake_run), \
+             mock.patch.object(ml, "execute_jobs", side_effect=inline_execution):
             report = ml.run_comparison(config, directory)
             self.assertEqual(report["rankings"]["accuracy"], ["candidate-2", "candidate-0", "candidate-3", "candidate-1", "candidate-4"])
             self.assertEqual(report["rankings"]["score"][0], "candidate-2")
@@ -355,13 +396,23 @@ class ModulationTests(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch optional")
     def test_baseline_and_two_anns_share_data_and_keep_reloadable_models(self):
-        with tempfile.TemporaryDirectory() as directory:
+        real_execute = ml.execute_jobs
+        resources = probe_resources(include_gpu=False)
+        # Exercise two lightweight real processes even on two-CPU CI where
+        # the normal UI plan deliberately reserves one CPU for reception.
+        resources["logical_cpus"] = max(3, resources["logical_cpus"])
+        def two_slots(jobs, config, progress=None, **kwargs):
+            return real_execute(jobs, config, progress, _resources=resources, **kwargs)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "execute_jobs", side_effect=two_slots):
             progress = []
             config = {"topology_ids": ["feature-lda", "feature-mlp-16", "iq-cnn-16"], "samples_per_class": 12,
-                      "segment_length": 1024, "snr_db": [10, 20], "jitter": [0], "epochs": 1, "device": "cpu", "learning_rates": [.001, .002]}
+                      "segment_length": 1024, "snr_db": [10, 20], "jitter": [0], "epochs": 1, "device": "cpu", "learning_rates": [.001, .002],
+                      "execution": {"mode": "parallel", "max_workers": 2, "cpu_threads": 1, "preprocessing_workers": 1}}
             report = ml.run_comparison(config, directory, progress.append)
             self.assertEqual(report["topology_ids"], config["topology_ids"])
             self.assertEqual(len(report["comparison"]), 3)
+            self.assertEqual(report["execution"]["peak_active_workers"], 2)
+            self.assertEqual(report["execution"]["process_start_method"], "spawn")
             reports = [entry["report"] for entry in report["comparison"]]
             for candidate in reports[1:]:
                 self.assertEqual(reports[0]["split_groups"], candidate["split_groups"])
@@ -374,6 +425,9 @@ class ModulationTests(unittest.TestCase):
                 self.assertGreaterEqual(entry["metrics"]["real_time_factor_p95"], entry["metrics"]["real_time_factor"])
                 self.assertEqual(entry["report"]["hardware"]["inference_device"], "cpu")
                 self.assertEqual(entry["report"]["hardware"]["training_device"], "cpu")
+                self.assertTrue(entry["report"]["training_execution"]["process_isolated"])
+                self.assertEqual(entry["report"]["training_execution"]["cpu_threads"], 1)
+                self.assertEqual(entry["report"]["training_execution"]["cpu_benchmark_scope"], "managed_experiment_workers_quiescent")
                 self.assertEqual(len(entry["validation_trials"]), 2)
                 self.assertIsNotNone(entry["score"]["total"])
                 saved = json.loads((Path(entry["model_path"]) / "report.json").read_text())
@@ -383,6 +437,84 @@ class ModulationTests(unittest.TestCase):
             fractions = [update["progress"] for update in progress]
             self.assertEqual(fractions, sorted(fractions))
             self.assertEqual({update["topology_id"] for update in progress if "topology_id" in update}, set(config["topology_ids"]))
+
+    def test_preprocessing_threads_keep_seed_order_and_small_sets_serial(self):
+        config = ml._validate_config({"segment_length": 256, "snr_db": [0, 20], "jitter": [0, .1]})
+        topology = next(item for item in list_topologies() if item["id"] == "feature-lda")
+        entries = [{"iq": ml.generate_signal("AM" if index % 2 == 0 else "FM", 256, seed=index),
+                    "label": index % 2, "sample_rate": 256000, "group_id": str(index)} for index in range(64)]
+        results, remaining_rng = [], []
+        for workers in (1, 2):
+            token = ml._EXECUTION_CONTEXT.set({"resolved_preprocessing_workers": workers})
+            try:
+                rng = np.random.default_rng(17)
+                results.append(ml._dataset(entries, topology, config, rng))
+                remaining_rng.append(rng.integers(0, 2 ** 31, 8))
+                if workers == 2:
+                    with mock.patch.object(ml, "ThreadPoolExecutor", side_effect=AssertionError("small inputs stay serial")):
+                        ml._dataset(entries[:4], topology, config, np.random.default_rng(17))
+            finally:
+                ml._EXECUTION_CONTEXT.reset(token)
+        np.testing.assert_array_equal(results[0][0], results[1][0])
+        np.testing.assert_array_equal(results[0][1], results[1][1])
+        np.testing.assert_array_equal(remaining_rng[0], remaining_rng[1])
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch optional")
+    def test_minibatched_training_reuses_validation_and_transfers_losses_per_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = ml.run_experiment({"topology_id": "feature-mlp-16", "samples_per_class": 24, "epochs": 2,
+                                        "segment_length": 1024, "batch_size": 4, "snr_db": [20], "jitter": [0], "device": "cpu"}, directory,
+                                       _execution_context={"resolved_cpu_threads": 1, "resolved_preprocessing_workers": 1})
+            actual = report["training_execution"]
+            self.assertEqual(actual["training_batch_size"], 4)
+            self.assertEqual(actual["validation_batch_size"], 4)
+            self.assertEqual(actual["loss_host_transfers"], 2)
+            self.assertEqual(actual["validation_tensor_transfers"], 1)
+            self.assertEqual(actual["training_batches"], 28)
+            self.assertEqual(actual["validation_batches"], 10)
+            self.assertEqual(actual["cpu_threads"], 1)
+            self.assertEqual(actual["checkpoint_device"], "cpu")
+            self.assertGreater(actual["checkpoint_bytes"], 0)
+            for name in ("device_transfer_seconds", "training_epoch_seconds", "validation_seconds", "checkpoint_seconds",
+                         "cpu_benchmark_seconds", "benchmark_wait_seconds"):
+                self.assertGreaterEqual(report["phase_timings"][name], 0)
+            self.assertTrue(all(np.isfinite(point["training_loss"]) and np.isfinite(point["validation_loss"]) for point in report["history"]))
+            self.assertGreaterEqual(report["metrics"]["training_wall_seconds"], report["metrics"]["training_seconds"])
+            self.assertAlmostEqual(report["metrics"]["training_wall_seconds"] - report["metrics"]["managed_training_pause_seconds"], report["metrics"]["training_seconds"])
+            ml.validate_model(report["model_path"])
+
+    def test_cpu_hardware_metadata_uses_cached_gpu_probe_without_touching_cuda(self):
+        fake_torch = mock.Mock()
+        fake_torch.__spec__ = importlib.util.find_spec("torch")
+        fake_torch.get_num_threads.return_value = 1
+        fake_torch.cuda.is_available.side_effect = AssertionError("CPU metadata must not initialize CUDA")
+        fake_torch.cuda.get_device_properties.side_effect = AssertionError("CPU metadata must use cached GPU properties")
+        token = ml._EXECUTION_CONTEXT.set({"device": "cpu", "resource_snapshot": {"cuda_available": True, "gpu_name": "cached GPU", "gpu_memory_bytes": 8 * 1024**3}})
+        try:
+            with mock.patch.dict(ml.sys.modules, {"torch": fake_torch}):
+                result = ml.hardware_profile()
+            self.assertEqual(result["gpu"], "cached GPU")
+            self.assertEqual(result["cuda_probe_scope"], "cached_scheduler_resource_snapshot")
+            self.assertTrue(result["cuda_available"])
+        finally:
+            ml._EXECUTION_CONTEXT.reset(token)
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch optional")
+    def test_training_score_time_excludes_observed_managed_pauses(self):
+        observed_wait = [0.]
+        def progress(update):
+            if "epoch" in update:
+                started = ml.time.perf_counter()
+                ml.time.sleep(.01)
+                observed_wait[0] += ml.time.perf_counter() - started
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "get_wait_seconds", side_effect=lambda: observed_wait[0]):
+            report = ml.run_experiment({"topology_id": "feature-mlp-16", "samples_per_class": 12, "epochs": 2,
+                                        "segment_length": 512, "batch_size": 4, "snr_db": [20], "jitter": [0], "device": "cpu"}, directory, progress,
+                                       _execution_context={"resolved_cpu_threads": 1, "resolved_preprocessing_workers": 1})
+            timing = report["metrics"]
+            self.assertGreaterEqual(timing["managed_training_pause_seconds"], .02)
+            self.assertAlmostEqual(timing["training_wall_seconds"] - timing["training_seconds"], timing["managed_training_pause_seconds"])
+            self.assertEqual(report["score"]["inputs"]["training_seconds"], timing["training_seconds"])
 
     @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch optional")
     def test_all_neural_families_forward_and_checkpoint(self):
@@ -416,11 +548,15 @@ class AutomaticOptimizationTests(unittest.TestCase):
 
     def test_real_search_uses_validation_only_then_tests_saved_winner_once(self):
         c = self.config()
+        c["execution"] = {"mode": "parallel", "max_workers": 2, "cpu_threads": 1, "preprocessing_workers": 1}
         normalized = ml._validate_config(c)
         planned = ml._planned_split_groups(normalized)
         final_started = False
         final_calls = 0
         original_generate, original_final = ml.generate_signal, ml._evaluate_optimized_test
+        original_execute = ml.execute_jobs
+        resources = probe_resources(include_gpu=False)
+        resources["logical_cpus"] = max(3, resources["logical_cpus"])
         test_seeds = {int(group.rsplit("-", 1)[1]) for group in planned["test"]}
         observed_test_seeds = []
         def generate(label, length=4096, sample_rate=256000, seed=42):
@@ -433,7 +569,12 @@ class AutomaticOptimizationTests(unittest.TestCase):
             final_started = True
             final_calls += 1
             return original_final(*args, **kwargs)
+        def two_trials(jobs, config, progress=None, **kwargs):
+            self.assertTrue(all(job["kwargs"]["_evaluate_test"] is False for job in jobs))
+            self.assertTrue(all(job["kwargs"]["_planned_groups"] == planned for job in jobs))
+            return original_execute(jobs, config, progress, _resources=resources, **kwargs)
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "generate_signal", side_effect=generate), \
+             mock.patch.object(ml, "execute_jobs", side_effect=two_trials), \
              mock.patch.object(ml, "_evaluate_optimized_test", side_effect=final):
             report = ml.run_experiment(c, directory)
             study = report["optimization"]
@@ -443,6 +584,8 @@ class AutomaticOptimizationTests(unittest.TestCase):
             self.assertEqual(study["completed_trials"], 3, "LDA only searches the three meaningful lengths")
             self.assertEqual(study["stop_reason"], "search_space_exhausted")
             self.assertEqual(study["test_evaluations"], 1)
+            self.assertEqual(report["execution"]["peak_active_workers"], 2)
+            self.assertEqual(report["execution"]["axis"], "trials")
             self.assertIsNotNone(report["metrics"]["accuracy"])
             self.assertEqual(report["final_test_evaluations"], 1)
             for trial in study["trials"]:
@@ -532,18 +675,21 @@ class AutomaticOptimizationTests(unittest.TestCase):
                       "training_loss": .4, "validation_loss": .5, "training_elapsed_seconds": 2., "preprocessing_seconds": 1.})
             return self.fake_report(out, c)
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml.time, "perf_counter", side_effect=lambda: now[0]), \
+             mock.patch.object(ml.time, "monotonic", side_effect=lambda: now[0]), \
+             mock.patch.object(ml, "execute_jobs", side_effect=inline_execution), \
              mock.patch.object(ml, "run_experiment", side_effect=run), mock.patch.object(ml, "_evaluate_optimized_test", return_value=0.) as final:
             report = ml._run_optimization(config, directory)
             state = report["optimization"]
             self.assertEqual(state["stop_reason"], "timeout")
             self.assertEqual(state["completed_trials"], 1)
             self.assertEqual(state["timed_out_trials"], 1)
-            self.assertEqual(state["total_training_seconds"], 4.)
+            self.assertEqual(state["skipped_trials"], 1)
+            self.assertEqual(state["total_training_seconds"], 2.)
             self.assertEqual(state["best_trial"], 1)
             final.assert_called_once()
         class ExperimentCancelled(Exception):
             pass
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "execute_jobs", side_effect=inline_execution):
             def cancel(_):
                 raise ExperimentCancelled()
             with self.assertRaises(ExperimentCancelled):
@@ -557,6 +703,7 @@ class AutomaticOptimizationTests(unittest.TestCase):
     def test_all_failed_trials_leave_partial_report_without_fabricated_winner(self):
         config = ml._validate_config(self.config())
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=ValueError("bad trial")), \
+             mock.patch.object(ml, "execute_jobs", side_effect=inline_execution), \
              mock.patch.object(ml, "_evaluate_optimized_test") as final:
             with self.assertRaisesRegex(ValueError, "keinen abgeschlossenen"):
                 ml._run_optimization(config, directory)

@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 20. November 2026, SignalClassifier 0.3.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 20. November 2026, SignalClassifier 0.4.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 124 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung und automatische Optimierung. Python-Wheel 0.3.0 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
+- 149 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung und Telemetrie. Python-Wheel 0.4.0 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,17 @@ Prüfstand: 20. November 2026, SignalClassifier 0.3.0, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.4.0
+
+- 15 Scheduler-Tests mit echten Spawn-Prozessen: begrenzte Parallelität, geordnete Resultate, sechs Jobs auf zwei wiederverwendeten PIDs, jobweise zurückgesetzte Zufalls-/Abbruchzustände, keine verschachtelten Trainingspools und Threadlimits bereits vor dem Child-Mainimport.
+- Mehrere CPU-/neuronale Topologien mit zwei gleichzeitig aktiven Slots, parallele Einzel-HPO-Trials sowie Mehrtopologien-HPO geprüft. Testabschottung, ausschließlich auf Validierung basierende Auswahl und einmaliger Finaltest bleiben bestehen.
+- CPU-Benchmark-Sperre pausiert verwaltete Rechenworker; Crash und Prozessende geben Sperren frei. Abbruch, unkooperative Deadlines und Fail-fast räumen zugehörige Prozesse auf. Dynamisch gemessene Gatepausen fließen nicht in den aktiven Trainingszeitanteil des Scores ein.
+- Multibatch-Training mit einmaliger Loss-Übernahme je Epoche, wiederverwendetem Validierungstensor, Minibatch-Validierung und respektiertem Worker-Threadbudget geprüft. CUDA-Ereignis-/Checkpointpfade sind implementiert, wurden hier aber nicht auf physischer GPU ausgeführt.
+- Zwei zusätzliche echte MLP-Läufe im selben persistenten PID erzeugten bei gleichem Seed identische Gewichtetensoren und Validierungswerte. Bibliotheksstartup war einmalig; Lazy-Optimizeraufbau konnte weiterhin im ersten Job liegen. Das ist ein CPU-Funktionstest, kein GPU-Durchsatznachweis.
+- Fünf Telemetrie-Tests prüfen CPU-Prozessbaum, Quotennormalisierung, NVIDIA-CSV, echte Nullwerte, unbekannte WSL-Werte, Cache, Alter und Messzusammenfassung. Berichtsexport ergänzt Ressourcenbeobachtungen und Phasenzeiten ohne Nullauffüllung; API-Tests prüfen Ausführungsplan und Export.
+- CPU-Ausgangsprofil und deterministische Vorverarbeitungs-Threadmatrix sind dokumentiert: zusätzliche Threads waren für die untersuchten Größen überwiegend langsamer. Auto verwendet deshalb einen Vorverarbeitungsthread je Prozess. [Messwerte](performance-baseline.md), [Ausführung und Grenzen](parallelisierung.md).
+- Verwaltete Vorschau erneut am lokalen Port-Binding gescheitert; visuelle Browserabnahme bleibt offen. Reale CUDA-Auslastung, Workstation-/Laptopbeschleunigung und gleichzeitiger physischer SDR-Betrieb sind hier nicht gemessen.
 
 ## Ergänzungen in 0.3.0
 
