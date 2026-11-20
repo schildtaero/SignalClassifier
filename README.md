@@ -1,4 +1,4 @@
-# SignalClassifier 0.1.0
+# SignalClassifier 0.1.1
 
 Lokales SDR-Labor für **Linux und Windows mit WSL2**: Breitband-IQ aufnehmen, belegte Kanäle selektiv speichern, Daten labeln und reproduzierbare Klassifikationsexperimente durchführen. Die deutsche Weboberfläche übernimmt die dunkle/cyanfarbene technische Gestaltung und den hellen Modus aus [KrakenDF](https://github.com/schildtaero/krakensdr), mit lokal ausgelieferten Assets.
 
@@ -38,9 +38,19 @@ Standard ist `~/.signalclassifier`, alternativ `SIGNALCLASSIFIER_DATA`. Dort lie
 
 ## Empfang und erster AM/FM-Versuch
 
-**RSP1A:** Hersteller-API v3, SoapySDR und SoapySDRPlay3 gesondert installieren. Der Soapy-Python-Import muss in der Projektumgebung sichtbar sein. Ein systemweites Ubuntu-/Debian-Modul benötigt eine Umgebung mit dem passenden System-Python und `--system-site-packages`; siehe [Aufnahme und Treiber](docs/aufnahme.md). Ein unveränderter PlutoSDR empfängt UKW/Flugfunk nicht: Sein spezifizierter Standardbereich beginnt bei 325 MHz. Für UKW-FM gegen konventionelles Flugfunk-AM zunächst den RSP1A oder IQ-Recordings verwenden.
+**Empfängertreiber:** Alle benötigten Komponenten für PlutoSDR und RSP1A unter Ubuntu/Debian mit dem beiliegenden Helfer einrichten:
 
-**Pluto:** `./setup.sh --pluto` und natives libiio installieren; URI beispielsweise `ip:192.168.2.1`. Die Anwendung nutzt ausschließlich den Empfangspfad.
+```bash
+./install_driver.sh                   # beide Empfänger
+./install_driver.sh --device pluto    # nur PlutoSDR
+./install_driver.sh --device rsp1a    # nur RSP1A
+```
+
+Das Skript installiert für Pluto natives libiio, USB-Regeln und pyadi-iio/pylibiio; für RSP1A die Hersteller-API v3.15+, eine fest versionierte SoapySDRPlay3-Erweiterung und die Python-Anbindung. Eine vorhandene kompatible `.venv` samt optionalem PyTorch bleibt erhalten; eine inkompatible Umgebung wird nur mit `--recreate-venv` gesichert und ersetzt. Die SDRplay-Lizenz wird im Originaldialog beantwortet. Falls der Hersteller den automatischen Download blockiert, den Installer von der [offiziellen Linux-Downloadseite](https://sdrplay.com/download/hardware-api-linux/) beziehen und `./install_driver.sh --api-installer /pfad/zur/Datei.run` verwenden. Pluto wird im Standardlauf vor der SDRplay-Installation eingerichtet. `--check` prüft die Installation, `--dry-run` zeigt die Schritte ohne Änderungen. [Vollständige Treiberinstallation und Fehlerdiagnose](docs/install-driver.md).
+
+Ein unveränderter PlutoSDR empfängt UKW/Flugfunk nicht: Sein spezifizierter Standardbereich beginnt bei 325 MHz. Für UKW-FM gegen konventionelles Flugfunk-AM zunächst den RSP1A oder IQ-Recordings verwenden.
+
+**Pluto:** `./install_driver.sh --device pluto` richtet den vollständigen Host-Empfangspfad ein; URI beispielsweise `ip:192.168.2.1`. Die Anwendung nutzt ausschließlich den Empfangspfad. Für Netzwerkempfang ist zusätzlich eine Route zum Pluto nötig; USB unter WSL muss durchgereicht sein. Neue Mitgliedschaft in `plugdev` wird gegebenenfalls erst nach erneuter Anmeldung wirksam.
 
 USB unter WSL wird mit [usbipd-win](https://learn.microsoft.com/windows/wsl/connect-usb) an die Distribution durchgereicht. Treiber-, USB- und maximale Durchsatzprüfung erfolgen am konkreten Aufbau. Die Anwendung zeigt Treiber-/Streamfehler und beendet erkannte Überläufe.
 
@@ -83,7 +93,7 @@ Der Drohnen-Tab enthält einen **OpenDroneID-v2-Payloaddecoder**, eine explizite
 .venv/bin/python -m pip install -e '.[test]'
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v
 node --check signalclassifier/static/app.js
-bash -n start.sh setup.sh
+bash -n start.sh setup.sh install_driver.sh
 ```
 
 Die Suite benötigt keine SDR-Hardware; UDP-Tests verwenden nur Loopback. Neuronale Tests laufen zusätzlich, wenn PyTorch installiert ist. GitHub Actions prüft den Kern unter Python 3.11/3.12 und einen CPU-PyTorch-Pfad. Die API-Dokumentation ist lokal unter `/docs` verfügbar. Prüfstand und bekannte Grenzen: [Validierung](docs/validierung.md).

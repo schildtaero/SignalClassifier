@@ -6,6 +6,8 @@ Die Anwendung verwendet genau einen Empfänger. Die Quelle wird ausdrücklich al
 
 ### PlutoSDR
 
+Alle Host-Komponenten mit `./install_driver.sh --device pluto` einrichten; ohne `--device` installiert der Helfer Pluto und RSP1A. Enthalten sind natives libiio, die passenden USB-Regeln und pyadi-iio/pylibiio. [Installationsoptionen und Prüfung](install-driver.md).
+
 Der Adapter verwendet Analog Devices `pyadi-iio` und die installierte native `libiio`-Bibliothek. In der Projektumgebung installieren:
 
 ```bash
@@ -19,6 +21,8 @@ Ein unveränderter Pluto deckt **325 MHz bis 3,8 GHz** und bis zu **20 MHz momen
 Primärquellen: [Analog Devices ADALM-PLUTO](https://www.analog.com/en/resources/evaluation-hardware-and-software/evaluation-boards-kits/adalm-pluto.html), [offizieller Python-Einstieg](https://developer.analog.com/docs/system-level/solutions/platforms/pluto/software/python_install.html), [pyadi-iio AD936x-Treiber](https://github.com/analogdevicesinc/pyadi-iio/blob/main/adi/ad936x.py).
 
 ### SDRplay RSP1A
+
+Der vollständige Installationshelfer nur für RSP1A ist `./install_driver.sh --device rsp1a`; ohne Auswahl werden zusätzlich Pluto-Komponenten installiert. Er richtet Systempakete, Hersteller-API, SoapySDRPlay3 und die passende Python-Anbindung ein. Unter WSL wählt er standardmäßig USB-Bulk für das Soapy-Modul. Die Herstellerlizenz bleibt interaktiv, die USB-Durchreichung zu WSL erfolgt separat. [Aufruf, lokale Installerdatei und Diagnose](install-driver.md).
 
 Der Adapter verwendet die **SDRplay API v3**, **SoapySDR** und das Hardwaremodul **SoapySDRPlay3**. Die proprietäre SDRplay API wird vom Hersteller separat unter dessen Lizenz installiert. Sie ist nicht im Repository enthalten. Der Soapy-Python-Import muss im verwendeten Python-Interpreter verfügbar sein. Ein systemweites `python3-soapysdr` ist in einer isolierten Pythonumgebung nicht automatisch sichtbar; eine mit dem System-Python angelegte Umgebung mit `--system-site-packages` oder eine passende Soapy-Installation in der Umgebung löst dies.
 

@@ -36,5 +36,5 @@ case "$mode" in
 esac
 echo 'Bereit. Start: ./start.sh · http://127.0.0.1:8090'
 if [[ "$mode" == pluto ]]; then
-  echo 'Pluto benötigt zusätzlich das native libiio (Ubuntu/Debian: sudo apt install libiio0). URI z.B. ip:192.168.2.1.'
+  echo 'Vollständige Pluto-Treiberinstallation: ./install_driver.sh --device pluto. URI z.B. ip:192.168.2.1.'
 fi
