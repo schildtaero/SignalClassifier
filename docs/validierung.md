@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 20. November 2026, SignalClassifier 0.2.1, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 20. November 2026, SignalClassifier 0.3.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 96 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl und Bereinigung. Python-Wheel 0.2.1 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
+- 124 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung und automatische Optimierung. Python-Wheel 0.3.0 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,15 @@ Prüfstand: 20. November 2026, SignalClassifier 0.2.1, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.3.0
+
+- Abhängigkeitsfreie, begrenzte Random Search mit Seed, logarithmischer Lernratensuche, eindeutigen wirksamen Konfigurationen und gleichbleibendem Validierungsgitter. Feature-LDA und ein neuronales Netz laufen gemeinsam durch echte automatische Optimierung, erneutes Laden und API-Modellpersistierung.
+- Tests schirmen synthetische Testquellen und reale Test-IQ-Dateien während der Suche ab; erst der festgelegte Gewinner erhält einen abschließenden Test. Gemeinsame Referenzsignale beziehungsweise Quellenanker für unterschiedliche Fensterlängen sind numerisch geprüft. Auswahlziel, Timeout, Benutzerabbruch und vollständig fehlgeschlagene Suche bleiben unterscheidbar.
+- Inkrementelle atomische Optimierungsteilberichte und strukturierte Epochen-/Versuchsereignisse. Bei einem unvollständigen Journalende wird ein neuer Neustart-/Unterbrechungseintrag nicht verschluckt.
+- Eingabekonfiguration, Aufnahmegruppen, bestätigte Labels, Metadaten, Hardware-/Softwareprofil und Quellprüfsummen werden vor der Queue eingefroren. Nachträgliches Umlabeln und Löschen der Quelldateien ändern das exportierte Inventar nicht. Nicht endliche Werte und ausgelassene optionale Metadaten werden ausdrücklich diagnostiziert.
+- API-Kette automatische Optimierung → Modellartefakte mit SHA-256 → Berichtspaket. Auch fehlgeschlagene, abgebrochene und ältere Läufe sind exportierbar; historische Herkunft wird nicht nachträglich erfunden. JSON/CSV-Vollständigkeit, Epochen fehlgeschlagener Trials, SVG-XML, Manifestprüfsummen und atomarer ZIP-Abschluss sind geprüft.
+- Visuelle Vorschau erneut versucht; der verwaltete Start scheiterte weiterhin am lokalen Port-Binding. CUDA und echte Empfänger bleiben außerhalb dieser Softwaretests.
 
 ## Ergänzungen in 0.2.1
 

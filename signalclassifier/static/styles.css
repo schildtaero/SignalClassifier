@@ -3499,3 +3499,207 @@ html[data-theme="light"] {
     padding-right: 14px;
   }
 }
+
+/* Report data are downloadable independently of job status. */
+.experiment-export-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.experiment-export-actions .button {
+  font-size: 0.8125rem;
+}
+.experiment-report-bundle-note {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+@media (max-width: 1100px) {
+  #experiment-detail > .panel-heading {
+    flex-wrap: wrap;
+  }
+  .experiment-export-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+@media (max-width: 600px) {
+  .experiment-export-actions .button {
+    font-size: 0.75rem;
+    flex: 1;
+    white-space: normal;
+  }
+  .experiment-report-bundle-note {
+    font-size: 0.75rem;
+  }
+}
+
+/* Optional automatic HPO, distinct from the retained manual grid. */
+.optimization-intro {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.optimization-intro .checkbox {
+  font-size: 0.8125rem;
+}
+.optimization-settings fieldset {
+  border: 0;
+  padding: 0 12px 12px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.optimization-settings fieldset .form-pair {
+  margin: 0;
+}
+.optimization-settings fieldset:disabled {
+  opacity: 0.5;
+}
+.optimization-settings .optimization-incompatible {
+  margin: 0 12px 14px;
+  font-size: 0.75rem;
+}
+.optimization-report {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-soft);
+}
+.optimization-report-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 0;
+}
+.optimization-report-heading h3 {
+  font-size: 1rem;
+}
+.optimization-report-note {
+  padding: 12px 20px 0;
+  font-size: 0.8125rem;
+}
+.optimization-report-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 15px;
+  padding: 18px 20px;
+}
+.optimization-report-metrics .result-metric > strong {
+  font-size: 1.4rem;
+}
+.optimization-best-settings {
+  margin: 0 20px 18px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.875rem;
+}
+.optimization-best-settings p {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+.optimization-best-settings .button {
+  margin-top: 5px;
+  font-size: 0.8125rem;
+}
+.optimization-best-settings .field-help {
+  font-size: 0.75rem;
+}
+.optimization-trials {
+  border-top: 1px solid var(--border-soft);
+}
+.optimization-trials table {
+  min-width: 1040px;
+}
+.optimization-trials td {
+  vertical-align: top;
+}
+.optimization-trials td:nth-child(2) {
+  min-width: 130px;
+  max-width: 270px;
+  overflow-wrap: anywhere;
+}
+.optimization-best-trial {
+  background: var(--cyan-bg);
+}
+.optimization-best-trial td:first-child {
+  box-shadow: inset 2px 0 var(--cyan);
+  color: var(--cyan);
+}
+.optimization-excluded {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  padding: 0 20px 18px;
+}
+.optimization-report pre {
+  padding: 0 20px 18px;
+}
+@media (max-width: 800px) {
+  .optimization-settings {
+    grid-column: 1/-1;
+  }
+  .optimization-report-metrics {
+    grid-template-columns: 1fr 1fr;
+  }
+  .optimization-report-heading {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 600px) {
+  .optimization-report-heading {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .optimization-report-note {
+    padding-left: 16px;
+    padding-right: 16px;
+    font-size: 0.75rem;
+  }
+  .optimization-report-metrics {
+    padding: 16px;
+    gap: 18px 12px;
+  }
+  .optimization-best-settings {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
+  .optimization-best-settings p {
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+  .optimization-report-metrics .result-metric > strong {
+    font-size: 1.25rem;
+  }
+}
+
+.optimization-partial-title {
+  padding: 0 20px;
+  font-size: 0.9375rem;
+  color: var(--muted);
+}
+
+.optimization-all-summary {
+  margin-top: 0;
+  border-top: 0;
+}
+.optimization-all-summary > .optimization-report-note:last-child {
+  padding-top: 0;
+  padding-bottom: 18px;
+}

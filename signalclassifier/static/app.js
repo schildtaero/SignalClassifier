@@ -2772,10 +2772,280 @@
       throw new Error(`${name}: bitte gültige Zahlen mit Komma trennen.`);
     return values;
   }
-  function experimentConfig({ allowEmptyTopologies = false } = {}) {
+  function normalizeOptimizationConfig(value, baseLength = 2048) {
+    const base =
+      Number.isInteger(baseLength) && baseLength >= 256 && baseLength <= 65536
+        ? baseLength
+        : 2048;
+    const defaults = {
+      enabled: false,
+      method: "random",
+      max_trials: 12,
+      timeout_seconds: 300,
+      objective: "score",
+      search_space: {
+        segment_lengths: [
+          ...new Set([
+            Math.max(256, Math.floor(base / 2)),
+            base,
+            Math.min(65536, base * 2),
+          ]),
+        ],
+        learning_rate_min: 0.00001,
+        learning_rate_max: 0.01,
+        batch_sizes: [16, 32, 64],
+        epochs: [5, 10, 20],
+      },
+    };
+    if (value === undefined) return defaults;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("optimization muss ein JSON-Objekt sein.");
+    const allowed = new Set([
+      "enabled",
+      "method",
+      "max_trials",
+      "timeout_seconds",
+      "objective",
+      "search_space",
+    ]);
+    if (Object.keys(value).some((key) => !allowed.has(key)))
+      throw new Error(
+        "Unbekannte HPO-Konfigurationsfelder; bitte Schreibweise und Version prüfen.",
+      );
+    if (value.enabled !== undefined && typeof value.enabled !== "boolean")
+      throw new Error("optimization.enabled muss ein boolescher Wert sein.");
+    const o = { ...defaults, ...value, enabled: value.enabled ?? false };
+    if (o.method !== "random")
+      throw new Error(
+        "Als automatische Suchmethode ist Random Search verfügbar.",
+      );
+    if (
+      !Number.isInteger(o.max_trials) ||
+      o.max_trials < 1 ||
+      o.max_trials > 50
+    )
+      throw new Error("HPO: 1–50 Trials je Topologie auswählen.");
+    if (
+      typeof o.timeout_seconds !== "number" ||
+      !Number.isFinite(o.timeout_seconds) ||
+      o.timeout_seconds < 0 ||
+      o.timeout_seconds > 86400
+    )
+      throw new Error(
+        "HPO: Zeitbudget 0–86400 Sekunden je Topologie erforderlich.",
+      );
+    if (!["score", "macro_f1", "balanced_accuracy"].includes(o.objective))
+      throw new Error("Ungültiges HPO-Optimierungsziel.");
+    if (
+      value.search_space !== undefined &&
+      (!value.search_space ||
+        typeof value.search_space !== "object" ||
+        Array.isArray(value.search_space))
+    )
+      throw new Error("Ungültiger HPO-Suchraum.");
+    const searchAllowed = new Set([
+      "segment_lengths",
+      "learning_rate_min",
+      "learning_rate_max",
+      "batch_sizes",
+      "epochs",
+    ]);
+    if (
+      Object.keys(value.search_space || {}).some(
+        (key) => !searchAllowed.has(key),
+      )
+    )
+      throw new Error(
+        "Unbekannte HPO-Suchraumfelder; bitte Schreibweise prüfen.",
+      );
+    const space = { ...defaults.search_space, ...(value.search_space || {}) };
+    for (const [key, min, max] of [
+      ["segment_lengths", 256, 65536],
+      ["batch_sizes", 4, 256],
+      ["epochs", 1, 100],
+    ]) {
+      const list = space[key];
+      if (
+        !Array.isArray(list) ||
+        list.length < 1 ||
+        list.length > 8 ||
+        list.some((n) => !Number.isInteger(n) || n < min || n > max)
+      )
+        throw new Error(
+          `HPO ${key}: 1–8 ganze Zahlen zwischen ${min} und ${max} erforderlich.`,
+        );
+      space[key] = [...new Set(list)];
+    }
+    for (const key of ["learning_rate_min", "learning_rate_max"])
+      if (
+        typeof space[key] !== "number" ||
+        !Number.isFinite(space[key]) ||
+        space[key] < 0.00001 ||
+        space[key] > 0.1
+      )
+        throw new Error(
+          "HPO-Lernraten müssen zwischen 0,00001 und 0,1 liegen.",
+        );
+    if (space.learning_rate_min > space.learning_rate_max)
+      throw new Error(
+        "Die minimale HPO-Lernrate darf die maximale nicht überschreiten.",
+      );
+    return { ...o, search_space: space };
+  }
+  function optimizationBaseConfig(optimization) {
+    const space = optimization.search_space;
+    return {
+      segment_length: space.segment_lengths[0],
+      segment_lengths: [space.segment_lengths[0]],
+      learning_rate: space.learning_rate_min,
+      learning_rates: [space.learning_rate_min],
+      batch_size: space.batch_sizes[0],
+      batch_sizes: [space.batch_sizes[0]],
+      epochs: space.epochs[0],
+    };
+  }
+  function optimizationConfigFromForm(form, includeDisabled = false) {
+    const enabled = form.elements.optimization_enabled.checked;
+    if (!enabled && !includeDisabled) return { enabled: false };
+    const field = (name) => form.elements[name].value;
+    return normalizeOptimizationConfig({
+      enabled,
+      method: "random",
+      max_trials: finiteNumber(field("optimization_max_trials")),
+      timeout_seconds: finiteNumber(field("optimization_timeout_seconds")),
+      objective: field("optimization_objective"),
+      search_space: {
+        segment_lengths: parseList(
+          field("optimization_segment_lengths"),
+          "HPO-Segmentlängen",
+          true,
+        ),
+        learning_rate_min: finiteNumber(
+          field("optimization_learning_rate_min"),
+        ),
+        learning_rate_max: finiteNumber(
+          field("optimization_learning_rate_max"),
+        ),
+        batch_sizes: parseList(
+          field("optimization_batch_sizes"),
+          "HPO-Batchgrößen",
+          true,
+        ),
+        epochs: parseList(field("optimization_epochs"), "HPO-Epochen", true),
+      },
+    });
+  }
+  function populateOptimizationForm(optimization) {
+    const form = $("#experiment-form"),
+      o = optimization;
+    form.elements.optimization_enabled.checked = o.enabled;
+    form.elements.optimization_objective.value = o.objective;
+    form.elements.optimization_max_trials.value = String(o.max_trials);
+    form.elements.optimization_timeout_seconds.value = String(
+      o.timeout_seconds,
+    );
+    for (const [key, name] of [
+      ["segment_lengths", "optimization_segment_lengths"],
+      ["batch_sizes", "optimization_batch_sizes"],
+      ["epochs", "optimization_epochs"],
+    ])
+      form.elements[name].value = o.search_space[key].join(", ");
+    form.elements.optimization_learning_rate_min.value = String(
+      o.search_space.learning_rate_min,
+    );
+    form.elements.optimization_learning_rate_max.value = String(
+      o.search_space.learning_rate_max,
+    );
+    updateOptimizationControls();
+  }
+  function updateOptimizationControls() {
+    const form = $("#experiment-form"),
+      enabled = form.elements.optimization_enabled.checked;
+    $("#optimization-fields").disabled = !enabled;
+    $$("input,select", $("#optimization-fields")).forEach((input) => {
+      input.required = true;
+    });
+    for (const name of [
+      "segment_lengths",
+      "learning_rates",
+      "batch_sizes",
+      "epochs",
+    ])
+      form.elements[name].disabled = enabled;
+    const count = Number(form.elements.optimization_max_trials.value),
+      seconds = Number(form.elements.optimization_timeout_seconds.value);
+    $("#optimization-budget-note").textContent = enabled
+      ? `${num(count, 0)} Trials je Topologie · ${seconds === 0 ? "ohne Zeitgrenze" : `${num(seconds, 1)} Sekunden Zeitbudget je Topologie`}. Manuelle Rasterwerte bleiben gespeichert, sind während der automatischen Suche jedoch nicht aktiv. Eine laufende Rechenstufe kann das Budget bis zum nächsten sicheren Prüfpunkt überschreiten.`
+      : "Bei Aktivierung wird pro Topologie automatisch im angegebenen Suchraum gesucht. Ohne automatische Suche gelten die manuellen Rasterwerte.";
+    $("#optimization-incompatible").hidden = !(
+      enabled &&
+      form.elements.source.value === "recordings" &&
+      form.elements.evaluation_mode.value === "training_only"
+    );
+  }
+  function optimizationBestConfig(optimization) {
+    const c = optimization?.best_config;
+    if (!c || typeof c !== "object")
+      throw new Error(
+        "Für diese Suche liegt noch keine gültige beste Konfiguration vor.",
+      );
+    for (const [key, min, max] of [
+      ["segment_length", 256, 65536],
+      ["batch_size", 4, 256],
+      ["epochs", 1, 100],
+    ])
+      if (!Number.isInteger(c[key]) || c[key] < min || c[key] > max)
+        throw new Error(
+          "Die beste HPO-Konfiguration ist unvollständig oder ungültig.",
+        );
+    if (
+      typeof c.learning_rate !== "number" ||
+      !Number.isFinite(c.learning_rate) ||
+      c.learning_rate < 0.00001 ||
+      c.learning_rate > 0.1
+    )
+      throw new Error(
+        "Die beste HPO-Konfiguration enthält keine gültige Lernrate.",
+      );
+    return {
+      segment_length: c.segment_length,
+      learning_rate: c.learning_rate,
+      batch_size: c.batch_size,
+      epochs: c.epochs,
+    };
+  }
+  function applyBestOptimizationConfig(optimization) {
+    const values = optimizationBestConfig(optimization),
+      form = $("#experiment-form");
+    form.elements.optimization_enabled.checked = false;
+    form.elements.segment_lengths.value = String(values.segment_length);
+    form.elements.learning_rates.value = String(values.learning_rate);
+    form.elements.batch_sizes.value = String(values.batch_size);
+    form.elements.epochs.value = String(values.epochs);
+    updateOptimizationControls();
+    scheduleReadiness();
+    form.elements.segment_lengths.focus();
+    toast(
+      "Beste Hyperparameter ins manuelle Setup übernommen. Topologieauswahl bleibt erhalten; es wurde kein Experiment gestartet.",
+    );
+  }
+  function experimentConfig({
+    allowEmptyTopologies = false,
+    includeDisabledOptimization = false,
+  } = {}) {
     const form = $("#experiment-form");
     const f = new FormData(form);
-    const lengths = parseList(f.get("segment_lengths"), "Segmentlängen", true);
+    const optimization = optimizationConfigFromForm(
+      form,
+      includeDisabledOptimization,
+    );
+    const activeSearch = optimization.enabled && !includeDisabledOptimization;
+    const activeBase = activeSearch
+      ? optimizationBaseConfig(optimization)
+      : null;
+    const lengths = activeSearch
+      ? activeBase.segment_lengths
+      : parseList(form.elements.segment_lengths.value, "Segmentlängen", true);
     const topologyIds = selectedTopologyIds();
     if (
       (!allowEmptyTopologies && topologyIds.length < 1) ||
@@ -2797,14 +3067,33 @@
       segment_lengths: lengths,
       snr_db: parseList(f.get("snr_db"), "SNR"),
       jitter: parseList(f.get("jitter"), "Jitter"),
-      epochs: Number(f.get("epochs")),
-      batch_size: parseList(f.get("batch_sizes"), "Batchgrößen", true)[0],
-      batch_sizes: parseList(f.get("batch_sizes"), "Batchgrößen", true),
-      learning_rate: parseList(f.get("learning_rates"), "Lernraten")[0],
-      learning_rates: parseList(f.get("learning_rates"), "Lernraten"),
+      epochs: activeSearch
+        ? activeBase.epochs
+        : Number(form.elements.epochs.value),
+      batch_size: activeSearch
+        ? activeBase.batch_size
+        : parseList(form.elements.batch_sizes.value, "Batchgrößen", true)[0],
+      batch_sizes: activeSearch
+        ? activeBase.batch_sizes
+        : parseList(form.elements.batch_sizes.value, "Batchgrößen", true),
+      learning_rate: activeSearch
+        ? activeBase.learning_rate
+        : parseList(form.elements.learning_rates.value, "Lernraten")[0],
+      learning_rates: activeSearch
+        ? activeBase.learning_rates
+        : parseList(form.elements.learning_rates.value, "Lernraten"),
+      experiment_notes: String(f.get("experiment_notes") || ""),
       device: f.get("device"),
       use_priors: f.has("use_priors"),
     };
+    config.optimization = optimization;
+    if (
+      config.optimization.enabled &&
+      config.evaluation_mode === "training_only"
+    )
+      throw new Error(
+        "Automatische HPO benötigt eine unabhängige Bewertung; im Modus „Nur trainieren“ ist sie nicht verfügbar.",
+      );
     config.augmentation = Object.fromEntries(
       [
         "frequency_offset_hz",
@@ -3137,7 +3426,10 @@
               select,
               el("small", { text: entry.family || entry.topology_id }),
               winner
-                ? pill("Berichtsmodell · Val-F1", "cyan")
+                ? pill(
+                    `Berichtsmodell · ${selectionObjectiveLabel(report)}`,
+                    "cyan",
+                  )
                 : !evaluated
                   ? pill("Unbewertet", "amber")
                   : null,
@@ -3251,7 +3543,7 @@
           class: "field-help comparison-note",
           text: unvalidated
             ? "Nur trainiert: Es gibt keine unabhängigen Gütemetriken, Qualitätsscores oder Gewinner. Manuell ausgewählte Modelle lassen sich dennoch an Live-Stichproben erproben."
-            : "Die Rangfolge verwendet ausschließlich Validierungsdaten. Das Berichtsmodell folgt dem Validierungs-Macro-F1; die Top-3-Empfehlung folgt dem Gesamtscore. Finaltestwerte bestimmen weder Rang noch Empfehlung.",
+            : `Die Rangfolge verwendet ausschließlich Validierungsdaten. Das Berichtsmodell folgt ${selectionObjectiveLabel(report)}; die Top-3-Empfehlung folgt dem Gesamtscore. Finaltestwerte bestimmen weder Rang noch Empfehlung.`,
         }),
         el("div", { class: "comparison-score-toolbar" }, [
           el("label", {}, [
@@ -3310,7 +3602,312 @@
       ],
     );
   }
+  function selectionObjectiveLabel(report) {
+    const objective =
+      report.selection_objective ||
+      (report.config?.optimization?.enabled
+        ? report.config.optimization.objective
+        : "macro_f1");
+    return (
+      {
+        score: "Val-Score",
+        macro_f1: "Val-F1",
+        balanced_accuracy: "Val-bal. Genauigkeit",
+      }[objective] || "Validierung"
+    );
+  }
+  function partialOptimizationReports(experiment, report) {
+    const found = new Map();
+    const direct = report.optimization || experiment.optimization;
+    if (direct?.enabled === true)
+      found.set("primary", {
+        label: "Teilweise abgeschlossene Suche",
+        optimization: direct,
+      });
+    for (const entry of arr(experiment.partial_reports)) {
+      const data = entry.report;
+      const optimization =
+        entry.kind === "optimization" ? data : data?.optimization;
+      if (optimization?.enabled !== true) continue;
+      const key = String(entry.path || "partial")
+        .replace(/\/(optimization|report)\.json$/, " ")
+        .trim();
+      if (entry.kind === "optimization" || !found.has(key))
+        found.set(key, {
+          label:
+            data?.topology?.name ||
+            optimization.topology_id ||
+            String(entry.path || "Teilbericht"),
+          optimization,
+        });
+    }
+    return [...found.values()];
+  }
+  function optimizationSummaryNode(summary) {
+    return el(
+      "section",
+      {
+        class: "optimization-report optimization-all-summary",
+        "aria-label": "Gesamtkosten der automatischen Suche",
+      },
+      [
+        el("div", { class: "optimization-report-heading" }, [
+          el("div", {}, [
+            el("span", {
+              class: "panel-kicker",
+              text: "GESAMTER TOPOLOGIEVERGLEICH",
+            }),
+            el("h3", {
+              text: `Automatische Suche · ${num(summary.topologies, 0)} Topologien`,
+            }),
+          ]),
+        ]),
+        el("div", { class: "optimization-report-metrics" }, [
+          metric(
+            "SUCHDAUER · ALLE",
+            duration(summary.elapsed_seconds),
+            "Summe der Suchläufe aller Topologien",
+          ),
+          metric(
+            "TRAINING · ALLE",
+            duration(summary.total_training_seconds),
+            "Alle Suchtrials, nicht nur Gewinner",
+          ),
+          metric(
+            "TRIALS · ALLE",
+            num(summary.completed_trials, 0),
+            `${num(summary.failed_trials, 0)} fehlgeschlagen · ${num(summary.timed_out_trials, 0)} Zeitlimit`,
+          ),
+        ]),
+        el("p", {
+          class: "field-help optimization-report-note",
+          text: `${num(summary.test_evaluations, 0)} Finaltestauswertungen nach der Suche. Die folgenden Einzelberichte zeigen die Parameter und Suchkosten jeweils einer Topologie.`,
+        }),
+      ],
+    );
+  }
+  function optimizationReportNode(optimization) {
+    const trials = arr(optimization.trials),
+      objective =
+        {
+          score: "Gesamtscore",
+          macro_f1: "Macro-F1",
+          balanced_accuracy: "Ausgewogene Genauigkeit",
+        }[optimization.objective] || text(optimization.objective);
+    const status =
+      {
+        max_trials: "Trialbudget erreicht",
+        timeout: "Zeitbudget erreicht",
+        search_space_exhausted: "Suchraum ausgeschöpft",
+        all_trials_failed: "Alle Trials fehlgeschlagen",
+        cancelled: "Suche abgebrochen",
+        user_cancellation: "Durch Benutzer abgebrochen",
+        interrupted: "Suche unterbrochen",
+      }[optimization.stop_reason] ||
+      text(optimization.stop_reason, "Zwischenstand");
+    let best = null;
+    try {
+      best = optimizationBestConfig(optimization);
+    } catch (_ignored) {}
+    const apply = button(
+      "Beste Werte ins Setup übernehmen",
+      () => action(async () => applyBestOptimizationConfig(optimization)),
+      "button button-quiet",
+    );
+    apply.disabled = !best;
+    const node = el(
+      "section",
+      {
+        class: "optimization-report",
+        "aria-label": "Automatische Hyperparameteroptimierung",
+      },
+      [
+        el("div", { class: "optimization-report-heading" }, [
+          el("div", {}, [
+            el("span", {
+              class: "panel-kicker",
+              text: "AUTOMATISCHE HYPERPARAMETERSUCHE",
+            }),
+            el("h3", { text: "Random Search · Validierung" }),
+          ]),
+          pill(status, optimization.stop_reason === "timeout" ? "amber" : ""),
+        ]),
+        el("p", {
+          class: "field-help optimization-report-note",
+          text: `Ziel: ${objective} · Seed ${text(optimization.seed)} · Budget ${text(optimization.max_trials)} Trials / ${optimization.timeout_seconds === 0 ? "ohne Zeitgrenze" : `${duration(optimization.timeout_seconds)}`} je Topologie. Suchtrials verwenden keine Finaltestwerte; Finaltestauswertungen: ${text(optimization.test_evaluations)}.`,
+        }),
+        el("div", { class: "optimization-report-metrics" }, [
+          metric(
+            "SUCHDAUER GESAMT",
+            duration(optimization.elapsed_seconds),
+            "Alle Trials und Suchaufwand",
+          ),
+          metric(
+            "TRAINING GESAMT",
+            duration(optimization.total_training_seconds),
+            "Training über alle Suchtrials",
+          ),
+          metric(
+            "TRIALS ABGESCHLOSSEN",
+            num(
+              optimization.completed_trials ??
+                trials.filter((t) => t.status === "completed").length,
+              0,
+            ),
+            `${num(optimization.failed_trials ?? trials.filter((t) => t.status === "failed").length, 0)} fehlgeschlagen · ${num(optimization.timed_out_trials ?? trials.filter((t) => t.status === "timed_out").length, 0)} Zeitlimit`,
+          ),
+        ]),
+        el("div", { class: "optimization-best-settings" }, [
+          el("strong", {
+            text: best
+              ? `Beste Konfiguration · Trial ${text(optimization.best_trial)}`
+              : "Noch kein gültiger Gewinner",
+          }),
+          best
+            ? el("p", {
+                text: `${num(best.segment_length, 0)} Samples · Lernrate ${best.learning_rate} · Batch ${num(best.batch_size, 0)} · ${num(best.epochs, 0)} Epochen`,
+              })
+            : null,
+          apply,
+          el("span", {
+            class: "field-help",
+            text: "Übernimmt nur Hyperparameter und schaltet auf manuelle Werte um. Die Topologieauswahl bleibt erhalten; es wird kein Experiment gestartet.",
+          }),
+        ]),
+      ],
+    );
+    if (trials.length)
+      node.append(
+        el("details", { class: "optimization-trials" }, [
+          el("summary", { text: `Alle ${trials.length} Suchtrials ansehen` }),
+          el("div", { class: "table-scroll" }, [
+            el("table", { class: "data-table" }, [
+              el("thead", {}, [
+                el(
+                  "tr",
+                  {},
+                  [
+                    "Trial",
+                    "Status",
+                    "Samples",
+                    "Lernrate",
+                    "Batch",
+                    "Epochen",
+                    "Zielfunktionswert",
+                    "Val. F1",
+                    "Val. bal. Genauigkeit",
+                    "Score",
+                    "Trialzeit",
+                  ].map((label) => el("th", { text: label })),
+                ),
+              ]),
+              el(
+                "tbody",
+                {},
+                trials.map((trial) => {
+                  const config = trial.config || {},
+                    validation = trial.validation || {};
+                  return el(
+                    "tr",
+                    {
+                      class:
+                        trial.trial === optimization.best_trial
+                          ? "optimization-best-trial"
+                          : "",
+                    },
+                    [
+                      el("td", { class: "mono", text: text(trial.trial) }),
+                      detailCell(
+                        {
+                          completed: "Abgeschlossen",
+                          failed: "Fehlgeschlagen",
+                          timed_out: "Zeitlimit",
+                        }[trial.status] || text(trial.status),
+                        trial.error,
+                      ),
+                      ...[
+                        config.segment_length,
+                        config.learning_rate,
+                        config.batch_size,
+                        config.epochs,
+                      ].map((value) =>
+                        el("td", { class: "mono", text: text(value) }),
+                      ),
+                      el("td", {
+                        class: "mono",
+                        text: num(trial.objective_value, 5),
+                      }),
+                      el("td", {
+                        class: "mono",
+                        text: num(validation.macro_f1, 4),
+                      }),
+                      el("td", {
+                        class: "mono",
+                        text: percent(validation.balanced_accuracy),
+                      }),
+                      el("td", {
+                        class: "mono",
+                        text: num(trial.score?.total, 2),
+                      }),
+                      el("td", {
+                        class: "mono",
+                        text: duration(trial.elapsed_seconds),
+                      }),
+                    ],
+                  );
+                }),
+              ),
+            ]),
+          ]),
+        ]),
+      );
+    const excluded = arr(optimization.excluded_segment_lengths);
+    if (excluded.length)
+      node.append(
+        el("details", { class: "result-details" }, [
+          el("summary", {
+            text: `${excluded.length} ausgeschlossene Segmentlängen`,
+          }),
+          el(
+            "div",
+            { class: "optimization-excluded" },
+            excluded.map((item) =>
+              el("p", {
+                text: `${text(item.segment_length)} Samples: ${arr(item.reasons)
+                  .map((reason) =>
+                    typeof reason === "string"
+                      ? reason
+                      : JSON.stringify(reason),
+                  )
+                  .join(" · ")}`,
+              }),
+            ),
+          ),
+        ]),
+      );
+    node.append(
+      el("details", { class: "result-details" }, [
+        el("summary", { text: "Suchraum und vollständige HPO-Metadaten" }),
+        el("pre", { text: JSON.stringify(optimization, null, 2) }),
+      ]),
+    );
+    return node;
+  }
+  function updateExperimentBundleExport(experiment) {
+    const identifier =
+      typeof experiment.id === "string" && experiment.id
+        ? experiment.id
+        : state.selectedExperiment;
+    const available = typeof identifier === "string" && identifier.length > 0;
+    const link = $("#experiment-report-bundle");
+    link.hidden = !available;
+    $("#experiment-report-bundle-note").hidden = !available;
+    if (available)
+      link.href = `/api/experiments/${encodeURIComponent(identifier)}/report-bundle`;
+    else link.removeAttribute("href");
+  }
   function renderExperimentResult(experiment) {
+    updateExperimentBundleExport(experiment);
     const fullReport = experiment.report || experiment.result || experiment;
     const comparison = arr(fullReport.comparison);
     const experimentId = experiment.id || state.selectedExperiment;
@@ -3365,6 +3962,16 @@
             statusName(experiment.status),
         }),
       );
+      for (const partial of partialOptimizationReports(experiment, report))
+        body.append(
+          el("div", {}, [
+            el("h3", {
+              class: "optimization-partial-title",
+              text: partial.label,
+            }),
+            optimizationReportNode(partial.optimization),
+          ]),
+        );
       return;
     }
     if (["queued", "running"].includes(experiment.status) && !report.metrics) {
@@ -3375,6 +3982,12 @@
       body.replaceChildren(
         el("div", { class: "form-body" }, [
           pill(statusName(experiment.status), "cyan"),
+          experiment.optimization_trial !== undefined
+            ? el("p", {
+                class: "field-help",
+                text: `Automatische Suche · Trial ${text(experiment.optimization_trial)} / ${text(experiment.optimization_max_trials)}`,
+              })
+            : null,
           el("p", {
             class: "secondary",
             text:
@@ -3397,6 +4010,8 @@
       return;
     }
     const n = el("div");
+    if (fullReport.optimization_summary?.scope === "all_topologies")
+      n.append(optimizationSummaryNode(fullReport.optimization_summary));
     if (comparison.length) {
       n.append(
         comparisonTable(experiment, fullReport, comparison, inspectedIndex),
@@ -3410,6 +4025,8 @@
         ]),
       );
     }
+    if (report.optimization?.enabled === true && !trainingOnly(report))
+      n.append(optimizationReportNode(report.optimization));
     if (
       trainingOnly(report) ||
       trainingOnly(fullReport) ||
@@ -3486,9 +4103,13 @@
           "Klassen gleich gewichtet",
         ),
         metric(
-          "TRAININGSDAUER",
+          report.optimization?.enabled
+            ? "TRAINING · GEWINNER"
+            : "TRAININGSDAUER",
           duration(metrics.training_seconds),
-          "Gemessene Wandzeit",
+          report.optimization?.enabled
+            ? "Nur der ausgewählte Trial"
+            : "Gemessene Wandzeit",
         ),
         metric(
           "KLASSIFIKATION · P50",
@@ -4246,7 +4867,10 @@
     if (data.port) $("#bridge-form [name=port]").value = data.port;
   }
   function exportExperimentConfig() {
-    const config = experimentConfig({ allowEmptyTopologies: true });
+    const config = experimentConfig({
+      allowEmptyTopologies: true,
+      includeDisabledOptimization: true,
+    });
     const blob = new Blob(
       [
         JSON.stringify(
@@ -4303,6 +4927,22 @@
       throw new Error("Ungültiger Bewertungsmodus.");
     if (c.device !== undefined && !["auto", "cpu", "cuda"].includes(c.device))
       throw new Error("Ungültiges Rechengerät.");
+    const optimization = normalizeOptimizationConfig(
+      c.optimization,
+      c.segment_length || arr(c.segment_lengths)[0] || 2048,
+    );
+    if (optimization.enabled && c.evaluation_mode === "training_only")
+      throw new Error(
+        "Automatische HPO benötigt eine unabhängige Bewertung und unterstützt „Nur trainieren“ nicht.",
+      );
+    if (
+      c.experiment_notes !== undefined &&
+      (typeof c.experiment_notes !== "string" ||
+        c.experiment_notes.length > 12000)
+    )
+      throw new Error(
+        "Die Versuchsbeschreibung darf höchstens 12000 Zeichen enthalten.",
+      );
     const integers = {
       seed: [0, 2147483647],
       samples_per_class: [12, 1000],
@@ -4400,6 +5040,7 @@
     const available = new Set(availableRecordings);
     return {
       config: c,
+      optimization,
       topologyIds,
       recordingIds: [...new Set(ids)].filter((id) => available.has(id)),
       missingRecordingIds: [...new Set(ids)].filter((id) => !available.has(id)),
@@ -4456,6 +5097,8 @@
         c.augmentation?.[key] ?? (key === "echo_delay_samples" ? 8 : 0),
       );
     form.elements.use_priors.checked = c.use_priors === true;
+    form.elements.experiment_notes.value = c.experiment_notes || "";
+    populateOptimizationForm(prepared.optimization);
     setExperimentRecordingSelection(prepared.recordingIds);
     $("#experiment-recordings-field").hidden =
       form.elements.source.value !== "recordings";
@@ -4467,6 +5110,23 @@
     );
   }
   function setupEvents() {
+    $("#optimization-enabled").addEventListener(
+      "change",
+      updateOptimizationControls,
+    );
+    $("#optimization-fields").addEventListener(
+      "input",
+      updateOptimizationControls,
+    );
+    $("#experiment-source").addEventListener(
+      "change",
+      updateOptimizationControls,
+    );
+    $("#experiment-evaluation-mode").addEventListener(
+      "change",
+      updateOptimizationControls,
+    );
+
     $("#recording-cleanup-open").addEventListener("click", () =>
       action(openCleanupDialog),
     );
@@ -4931,6 +5591,7 @@
     }
     setupEvents();
     updateReceiverFields();
+    updateOptimizationControls();
     const clock = () => {
       $("#clock").textContent =
         new Date().toLocaleTimeString("de-DE", {

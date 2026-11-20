@@ -35,7 +35,7 @@ Jeder Ansatz erhält eigene Modelle, Konfigurationen und einen vollständigen Be
 
 Im Setup lassen sich alle bestätigten verfügbaren Aufnahmen beziehungsweise alle verfügbaren Topologien gemeinsam auswählen und wieder abwählen. Die API und der Loader erlauben bis zu 1000 Aufnahmen; das 128-MiB-IQ-Budget und maximal 4096 Segmente je Split bleiben bestehen. Eine Sammelauswahl schneidet keine Dateien stillschweigend ab. Die Vorprüfung zeigt überschrittene Grenzen vor dem Start.
 
-Im Modus **Unabhängig auswerten** entscheidet das Validierungs-Macro-F1 über die vorgeschlagene Auswahl; bei Gleichstand gewinnt das kleinere Modell. Testgenauigkeit oder Test-F1 werden dafür **nicht** benutzt. Auch innerhalb einer Topologie wird eine Hyperparameterkombination nur nach Validierung ausgewählt. Sämtliche anderen Netze bleiben gespeichert und können separat geladen werden.
+Im Modus **Unabhängig auswerten** entscheidet bei manuellen Konfigurationen das Validierungs-Macro-F1 über die vorgeschlagene Auswahl; bei Gleichstand gewinnt das kleinere Modell. Die [automatische Hyperparameteroptimierung](hyperparameteroptimierung.md) verwendet das gewählte Validierungsziel, standardmäßig den Gesamtscore. Testgenauigkeit oder Test-F1 werden dafür **nicht** benutzt. Auch innerhalb einer Topologie wird eine Hyperparameterkombination nur nach Validierung ausgewählt. Sämtliche anderen Netze bleiben gespeichert und können separat geladen werden.
 
 Im Modus **Nur trainieren** werden ebenfalls alle ausgewählten Netze trainiert und gespeichert. Es gibt dabei keine Qualitätsrangfolge und keinen Gewinner. Das erste Netz bleibt lediglich eine technische Standardreferenz für kompatible Modelloperationen; daraus folgt keine Empfehlung. Rechenzeiten und Modellgrößen können verglichen werden, während Genauigkeit und F1 unbekannt bleiben.
 
@@ -85,7 +85,7 @@ Synthetische Modulationen umfassen konventionelles AM mit Träger und FM mit wec
 
 ## Sweep und Kanalvariationen
 
-`segment_length` ist eine Sampleanzahl, kein Zeitwert; die tatsächliche Dauer ist `Samples / tatsächliche Abtastrate`. `segment_lengths`, `learning_rates` und `batch_sizes` können zusätzliche Kombinationen bilden; maximal zwölf Kombinationen pro Experiment. Die Modellwahl erfolgt anhand des Validierungs-Macro-F1, bei Gleichstand anhand der Modellgröße, niemals anhand des besten Testergebnisses.
+`segment_length` ist eine Sampleanzahl, kein Zeitwert; die tatsächliche Dauer ist `Samples / tatsächliche Abtastrate`. Im manuellen Modus bilden `segment_lengths`, `learning_rates` und `batch_sizes` bis zu zwölf Kombinationen pro Topologie. Die Modellwahl erfolgt dort anhand des Validierungs-Macro-F1, bei Gleichstand anhand der Modellgröße, niemals anhand des besten Testergebnisses. Die automatische Suche besitzt ein eigenes gespeichertes Budget und Validierungsziel.
 
 `snr_db` und `jitter` bilden ein vollständiges Testgitter. Im Training wird pro Segment zufällig ein Wert aus den jeweiligen Listen gezogen; standardmäßig kommen zusätzlich die unveränderten Trainingssegmente hinzu (`include_clean=true`). Timing-Jitter wird als RMS in **Sampleeinheiten** mit linearer IQ-Interpolation injiziert. Die zufälligen Werte und Seeds sind reproduzierbar gespeichert.
 

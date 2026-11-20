@@ -26,7 +26,8 @@ const source = original.replace(
   frequencyBox, frameFromSnapshot, addWaterfall, waterfallGeometry, observationCell,
   observationTrack, captureBudgetEstimate, stopReasonText, trainingOnly,
   rankedComparisonEntries, liveModelRecommendations, liveSampleMetrics, recordingSelectionWithAdditions,
-  topologyAvailable, validateTopologyIds, selectedTopologyIds, prepareExperimentDraft, cleanupDeletionPlan
+  topologyAvailable, validateTopologyIds, selectedTopologyIds, prepareExperimentDraft, cleanupDeletionPlan,
+  normalizeOptimizationConfig, optimizationBaseConfig, optimizationBestConfig, selectionObjectiveLabel, partialOptimizationReports
 };`,
 );
 const sandbox = { Intl, console, Set, Map, Date, window: {}, document: {} };
@@ -532,6 +533,250 @@ assert.equal(
   0,
 );
 
+// Automatic optimization uses independent validation and a bounded portable search config.
+assert.equal(f.normalizeOptimizationConfig({}).enabled, false);
+assert.throws(
+  () => f.normalizeOptimizationConfig({ enabled: true, max_trial: 1 }),
+  /Unbekannte HPO-Konfigurationsfelder/,
+);
+assert.throws(
+  () =>
+    f.normalizeOptimizationConfig({
+      enabled: true,
+      search_space: { lr_min: 0.0001 },
+    }),
+  /Unbekannte HPO-Suchraumfelder/,
+);
+assert.equal(
+  f.selectionObjectiveLabel({ selection_objective: "score" }),
+  "Val-Score",
+);
+assert.equal(
+  f.selectionObjectiveLabel({ selection_objective: "balanced_accuracy" }),
+  "Val-bal. Genauigkeit",
+);
+assert.equal(f.selectionObjectiveLabel({}), "Val-F1");
+const partialSearch = {
+  enabled: true,
+  best_trial: 1,
+  best_config: {
+    segment_length: 1024,
+    learning_rate: 0.001,
+    batch_size: 16,
+    epochs: 3,
+  },
+  trials: [{ trial: 1, status: "completed" }],
+};
+const partial = f.partialOptimizationReports(
+  {
+    partial_reports: [
+      {
+        path: "topology-a/report.json",
+        kind: "report",
+        report: { optimization: partialSearch },
+      },
+      {
+        path: "topology-a/optimization.json",
+        kind: "optimization",
+        report: { ...partialSearch, stop_reason: "user_cancellation" },
+      },
+      {
+        path: "topology-b/optimization.json",
+        kind: "optimization",
+        report: { ...partialSearch, topology_id: "b" },
+      },
+    ],
+  },
+  {},
+);
+assert.equal(
+  partial.length,
+  2,
+  "Persisted optimization and model reports for one topology are deduplicated",
+);
+assert.equal(partial[0].optimization.stop_reason, "user_cancellation");
+const hpo = f.normalizeOptimizationConfig({ enabled: true }, 2048);
+assert.equal(hpo.method, "random");
+assert.equal(hpo.max_trials, 12);
+assert.equal(hpo.timeout_seconds, 300);
+assert.equal(
+  f.normalizeOptimizationConfig({ enabled: true, timeout_seconds: 0.5 })
+    .timeout_seconds,
+  0.5,
+);
+const baseFields = f.optimizationBaseConfig(hpo);
+assert.deepEqual(Array.from(baseFields.segment_lengths), [1024]);
+assert.deepEqual(Array.from(baseFields.learning_rates), [0.00001]);
+assert.deepEqual(Array.from(baseFields.batch_sizes), [16]);
+assert.equal(baseFields.epochs, 5);
+assert.equal(hpo.objective, "score");
+assert.deepEqual(
+  Array.from(hpo.search_space.segment_lengths),
+  [1024, 2048, 4096],
+);
+assert.deepEqual(
+  Array.from(
+    f.normalizeOptimizationConfig({ enabled: false }, 65536).search_space
+      .segment_lengths,
+  ),
+  [32768, 65536],
+);
+assert.equal(
+  f.normalizeOptimizationConfig({ enabled: true, timeout_seconds: 0 })
+    .timeout_seconds,
+  0,
+);
+assert.throws(
+  () => f.normalizeOptimizationConfig({ enabled: "yes" }),
+  /boolescher/,
+);
+assert.throws(
+  () => f.normalizeOptimizationConfig({ enabled: true, method: "bayesian" }),
+  /Random Search/,
+);
+assert.throws(
+  () => f.normalizeOptimizationConfig({ enabled: true, max_trials: 51 }),
+  /1–50/,
+);
+assert.throws(
+  () => f.normalizeOptimizationConfig({ enabled: true, timeout_seconds: -1 }),
+  /Zeitbudget/,
+);
+assert.throws(
+  () =>
+    f.normalizeOptimizationConfig({
+      enabled: true,
+      search_space: { learning_rate_min: 0.01, learning_rate_max: 0.001 },
+    }),
+  /minimale HPO-Lernrate/,
+);
+assert.throws(
+  () =>
+    f.normalizeOptimizationConfig({
+      enabled: true,
+      search_space: {
+        segment_lengths: [256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304],
+      },
+    }),
+  /1–8/,
+);
+assert.equal(
+  f.normalizeOptimizationConfig({
+    enabled: true,
+    search_space: {
+      segment_lengths: [256, 512, 768, 1024, 1280, 1536, 1792, 2048],
+    },
+  }).search_space.segment_lengths.length,
+  8,
+);
+assert.throws(
+  () =>
+    f.normalizeOptimizationConfig({
+      enabled: true,
+      search_space: { epochs: [0] },
+    }),
+  /epochs/,
+);
+const hpoDraft = {
+  ...draft,
+  evaluation_mode: "independent",
+  optimization: {
+    enabled: true,
+    max_trials: 8,
+    objective: "macro_f1",
+    timeout_seconds: 90,
+    search_space: {
+      segment_lengths: [512, 1024],
+      learning_rate_min: 0.0001,
+      learning_rate_max: 0.003,
+      batch_sizes: [16, 32],
+      epochs: [2, 4],
+    },
+  },
+  experiment_notes: "AM/FM-Versuch · Empfänger und Antenne dokumentiert",
+};
+const normalizedDraft = f.prepareExperimentDraft(
+  hpoDraft,
+  catalog,
+  ["available-a"],
+  false,
+);
+assert.equal(normalizedDraft.optimization.enabled, true);
+assert.equal(normalizedDraft.optimization.objective, "macro_f1");
+assert.deepEqual(
+  Array.from(normalizedDraft.optimization.search_space.epochs),
+  [2, 4],
+);
+assert.equal(
+  normalizedDraft.config.experiment_notes,
+  hpoDraft.experiment_notes,
+);
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      { ...hpoDraft, evaluation_mode: "training_only" },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /unabhängige Bewertung/,
+);
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      { ...hpoDraft, experiment_notes: "x".repeat(12001) },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /12000/,
+);
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      {
+        ...hpoDraft,
+        optimization: {
+          enabled: true,
+          search_space: { learning_rate_min: NaN },
+        },
+      },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /Lernraten/,
+);
+const best = f.optimizationBestConfig({
+  best_trial: 3,
+  best_config: {
+    segment_length: 1024,
+    learning_rate: 0.002,
+    batch_size: 16,
+    epochs: 4,
+  },
+});
+assert.equal(best.segment_length, 1024);
+assert.equal(best.learning_rate, 0.002);
+assert.equal(best.batch_size, 16);
+assert.equal(best.epochs, 4);
+assert.throws(
+  () => f.optimizationBestConfig({ best_config: null }),
+  /beste Konfiguration/,
+);
+assert.throws(
+  () =>
+    f.optimizationBestConfig({
+      best_config: {
+        segment_length: 10,
+        learning_rate: 0.002,
+        batch_size: 16,
+        epochs: 4,
+      },
+    }),
+  /unvollständig/,
+);
+
 console.log(
-  "Frontend pure-logic regressions passed: waterfall, selection/drafts, reviewed cleanup, capture budget, validation rankings and live warmup.",
+  "Frontend pure-logic regressions passed: waterfall, selection/drafts, reviewed cleanup, automatic HPO, capture budget, validation rankings and live warmup.",
 );

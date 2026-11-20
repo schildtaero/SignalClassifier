@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from collections import deque
@@ -25,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import __version__, labels, ml
+from . import __version__, experiment_log, labels, ml
 from .db import Store, utcnow
 from .drones import Bridge, DroneStore, capabilities, example_payload
 from .receivers import CaptureManager
@@ -139,11 +140,17 @@ class Runtime:
         self.benchmark = None
         self.live_model_ids: list[str] = []
         self.live_timings = {}
+        self.event_sequences = {}
+        self.run_clocks = {}
         # A previous process cannot still execute these jobs.
         for run in self.store.all("experiment"):
             if run.get("status") in ("running", "queued", "cancelling"):
                 run.update(status="interrupted", error="Anwendung während des Experiments beendet.", finished_at=utcnow())
                 self.store.put("experiment", run["id"], run)
+                try:
+                    self.log_event(run["id"], "interrupted", {"error": run["error"]})
+                except OSError:
+                    LOG.exception("Unterbrechung konnte nicht im Experimentjournal gespeichert werden")
         if self.store.get("settings", "main") is None:
             self.store.put("settings", "main", SettingsInput().model_dump())
 
@@ -476,19 +483,67 @@ class Runtime:
             catalogue[item["id"]] = item
         return list(catalogue.values())
 
+    def log_event(self, identifier: str, event: str, data: dict):
+        with self.lock:
+            path = self.data_dir / "experiments" / clean_id(identifier) / "events.jsonl"
+            if identifier not in self.event_sequences:
+                self.event_sequences[identifier] = max((row.get("sequence", 0) for row in experiment_log.read_events(path)), default=0)
+            sequence = self.event_sequences[identifier] + 1
+            elapsed = time.perf_counter() - self.run_clocks[identifier] if identifier in self.run_clocks else None
+            experiment_log.append_event(path, sequence, event, finite_json(data), elapsed)
+            self.event_sequences[identifier] = sequence
+
+    def freeze_experiment_inputs(self, identifier: str, config: dict) -> dict:
+        folder = self.data_dir / "experiments" / identifier
+        annotations = {row["id"]: row for row in self.store.all("label")}
+        inventory = experiment_log.dataset_inventory(config.get("recordings", []), annotations)
+        experiment_log.write_json(folder / "configuration.json", finite_json(config))
+        experiment_log.write_json(folder / "dataset-inventory.json", finite_json(inventory))
+        provenance = finite_json({"schema_version": 1, "snapshot_utc": utcnow(),
+            "software": experiment_log.software_provenance(), "hardware_at_queue": ml.hardware_profile(),
+            "settings_at_queue": self.store.get("settings", "main"), "source": config["source"],
+            "configuration_sha256": experiment_log.canonical_sha256(finite_json(config)),
+            "inventory_sha256": experiment_log.canonical_sha256(finite_json(inventory)),
+            "snapshot_hash_format": "SHA-256 of UTF-8 JSON, sorted keys, ensure_ascii=false, separators=(',', ':'), no NaN; independent of ZIP JSON whitespace.",
+            "recording_count": len(inventory),
+            "references": [{"title": "SignalClassifier: Topologien und Bewertungsmethodik", "url": "https://github.com/schildtaero/SignalClassifier/blob/main/docs/topologien.md"},
+                           {"title": "Condition Monitoring for Electric Aircraft Propulsion Systems", "url": "https://doi.org/10.25439/rmt.33772282",
+                            "scope": "FB-LSTM/2D-CNN/5-CNN are documented RF adaptations, not exact reproductions of audio networks."}],
+            "notes": "Immutable queue-time metadata and labels. No full IQ payloads or model weights are included in report bundles."})
+        experiment_log.write_json(folder / "provenance.json", provenance)
+        return provenance
+
+    def partial_reports(self, identifier: str) -> list[dict]:
+        folder = self.data_dir / "experiments" / clean_id(identifier)
+        reports = []
+        paths = sorted(set(folder.glob("topology-*/report.json")) | set(folder.rglob("optimization.json")))
+        for path in paths:
+            if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()):
+                continue
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                reports.append({"path": path.relative_to(folder).as_posix(), "kind": path.stem, "report": value})
+            except (OSError, ValueError) as exc:
+                reports.append({"path": path.relative_to(folder).as_posix(), "error": str(exc)})
+        return reports
+
     def run(self, identifier: str, config: dict):
         event = self.cancel_events[identifier]
         def progress(value):
-            if event.is_set():
-                raise ExperimentCancelled()
-            state = self.store.get("experiment", identifier)
-            if isinstance(value, dict):
-                state.update(value)
-            state["status"] = "running"
-            self.store.put("experiment", identifier, finite_json(state))
+            with self.lock:
+                if event.is_set():
+                    raise ExperimentCancelled()
+                self.log_event(identifier, "progress", value if isinstance(value, dict) else {"message": str(value)})
+                state = self.store.get("experiment", identifier)
+                if isinstance(value, dict):
+                    immutable = {"id", "config", "name", "created_at", "provenance", "log_files", "report", "model_id", "model_ids"}
+                    state.update({key: data for key, data in value.items() if key not in immutable})
+                state["status"] = "running"
+                self.store.put("experiment", identifier, finite_json(state))
         try:
             with self.lock:
                 self.active_experiment = identifier
+                self.run_clocks[identifier] = time.perf_counter()
             progress({"progress": 0, "stage": "initializing", "started_at": utcnow()})
             report = ml.run_comparison(config, self.data_dir / "experiments" / identifier, progress=progress)
             if event.is_set():
@@ -509,14 +564,16 @@ class Runtime:
                     copied.append(destination)
                     shutil.copytree(model_path, destination)
                     model_metadata = ml.load_model_metadata(destination)
+                    artifact_sha256 = {path.name: experiment_log.file_sha256(path) for path in sorted(destination.iterdir()) if path.is_file() and not path.is_symlink()}
                     name = config.get("name") or result["name"]
                     if len(comparison) > 1:
                         name = f"{name} · {result['name']}" if config.get("name") else result["name"]
                     model_records.append(finite_json({**model_metadata, "id": model_id, "name": name,
                         "model_path": str(destination), "experiment_id": identifier, "created_at": utcnow(), "metrics": result.get("metrics", {}),
                         "score": result.get("score"), "score_rank": result.get("score_rank"), "accuracy_rank": result.get("accuracy_rank"),
-                        "assessment_hardware": result.get("report", {}).get("hardware")}))
+                        "assessment_hardware": result.get("report", {}).get("hardware"), "artifact_sha256": artifact_sha256}))
                     result["model_id"] = model_id
+                    result["artifact_sha256"] = artifact_sha256
                     if result["model_path"] == report["model_path"]:
                         selected_model_id = model_id
                 self.store.put_many("model", model_records)
@@ -528,15 +585,23 @@ class Runtime:
             state = self.store.get("experiment", identifier)
             state.update(status="completed", progress=1, report=report, metrics=report.get("metrics", {}), model_id=selected_model_id, model_ids=model_ids, finished_at=utcnow())
             self.store.put("experiment", identifier, state)
+            self.log_event(identifier, "completed", {"model_ids": model_ids, "selected_model_id": selected_model_id,
+                "metrics": report.get("metrics"), "rankings": report.get("rankings"),
+                "model_artifacts": [{"model_id": row["id"], "artifact_sha256": row["artifact_sha256"]} for row in model_records]})
         except ExperimentCancelled:
             state = self.store.get("experiment", identifier)
             state.update(status="cancelled", finished_at=utcnow())
             self.store.put("experiment", identifier, state)
+            self.log_event(identifier, "cancelled", {"finished_at": state["finished_at"]})
         except Exception as exc:
             LOG.exception("Experiment %s failed", identifier)
             state = self.store.get("experiment", identifier)
             state.update(status="failed", error=str(exc), finished_at=utcnow())
             self.store.put("experiment", identifier, state)
+            try:
+                self.log_event(identifier, "failed", {"error": str(exc), "error_type": type(exc).__name__})
+            except OSError:
+                LOG.exception("Experimentfehler konnte nicht im Journal gespeichert werden")
         finally:
             with self.lock:
                 self.active_experiment = None
@@ -561,9 +626,13 @@ async def copy_upload(upload: UploadFile, destination: Path, limit: int) -> int:
 
 
 def validate_experiment(config: dict, rt: Runtime) -> dict:
+    if any(str(key).startswith("_") for key in config):
+        raise ValueError("Interne Experimentparameter dürfen nicht über die API gesetzt werden")
     value = {"source": "synthetic", "topology_id": "feature-lda", "seed": 42, "samples_per_class": 80,
              "segment_length": 2048, "snr_db": [0, 10, 20], "jitter": [0.0], "epochs": 5,
              "learning_rate": 0.001, "batch_size": 32, "device": "auto", "use_priors": False, "evaluation_mode": "independent", **config}
+    if not isinstance(value.get("experiment_notes", ""), str) or len(value.get("experiment_notes", "")) > 12000:
+        raise ValueError("Versuchsbeschreibung muss Text mit höchstens 12000 Zeichen sein")
     if value["source"] not in ("synthetic", "recordings"):
         raise ValueError("Quelle muss synthetic oder recordings sein")
     catalogue = {t["id"]: t for t in rt.topologies()}
@@ -873,7 +942,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if any(e.get("status") in ("queued", "running", "cancelling") for e in runtime.store.all("experiment")):
                 raise HTTPException(409, "Es läuft bereits ein Experiment")
             identifier = uuid.uuid4().hex
-            state = runtime.store.put("experiment", identifier, {"name": config.get("name") or "AM / FM", "status": "queued", "config": config, "progress": 0, "created_at": utcnow()})
+            provenance = runtime.freeze_experiment_inputs(identifier, config)
+            state = runtime.store.put("experiment", identifier, {"name": config.get("name") or "AM / FM", "status": "queued", "config": config, "progress": 0, "created_at": utcnow(),
+                "provenance": provenance, "log_files": {"events": "events.jsonl", "configuration": "configuration.json", "inventory": "dataset-inventory.json", "provenance": "provenance.json"}})
+            runtime.log_event(identifier, "queued", {"config": config, "provenance": provenance})
             runtime.cancel_events[identifier] = threading.Event()
             runtime.executor.submit(runtime.run, identifier, config)
         return state
@@ -883,6 +955,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         value = runtime.store.get("experiment", clean_id(identifier))
         if value is None:
             raise HTTPException(404, "Experiment nicht gefunden")
+        if value.get("status") in ("cancelled", "failed", "interrupted"):
+            value["partial_reports"] = runtime.partial_reports(identifier)
         return value
 
     @app.get("/api/experiments/{identifier}/download")
@@ -890,14 +964,33 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         value = experiment(identifier)
         return JSONResponse(value, headers={"Content-Disposition": f'attachment; filename="experiment-{identifier}.json"'})
 
+    @app.get("/api/experiments/{identifier}/report-bundle")
+    def download_report_bundle(identifier: str):
+        from .reporting import build_report_bundle
+        with runtime.lock:
+            value = experiment(identifier)
+            folder = directory / "experiments" / identifier
+            inventory_path = folder / "dataset-inventory.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8")) if inventory_path.is_file() else []
+            value["partial_reports"] = runtime.partial_reports(identifier)
+            value["export_snapshot"] = {"timestamp_utc": utcnow(), "status": value.get("status"),
+                "complete": value.get("status") == "completed", "inventory_available": inventory_path.is_file(),
+                "legacy_warning": None if value.get("provenance") else "Historical run has no queue-time provenance snapshot; no current labels or hardware have been substituted."}
+            events = experiment_log.read_events(folder / "events.jsonl")
+        destination = directory / "exports" / f"{identifier}.{uuid.uuid4().hex}.report.zip"
+        build_report_bundle(value, destination, events=events, dataset_inventory=inventory)
+        return FileResponse(destination, filename=f"experiment-{identifier}-report.zip", media_type="application/zip")
+
     @app.post("/api/experiments/{identifier}/cancel")
     def cancel_experiment(identifier: str):
-        value = experiment(identifier)
-        if value["status"] not in ("queued", "running", "cancelling"):
-            return value
-        runtime.cancel_events[identifier].set()
-        value["status"] = "cancelling"
-        return runtime.store.put("experiment", identifier, value)
+        with runtime.lock:
+            value = experiment(identifier)
+            if value["status"] not in ("queued", "running", "cancelling"):
+                return value
+            runtime.cancel_events[identifier].set()
+            value["status"] = "cancelling"
+            runtime.log_event(identifier, "cancel_requested", {"status": value["status"]})
+            return runtime.store.put("experiment", identifier, value)
 
     @app.get("/api/models")
     def models():

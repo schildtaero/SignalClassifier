@@ -408,5 +408,179 @@ class ModulationTests(unittest.TestCase):
             self.assertEqual(len(result["explanation"]["contributions"]), 16)
 
 
+class AutomaticOptimizationTests(unittest.TestCase):
+    def config(self, **updates):
+        return {"samples_per_class": 12, "segment_length": 512, "snr_db": [10, 20], "jitter": [0, .1], "epochs": 1,
+                "optimization": {"enabled": True, "max_trials": 12, "timeout_seconds": 0,
+                                 "search_space": {"segment_lengths": [256, 512, 1024], "batch_sizes": [4], "epochs": [1]}}, **updates}
+
+    def test_real_search_uses_validation_only_then_tests_saved_winner_once(self):
+        c = self.config()
+        normalized = ml._validate_config(c)
+        planned = ml._planned_split_groups(normalized)
+        final_started = False
+        final_calls = 0
+        original_generate, original_final = ml.generate_signal, ml._evaluate_optimized_test
+        test_seeds = {int(group.rsplit("-", 1)[1]) for group in planned["test"]}
+        observed_test_seeds = []
+        def generate(label, length=4096, sample_rate=256000, seed=42):
+            if seed in test_seeds:
+                self.assertTrue(final_started, "test source must not even be generated during search")
+                observed_test_seeds.append(seed)
+            return original_generate(label, length, sample_rate, seed)
+        def final(*args, **kwargs):
+            nonlocal final_started, final_calls
+            final_started = True
+            final_calls += 1
+            return original_final(*args, **kwargs)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "generate_signal", side_effect=generate), \
+             mock.patch.object(ml, "_evaluate_optimized_test", side_effect=final):
+            report = ml.run_experiment(c, directory)
+            study = report["optimization"]
+            self.assertEqual(final_calls, 1)
+            self.assertEqual(set(observed_test_seeds), test_seeds)
+            self.assertEqual(len(observed_test_seeds), len(test_seeds))
+            self.assertEqual(study["completed_trials"], 3, "LDA only searches the three meaningful lengths")
+            self.assertEqual(study["stop_reason"], "search_space_exhausted")
+            self.assertEqual(study["test_evaluations"], 1)
+            self.assertIsNotNone(report["metrics"]["accuracy"])
+            self.assertEqual(report["final_test_evaluations"], 1)
+            for trial in study["trials"]:
+                self.assertEqual(trial["report"]["evaluation_scope"], "validation_only")
+                self.assertIsNone(trial["report"]["metrics"]["accuracy"])
+                self.assertEqual(trial["report"]["trials"], [])
+                self.assertEqual(trial["report"]["data_usage"]["test"]["segments"], 0)
+                self.assertEqual(trial["report"]["split_groups"], planned)
+                self.assertEqual({(point["snr_db"], point["jitter"]) for point in trial["report"]["validation_trials"]}, {(10, 0), (10, .1), (20, 0), (20, .1)})
+            self.assertAlmostEqual(study["total_training_seconds"], sum(trial["metrics"]["training_seconds"] for trial in study["trials"]))
+            state = json.loads((Path(directory) / "optimization.json").read_text())
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["best_config"], study["best_config"])
+            self.assertFalse((Path(directory) / "optimization.json.tmp").exists())
+            self.assertTrue(ml.validate_model(report["model_path"])["test_evaluation_available"])
+            saved = json.loads((Path(report["model_path"]) / "report.json").read_text())
+            self.assertEqual(saved["optimization"]["test_evaluations"], 1)
+
+    def test_synthetic_reference_is_shared_and_training_only_is_rejected(self):
+        config = ml._validate_config(self.config())
+        small = ml._synthetic_groups(config, 256, include_test=False, reference_length=1024)
+        large = ml._synthetic_groups(config, 512, include_test=False, reference_length=1024)
+        for split in ("train", "validation"):
+            for first, second in zip(small[split], large[split]):
+                np.testing.assert_array_equal(first["iq"], second["iq"][:256])
+                self.assertEqual(first["group_id"], second["group_id"])
+        self.assertEqual(small["test"], [])
+        with self.assertRaisesRegex(ValueError, "Validierung"):
+            ml.validate_experiment_config(self.config(evaluation_mode="training_only"))
+
+    def test_recorded_search_keeps_common_anchors_and_never_reads_test_iq_early(self):
+        from signalclassifier import sigmf
+        with tempfile.TemporaryDirectory() as directory:
+            entries = []
+            for label in ("AM", "FM"):
+                for group in range(3):
+                    path = sigmf.write_recording(Path(directory) / f"{label}-{group}", ml.generate_signal(label, 2048, seed=group), 256000, 100e6)
+                    entries.append({"path": str(path), "label": label, "verified": True, "group_id": f"{label}-{group}"})
+            config = self.config(source="recordings", recordings=entries)
+            normalized = ml._validate_config(config)
+            test_ids = set(ml._planned_split_groups(normalized)["test"])
+            paths = {entry["path"]: entry["group_id"] for entry in entries}
+            final_started = False
+            original_read, original_final = sigmf.read_recording, ml._evaluate_optimized_test
+            final_reads = []
+            def read(path, *args, **kwargs):
+                if paths[str(path)] in test_ids:
+                    self.assertTrue(final_started)
+                    final_reads.append(str(path))
+                return original_read(path, *args, **kwargs)
+            def final(*args, **kwargs):
+                nonlocal final_started
+                final_started = True
+                return original_final(*args, **kwargs)
+            with mock.patch.object(sigmf, "read_recording", side_effect=read), mock.patch.object(ml, "_evaluate_optimized_test", side_effect=final):
+                report = ml.run_experiment(config, Path(directory) / "search")
+            self.assertEqual(len(final_reads), len(test_ids))
+            usage = [trial["report"]["data_usage"] for trial in report["optimization"]["trials"]]
+            for split in ("train", "validation"):
+                self.assertEqual(len({row[split]["segments"] for row in usage}), 1)
+                self.assertEqual(len({row[split]["groups"] for row in usage}), 1)
+            self.assertEqual(report["reference_window_samples"], 1024)
+            with mock.patch.object(sigmf, "read_recording", side_effect=AssertionError("metadata preflight only")):
+                filtered = ml.dataset_readiness({**config, "optimization": {"enabled": True, "search_space": {"segment_lengths": [256, 4096]}}})
+            self.assertTrue(filtered["ready"])
+            self.assertEqual(filtered["optimization"]["search_space"]["segment_lengths"], [256])
+            self.assertEqual(filtered["optimization"]["excluded_segment_lengths"][0]["segment_length"], 4096)
+
+    def fake_report(self, out, config, objective=50):
+        model = Path(out) / "candidate-1"
+        model.mkdir(parents=True)
+        validation = {"macro_f1": .7, "balanced_accuracy": .8}
+        metrics = {"training_seconds": 2., "preprocessing_seconds": 1., "model_bytes": 100, "accuracy": None}
+        candidate = {"candidate": 1, "validation": validation, "model_path": str(model), **metrics}
+        return {"config": {**config}, "model_path": str(model), "validation": validation, "score": {"total": objective},
+                "metrics": metrics, "candidates": [candidate], "selected_candidate": 1}
+
+    def test_timeout_keeps_completed_trials_and_cancellation_is_distinct(self):
+        config = ml._validate_config(self.config())
+        config["optimization"]["timeout_seconds"] = 10.
+        now, calls = [0.], []
+        def run(c, out, progress=None, **kwargs):
+            calls.append(c)
+            if len(calls) == 2:
+                now[0] = 11.
+            progress({"progress": .5, "stage": "train", "epoch": 1, "epoch_count": 2,
+                      "training_loss": .4, "validation_loss": .5, "training_elapsed_seconds": 2., "preprocessing_seconds": 1.})
+            return self.fake_report(out, c)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml.time, "perf_counter", side_effect=lambda: now[0]), \
+             mock.patch.object(ml, "run_experiment", side_effect=run), mock.patch.object(ml, "_evaluate_optimized_test", return_value=0.) as final:
+            report = ml._run_optimization(config, directory)
+            state = report["optimization"]
+            self.assertEqual(state["stop_reason"], "timeout")
+            self.assertEqual(state["completed_trials"], 1)
+            self.assertEqual(state["timed_out_trials"], 1)
+            self.assertEqual(state["total_training_seconds"], 4.)
+            self.assertEqual(state["best_trial"], 1)
+            final.assert_called_once()
+        class ExperimentCancelled(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            def cancel(_):
+                raise ExperimentCancelled()
+            with self.assertRaises(ExperimentCancelled):
+                ml._run_optimization(config, directory, cancel)
+            state = json.loads((Path(directory) / "optimization.json").read_text())
+            self.assertEqual(state["status"], "interrupted")
+            self.assertEqual(state["stop_reason"], "user_cancellation")
+            self.assertIsNone(state["best_config"])
+            self.assertEqual(state["test_evaluations"], 0)
+
+    def test_all_failed_trials_leave_partial_report_without_fabricated_winner(self):
+        config = ml._validate_config(self.config())
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=ValueError("bad trial")), \
+             mock.patch.object(ml, "_evaluate_optimized_test") as final:
+            with self.assertRaisesRegex(ValueError, "keinen abgeschlossenen"):
+                ml._run_optimization(config, directory)
+            state = json.loads((Path(directory) / "optimization.json").read_text())
+            self.assertEqual(state["failed_trials"], 3)
+            self.assertEqual(state["stop_reason"], "all_trials_failed")
+            self.assertIsNone(state["best_config"])
+            final.assert_not_called()
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch optional")
+    def test_multiple_topologies_optimize_and_select_score_objective(self):
+        config = self.config(topology_ids=["feature-lda", "feature-mlp-16"], snr_db=[20], jitter=[0])
+        config["optimization"].update(max_trials=2, objective="score")
+        with tempfile.TemporaryDirectory() as directory:
+            report = ml.run_comparison(config, directory)
+            self.assertEqual(report["selection_objective"], "score")
+            winner = max(report["comparison"], key=lambda entry: (entry["score"]["total"], -entry["metrics"]["model_bytes"]))
+            self.assertEqual(report["selected_topology_id"], winner["topology_id"])
+            self.assertEqual(report["optimization_summary"]["test_evaluations"], 2)
+            for entry in report["comparison"]:
+                self.assertEqual(entry["report"]["optimization"]["completed_trials"], 2)
+                self.assertEqual(entry["report"]["optimization"]["test_evaluations"], 1)
+                ml.validate_model(entry["model_path"])
+
+
 if __name__ == "__main__":
     unittest.main()

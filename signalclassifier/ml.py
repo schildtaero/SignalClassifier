@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import functools
+import copy
 import importlib.util
 import json
 import math
@@ -21,6 +22,7 @@ from scipy import signal, __version__ as scipy_version
 
 from . import __version__
 from .topologies import list_topologies, save_topology, validate_topology
+from .optimization import normalize_optimization, sample_configurations
 
 CLASSES = ["AM", "FM"]
 FEATURE_NAMES = ["amplitude_cv", "amplitude_kurtosis", "phase_std", "phase_dispersion",
@@ -256,6 +258,7 @@ def _validate_config(config):
     scalar("batch_size", 32, 4, 256, True)
     scalar("learning_rate", .001, .00001, .1)
     scalar("sample_rate", 256_000, 8000, 10_000_000)
+    c["optimization"] = normalize_optimization(c)
     for key, default, lo, hi, limit in [("snr_db", [0, 10, 20], -30, 80, 12), ("jitter", [0], 0, 2, 8),
                                        ("segment_lengths", [c["segment_length"]], 256, 65_536, 4),
                                        ("learning_rates", [c["learning_rate"]], .00001, .1, 4),
@@ -266,7 +269,7 @@ def _validate_config(config):
         if key in ("segment_lengths", "batch_sizes") and any(int(v) != v for v in values):
             raise ValueError(f"{key} muss ganze Zahlen enthalten.")
         c[key] = sorted(set(values))
-    if len(c["segment_lengths"]) * len(c["learning_rates"]) * len(c["batch_sizes"]) > 12:
+    if not c["optimization"]["enabled"] and len(c["segment_lengths"]) * len(c["learning_rates"]) * len(c["batch_sizes"]) > 12:
         raise ValueError("Maximal zwölf Kombinationen aus Segmentlänge, Lernrate und Batchgröße pro Experiment.")
     if c["evaluation_mode"] == "training_only" and len(c["segment_lengths"]) * len(c["learning_rates"]) * len(c["batch_sizes"]) != 1:
         raise ValueError("Nur trainieren erlaubt genau eine Kombination aus Segmentlänge, Lernrate und Batchgröße; ohne Validierung ist keine Modellwahl möglich.")
@@ -365,6 +368,8 @@ def _assign_groups(membership, classes, seed, training_only=False):
 
 def dataset_readiness(config: dict) -> dict:
     """Cheap dataset preflight. Counts metadata only; no complete IQ loads or training."""
+    if isinstance(config.get("optimization"), dict) and config["optimization"].get("enabled") is True:
+        return _optimization_readiness(config)
     mode = config.get("evaluation_mode", "independent")
     required = 1 if mode == "training_only" else 3
     result = {"ready": False, "evaluation_mode": mode, "classes": [], "errors": [], "warnings": [], "group_count": 0}
@@ -482,6 +487,34 @@ def dataset_readiness(config: dict) -> dict:
     return result
 
 
+def _optimization_readiness(config):
+    settings = normalize_optimization(config)
+    feasible, excluded, results = [], [], {}
+    for length in settings["search_space"]["segment_lengths"]:
+        candidate = {**config, "optimization": {"enabled": False}, "segment_length": length, "segment_lengths": [length],
+                     "learning_rates": [config.get("learning_rate", .001)], "batch_sizes": [config.get("batch_size", 32)]}
+        result = dataset_readiness(candidate)
+        results[length] = result
+        if result["ready"]:
+            feasible.append(length)
+        else:
+            excluded.append({"segment_length": length, "reasons": list(result["errors"])})
+    representative = max(feasible) if feasible else min(results)
+    result = dict(results[representative])
+    result["optimization"] = {**settings, "search_space": {**settings["search_space"], "segment_lengths": feasible},
+                              "excluded_segment_lengths": excluded}
+    if feasible:
+        result["ready"] = True
+        result["errors"] = []
+        result["warnings"] = list(result["warnings"])
+        if excluded:
+            result["warnings"].append("Unbrauchbare Segmentlängen werden mit Begründung aus dem automatischen Suchraum ausgeschlossen; alle ausgewählten Aufnahmen bleiben erhalten.")
+    else:
+        result["ready"] = False
+        result["errors"] = ["Keine Segmentlänge des automatischen Suchraums ist für den gewählten Datensatz zulässig."] + list(result["errors"])
+    return result
+
+
 def generate_signal(modulation, length=4096, sample_rate=256_000, seed=42):
     """Diverse baseband AM/FM fixtures. Each seed is an independent source group."""
     r = np.random.default_rng(seed)
@@ -538,19 +571,22 @@ def augment(iq, snr_db, jitter=0, seed=42, sample_rate=256_000, effects=None):
     return (x + sigma * (r.normal(size=len(x)) + 1j * r.normal(size=len(x)))).astype(np.complex64)
 
 
-def _synthetic_groups(config, length):
+def _synthetic_groups(config, length, include_test=True, reference_length=None, only_test=False):
     n = config["samples_per_class"]
     groups = {"train": [], "validation": [], "test": []}
     for label in CLASSES:
         for i in range(n):
             split = "train" if i < int(.6 * n) else "validation" if i < int(.8 * n) else "test"
+            if (split == "test" and not include_test) or (only_test and split != "test"):
+                continue
             seed = config["seed"] + 100_000 * CLASSES.index(label) + i * 127
-            groups[split].append({"iq": generate_signal(label, length, config["sample_rate"], seed), "label": CLASSES.index(label),
-                                  "sample_rate": config["sample_rate"], "group_id": f"synthetic-{label}-{seed}"})
+            groups[split].append({"iq": generate_signal(label, reference_length or length, config["sample_rate"], seed)[:length].copy(), "label": CLASSES.index(label),
+                                  "sample_rate": config["sample_rate"], "group_id": f"synthetic-{label}-{seed}",
+                                  "sample_start": 0, "source_window_samples": reference_length or length})
     return groups
 
 
-def _recording_groups(config, length):
+def _recording_groups(config, length, include_test=True, anchor_length=None, only_test=False):
     from .sigmf import read_recording
     items = config["recordings"]
     assignments, groups = {}, {"train": [], "validation": [], "test": []}
@@ -571,6 +607,7 @@ def _recording_groups(config, length):
     # One assignment per physical source group, across labels and every derived clip.
     assignments = _assign_groups(membership, classes, config["seed"], training_only)
     retained_samples = 0
+    anchor = anchor_length or length
     for entry in eligible:
         label = entry.get("label")
         if label not in classes or entry.get("verified") is False:
@@ -580,18 +617,23 @@ def _recording_groups(config, length):
             raise ValueError("Aufnahmepfad fehlt.")
         group_id = entry["group_id"]
         split = assignments[group_id]
+        if (split == "test" and not include_test) or (only_test and split != "test"):
+            continue
         # Bound memory and segments. Read only the beginning of long captures.
-        count = min(entry["sample_count"], 4_194_304, length * min(64, config["samples_per_class"]))
+        count = min(entry["sample_count"], 4_194_304, anchor * min(64, config["samples_per_class"]))
         # Budget before loading, independent of the number of files and segment size.
         if retained_samples + count > 16_777_216:
             raise ValueError("Aufnahmedatensatz überschreitet das 128-MiB-IQ-Budget. Weniger Aufnahmen/Segmente wählen.")
         x, metadata = read_recording(path, count=count)
         retained_samples += len(x)
         rate = float(metadata.get("global", {}).get("core:sample_rate", metadata.get("sample_rate", config["sample_rate"])))
-        for start in range(0, len(x) - length + 1, length):
-            groups[split].append({"iq": x[start:start + length].copy(), "label": classes.index(label), "sample_rate": rate, "group_id": group_id})
+        for start in range(0, len(x) - anchor + 1, anchor):
+            groups[split].append({"iq": x[start:start + length].copy(), "label": classes.index(label), "sample_rate": rate, "group_id": group_id,
+                                  "sample_start": start, "source_window_samples": anchor})
     for split, entries in groups.items():
         if training_only and split != "train":
+            continue
+        if (split == "test" and not include_test) or (only_test and split != "test"):
             continue
         for label in range(len(classes)):
             if not any(x["label"] == label for x in entries):
@@ -599,6 +641,33 @@ def _recording_groups(config, length):
         if len(entries) > MAX_SEGMENTS_PER_SPLIT:
             raise ValueError(f"Zu viele Aufnahmesegmente; pro Experiment maximal {MAX_SEGMENTS_PER_SPLIT} je Split.")
     return groups
+
+
+def _planned_split_groups(config):
+    if config["source"] == "synthetic":
+        groups = {"train": [], "validation": [], "test": []}
+        n = config["samples_per_class"]
+        for label in CLASSES:
+            for index in range(n):
+                split = "train" if index < int(.6 * n) else "validation" if index < int(.8 * n) else "test"
+                seed = config["seed"] + 100_000 * CLASSES.index(label) + index * 127
+                groups[split].append(f"synthetic-{label}-{seed}")
+        return {key: sorted(value) for key, value in groups.items()}
+    inventory = [_recording_inventory(entry) for entry in config["recordings"] if entry.get("verified") is not False]
+    membership = {}
+    for entry in inventory:
+        membership.setdefault(entry["group_id"], set()).add(entry["label"])
+    assignments = _assign_groups(membership, config["classes"], config["seed"])
+    return {split: sorted(group for group, assigned in assignments.items() if assigned == split)
+            for split in ("train", "validation", "test")}
+
+
+def _data_usage(groups):
+    return {split: {"segments": len(entries), "groups": len({entry["group_id"] for entry in entries}),
+                    "signal_seconds": float(sum(len(entry["iq"]) / entry["sample_rate"] for entry in entries)),
+                    "reference_window_seconds": float(sum(entry.get("source_window_samples", len(entry["iq"])) / entry["sample_rate"] for entry in entries)),
+                    "sample_rates": sorted({float(entry["sample_rate"]) for entry in entries})}
+            for split, entries in groups.items()}
 
 
 def _dataset(entries, topology, config, rng, snr=None, jitter=None):
@@ -785,8 +854,10 @@ def score_candidate(validation, validation_trials, metrics, num_classes=2, evalu
                        "training_seconds": raw["training"], "inference_device": metrics.get("inference_device")}}
 
 
-def run_experiment(config: dict, output_dir, progress=None) -> dict:
+def run_experiment(config: dict, output_dir, progress=None, *, _evaluate_test=True, _reference_length=None, _planned_groups=None) -> dict:
     c = _validate_config(config)
+    if c["optimization"]["enabled"]:
+        return _run_optimization(c, output_dir, progress)
     readiness = dataset_readiness(c)
     if not readiness["ready"]:
         raise ValueError(" ".join(readiness["errors"]))
@@ -799,9 +870,9 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
     topology["output_classes"] = list(classes)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    def emit(fraction, stage, message):
+    def emit(fraction, stage, message, **fields):
         if progress:
-            progress({"progress": float(fraction), "stage": stage, "message": message})
+            progress({"progress": float(fraction), "stage": stage, "message": message, **fields})
     emit(.01, "prepare", "Unabhängige Aufnahmegruppen und Vorverarbeitung vorbereiten")
     np.random.seed(c["seed"])
     neural = topology["family"] != "feature_lda"
@@ -840,7 +911,8 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
     for ci, (length, lr, batch_size) in enumerate(combos):
         emit(.04 + .9 * ci / len(combos), "prepare", f"Kombination {ci + 1}/{len(combos)}: Daten vorbereiten")
         rng = np.random.default_rng(c["seed"])
-        groups = _synthetic_groups(c, length) if c["source"] == "synthetic" else _recording_groups(c, length)
+        groups = (_synthetic_groups(c, length, include_test=_evaluate_test, reference_length=_reference_length) if c["source"] == "synthetic"
+                  else _recording_groups(c, length, include_test=_evaluate_test, anchor_length=_reference_length))
         if training_only and c["source"] == "synthetic":
             groups = {"train": groups["train"] + groups["validation"] + groups["test"], "validation": [], "test": []}
         segment_fingerprints = sorted(f"{entry['group_id']}|{entry['label']}|{entry['sample_rate']}|{hashlib.sha256(entry['iq'].tobytes()).hexdigest()}"
@@ -865,6 +937,8 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
         if not training_only:
             xval = (xval - mean) / scale
         preprocessing_seconds = time.perf_counter() - preprocessing_start
+        emit(.04 + .9 * ci / len(combos), "train", "Vorverarbeitung abgeschlossen; Training startet",
+             preprocessing_seconds=preprocessing_seconds, training_elapsed_seconds=0.)
         training_start = time.perf_counter()
         history = []
         if not neural:
@@ -897,7 +971,9 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                 sample_rss()
                 if not training_only and vl < best_loss:
                     best_loss, best_state = vl, {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-                emit(.04 + .9 * (ci + .6 * (epoch + 1) / c["epochs"]) / len(combos), "train", f"Kombination {ci + 1}/{len(combos)}, Epoche {epoch + 1}/{c['epochs']}")
+                emit(.04 + .9 * (ci + .6 * (epoch + 1) / c["epochs"]) / len(combos), "train", f"Kombination {ci + 1}/{len(combos)}, Epoche {epoch + 1}/{c['epochs']}",
+                     epoch=epoch + 1, epoch_count=c["epochs"], training_loss=float(np.mean(losses)), validation_loss=vl,
+                     training_elapsed_seconds=time.perf_counter() - training_start)
             if not training_only:
                 model.load_state_dict(best_state)
             model.eval()
@@ -923,6 +999,8 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                     "source": c["source"], "weights_file": "weights.pt" if neural else "weights.npz", "device_trained": device,
                     "inference_device": "cpu",
                     "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
+                    "test_evaluation_available": bool(_evaluate_test and not training_only),
+                    "evaluation_scope": "training_only" if training_only else "validation_and_test" if _evaluate_test else "validation_only",
                     "validation_status": "unvalidated" if training_only else "evaluated",
                     "dataset_sha256": dataset_sha256,
                     "feature_names": FEATURE_NAMES, "confidence_threshold": .6, "frequency_metadata_input": False, "include_clean_training_examples": c["include_clean"],
@@ -930,14 +1008,17 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
                                       "feature_sequence": {"resampled_samples": 2048, "frames": 16, "frame_samples": 128, "window": "Hamming"},
                                       "spectrogram": "32x32 log1p power, RF linear frequency", "timing_jitter_units": "RMS samples"},
                     "provenance": {"seed": c["seed"], "synthetic": c["source"] == "synthetic", "software": "SignalClassifier", "software_version": __version__, "schema_version": _SCHEMA},
-                    "split_groups": {key: sorted(set(x["group_id"] for x in entries)) for key, entries in groups.items()}}
+                    "split_groups": _planned_groups or {key: sorted(set(x["group_id"] for x in entries)) for key, entries in groups.items()},
+                    "reference_window_samples": _reference_length or length}
         _json(modeldir / "model.json", manifest)
         _json(modeldir / "topology.json", topology)
         model_bytes = sum(p.stat().st_size for p in modeldir.iterdir() if p.is_file())
         # Hyperparameter/model selection uses validation only; never best test score.
         candidate = {"candidate": ci + 1, "model_path": str(modeldir), "segment_length": length, "learning_rate": lr, "batch_size": batch_size,
+                     "epochs": c["epochs"],
                      "validation": validation, "training_seconds": training_seconds, "preprocessing_seconds": preprocessing_seconds,
                      "training_segments": len(groups["train"]), "training_examples": len(ytrain),
+                     "data_usage": _data_usage(groups), "dataset_sha256": dataset_sha256,
                      "model_bytes": model_bytes, "history": history, "parameter_count": int(sum(p.numel() for p in model.parameters())) if neural else 11 * len(classes),
                      "training_signal_seconds": float(sum(len(x["iq"]) / x["sample_rate"] for x in groups["train"]) * (2 if c["include_clean"] else 1))}
         validation_trials = []
@@ -950,7 +1031,7 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
         candidate["validation_trials"] = validation_trials
         candidates.append(candidate)
         candidate_evaluations = []
-        for snr_index, snr in enumerate([] if training_only else c["snr_db"]):
+        for snr_index, snr in enumerate([] if training_only or not _evaluate_test else c["snr_db"]):
             for jitter_index, jitter in enumerate(c["jitter"]):
                 grid_fraction = (snr_index * len(c["jitter"]) + jitter_index) / (len(c["snr_db"]) * len(c["jitter"]))
                 emit(.04 + .9 * (ci + .65 + .2 * grid_fraction) / len(combos), "evaluate", f"Unabhängiger Test: SNR {snr} dB, Jitter {jitter} Samples")
@@ -989,7 +1070,7 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
         emit(.04 + .9 * (ci + 1) / len(combos), "evaluate", f"Kombination {ci + 1}/{len(combos)} abgeschlossen")
     best_index = 0 if training_only else max(range(len(candidates)), key=lambda i: (candidates[i]["validation"]["macro_f1"], -candidates[i]["model_bytes"]))
     best = candidates[best_index]
-    if training_only:
+    if training_only or not _evaluate_test:
         summary = {key: None for key in ("accuracy", "balanced_accuracy", "macro_f1", "brier_score", "ece", "accuracy_ci95", "recall")}
         summary.update(count=0, confusion_matrix=[])
     else:
@@ -1023,14 +1104,18 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
     safe_config["recording_groups"] = [str(x.get("group_id") or x.get("id") or "") for x in c.get("recordings", [])]
     report = {"schema_version": 1, "source": c["source"], "synthetic": c["source"] == "synthetic", "config": safe_config,
               "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
+              "test_evaluation_available": bool(_evaluate_test and not training_only),
+              "evaluation_scope": "training_only" if training_only else "validation_and_test" if _evaluate_test else "validation_only",
+              "final_test_evaluations": int(_evaluate_test and not training_only),
               "validation_status": "unvalidated" if training_only else "evaluated", "readiness": readiness,
               "topology": topology, "model_path": best["model_path"], "metrics": summary, "hardware": hardware, "benchmark": benchmark,
               "score": best["score"], "score_definition": score_definition(),
               "trials": all_trials, "candidates": candidates, "selected_candidate": best_index + 1,
               "validation": best["validation"], "validation_trials": best["validation_trials"],
+              "data_usage": best["data_usage"], "reference_window_samples": _reference_length or best["segment_length"],
               "selection": "Eine vorab festgelegte Konfiguration; letzter Trainingsstand, keine Validierung oder Modellwahl" if training_only else "Höchstes Validierungs-Macro-F1; bei Gleichstand kleineres Modell",
               "confusion_matrix": summary["confusion_matrix"], "classes": classes, "history": best["history"],
-              "evaluation_policy": "training only; no validation, test split or predictive quality metrics" if training_only else "closed-set argmax without runtime abstention; runtime rejection/coverage require separate open-set validation",
+              "evaluation_policy": "training only; no validation, test split or predictive quality metrics" if training_only else "validation only; final test was not accessed" if not _evaluate_test else "closed-set argmax without runtime abstention; runtime rejection/coverage require separate open-set validation",
               "split_groups": load_model_metadata(best["model_path"])["split_groups"],
               "dataset_sha256": load_model_metadata(best["model_path"])["dataset_sha256"],
               "limitations": ["Synthetische Ergebnisse sind kein Nachweis mit realen Empfängern." if c["source"] == "synthetic" else "SNR bezeichnet zusätzlich injiziertes Rauschen relativ zur Gesamtleistung der Aufnahme; der ursprüngliche RF-SNR ist unbekannt.",
@@ -1043,9 +1128,209 @@ def run_experiment(config: dict, output_dir, progress=None) -> dict:
         report["limitations"] = ["Nur trainiert, unvalidiert: Keine unabhängigen Validierungs-/Testdaten und keine Aussage zu Genauigkeit, F1 oder Generalisierung.",
                                  "Rechenzeiten wurden an Trainingssegmenten gemessen. Trainingsverlust ist eine Optimierungsdiagnose und kein unabhängiger Qualitätsnachweis.",
                                  "Für eine unabhängige Auswertung getrennte Aufnahmesitzungen ergänzen und den Modus „Unabhängig auswerten“ wählen."] + readiness["warnings"]
+    elif not _evaluate_test:
+        report["limitations"].insert(0, "Suchversuch: nur Training und Validierung. Testdaten wurden weder gelesen noch ausgewertet; Finaltestmetriken bleiben unbekannt.")
     _json(out / "report.json", report)
     _json(Path(best["model_path"]) / "report.json", report)
     emit(1., "complete", "Modell trainiert und gespeichert; unabhängige Auswertung steht aus" if training_only else "Experiment ausgewertet; Modell und Konfiguration gespeichert")
+    return report
+
+
+class _OptimizationTimeout(Exception):
+    """Cooperative search-budget stop; deliberately separate from user cancel."""
+
+
+def _objective_value(report, objective):
+    value = report.get("score", {}).get("total") if objective == "score" else report.get("validation", {}).get(objective)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+        raise ValueError(f"Validierungsziel {objective} ist für diesen Suchversuch nicht verfügbar.")
+    return float(value)
+
+
+def _evaluate_optimized_test(report, config, reference_length, progress=None):
+    """Access final test IQ only after search has fixed the winning model."""
+    started = time.perf_counter()
+    length = int(report["config"]["segment_length"])
+    groups = (_synthetic_groups(config, length, reference_length=reference_length, only_test=True)
+              if config["source"] == "synthetic" else _recording_groups(config, length, anchor_length=reference_length, only_test=True))
+    entries = groups["test"]
+    manifest, predict = _load_inference(report["model_path"])
+    topology = report["topology"]
+    rng = np.random.default_rng(config["seed"] + 991_337)
+    trials, labels, probabilities = [], [], []
+    for snr in config["snr_db"]:
+        for jitter in config["jitter"]:
+            if progress:
+                progress({"progress": .97, "stage": "final_test", "message": f"Gewähltes Modell einmalig prüfen: SNR {snr} dB, Jitter {jitter}",
+                          "final_test_evaluations": 1, "selected_candidate": report["selected_candidate"]})
+            x, y = _dataset(entries, topology, config, rng, snr, jitter)
+            prob = predict(x)
+            trial = {"candidate": report["selected_candidate"], "segment_length": length, "snr_db": snr, "jitter": jitter,
+                     **_metrics(y, prob, report["classes"])}
+            trials.append(trial)
+            labels.append(y)
+            probabilities.append(prob)
+    quality = _metrics(np.concatenate(labels), np.concatenate(probabilities), report["classes"])
+    report["metrics"].update(quality)
+    zero_jitter = [trial for trial in trials if trial["jitter"] == min(config["jitter"]) and trial["balanced_accuracy"] >= .9]
+    report["metrics"]["sensitivity_snr90_db"] = min(trial["snr_db"] for trial in zero_jitter) if zero_jitter else None
+    report.update(trials=trials, confusion_matrix=quality["confusion_matrix"], test_evaluation_available=True,
+                  evaluation_scope="validation_and_test", final_test_evaluations=1,
+                  evaluation_policy="Search objective uses validation only. This final test was accessed once after fixing the winner.")
+    report["data_usage"]["test"] = _data_usage(groups)["test"]
+    report["test_dataset_sha256"] = hashlib.sha256("\n".join(sorted(
+        f"{entry['group_id']}|{entry['label']}|{entry['sample_rate']}|{hashlib.sha256(entry['iq'].tobytes()).hexdigest()}" for entry in entries)).encode()).hexdigest()
+    report["limitations"] = [text for text in report["limitations"] if not text.startswith("Suchversuch:")]
+    manifest.update(test_evaluation_available=True, evaluation_scope="validation_and_test", final_test_evaluations=1)
+    _json(Path(report["model_path"]) / "model.json", manifest)
+    return time.perf_counter() - started
+
+
+def _run_optimization(config, output_dir, progress=None):
+    readiness = _optimization_readiness(config)
+    if not readiness["ready"]:
+        raise ValueError(" ".join(readiness["errors"]))
+    settings = normalize_optimization(config)
+    settings["search_space"] = readiness["optimization"]["search_space"]
+    topology = validate_topology(config.get("topology") or {"id": config.get("topology_id", "feature-lda")})
+    plan = sample_configurations(settings, config["seed"], family=topology["family"])
+    reference_length = max(settings["search_space"]["segment_lengths"])
+    split_groups = _planned_split_groups(config)
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    deadline = started + settings["timeout_seconds"] if settings["timeout_seconds"] else None
+    state = {**settings, "schema_version": 1, "status": "running", "seed": config["seed"], "topology_id": topology["id"],
+             "reference_window_samples": reference_length, "split_groups": split_groups,
+             "excluded_segment_lengths": readiness["optimization"]["excluded_segment_lengths"],
+             "planned_trials": len(plan), "trials": [], "best_trial": None, "best_config": None,
+             "completed_trials": 0, "failed_trials": 0, "timed_out_trials": 0,
+             "total_training_seconds": 0., "total_preprocessing_seconds": 0., "elapsed_seconds": 0.,
+             "stop_reason": None, "test_evaluations": 0, "objective_version": 1,
+             "score_definition": score_definition(),
+             "effective_parameters": ["segment_length"] if topology["family"] == "feature_lda" else ["segment_length", "learning_rate", "batch_size", "epochs"],
+             "budget_scope": "Sequential search trials, including preprocessing, validation and CPU timing; final test follows selection.",
+             "timeout_enforcement": "Cooperative at progress/epoch/trial boundaries; running native operations are not interrupted.",
+             "cost_accounting": "Completed-trial timings plus last observed partial timings; unobserved interrupted work is only included in elapsed_seconds.",
+             "fairness": "Same group split and validation SNR/jitter grid. Synthetic sources share a max-length reference and prefix crops; real sources share max-length window anchors."}
+    def save_state():
+        state["elapsed_seconds"] = time.perf_counter() - started
+        state["completed_trials"] = sum(trial["status"] == "completed" for trial in state["trials"])
+        state["failed_trials"] = sum(trial["status"] == "failed" for trial in state["trials"])
+        state["timed_out_trials"] = sum(trial["status"] == "timed_out" for trial in state["trials"])
+        def cost(trial, metric, partial):
+            measured = trial.get("metrics", {}).get(metric)
+            return float(measured if measured is not None else trial.get(partial, 0.))
+        state["total_training_seconds"] = sum(cost(trial, "training_seconds", "partial_training_seconds") for trial in state["trials"])
+        state["total_preprocessing_seconds"] = sum(cost(trial, "preprocessing_seconds", "partial_preprocessing_seconds") for trial in state["trials"])
+        temporary = output / "optimization.json.tmp"
+        _json(temporary, state)
+        temporary.replace(output / "optimization.json")
+    def emit(update):
+        if progress:
+            progress(update)
+    save_state()
+    completed = []
+    for index, parameters in enumerate(plan, 1):
+        if deadline is not None and time.perf_counter() >= deadline:
+            state["stop_reason"] = "timeout"
+            break
+        trial_started = time.perf_counter()
+        record = {"trial": index, "status": "running", "config": dict(parameters), "objective_value": None,
+                  "validation": None, "score": None, "metrics": {}, "model_path": None, "elapsed_seconds": 0., "epoch_history": []}
+        state["trials"].append(record)
+        state["current_trial"] = index
+        save_state()
+        trial_config = {**config, **parameters, "optimization": {"enabled": False}, "segment_lengths": [parameters["segment_length"]],
+                        "learning_rates": [parameters["learning_rate"]], "batch_sizes": [parameters["batch_size"]]}
+        trial_config.pop("topologies", None)
+        trial_config.pop("topology_ids", None)
+        def trial_progress(update):
+            if "epoch" in update:
+                point = {key: update[key] for key in ("epoch", "epoch_count", "training_loss", "validation_loss") if key in update}
+                record["epoch_history"].append(point)
+            record["partial_training_seconds"] = update.get("training_elapsed_seconds", record.get("partial_training_seconds", 0.))
+            record["partial_preprocessing_seconds"] = update.get("preprocessing_seconds", record.get("partial_preprocessing_seconds", 0.))
+            emit({**update, "progress": .92 * ((index - 1) + update.get("progress", 0)) / len(plan),
+                  "stage": "optimize", "optimization_stage": update.get("stage"), "optimization_trial": index,
+                  "optimization_max_trials": settings["max_trials"], "optimization_config": dict(parameters)})
+            if deadline is not None and time.perf_counter() >= deadline and update.get("progress", 0) < 1:
+                raise _OptimizationTimeout("Zeitbudget der automatischen Suche erreicht.")
+        try:
+            emit({"progress": .92 * (index - 1) / len(plan), "stage": "optimize", "optimization_trial": index,
+                  "optimization_max_trials": settings["max_trials"], "optimization_config": dict(parameters),
+                  "message": f"Random Search: Versuch {index}/{len(plan)} startet"})
+            subreport = run_experiment(trial_config, output / f"trial-{index:03d}", trial_progress,
+                                       _evaluate_test=False, _reference_length=reference_length, _planned_groups=split_groups)
+            objective = _objective_value(subreport, settings["objective"])
+            record.update(status="completed", objective_value=objective, validation=subreport["validation"],
+                          score=subreport["score"], metrics=subreport["metrics"], model_path=subreport["model_path"], report=subreport,
+                          elapsed_seconds=time.perf_counter() - trial_started)
+            completed.append(record)
+            best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"]))
+            state.update(best_trial=best["trial"], best_config=best["config"])
+            save_state()
+            emit({"progress": .92 * index / len(plan), "stage": "optimize", "optimization_trial": index,
+                  "optimization_max_trials": settings["max_trials"], "optimization_config": dict(parameters),
+                  "validation": record["validation"], "score": record["score"], "metrics": record["metrics"],
+                  "objective_value": objective, "message": f"Random Search: Versuch {index} abgeschlossen"})
+        except _OptimizationTimeout as exc:
+            record.update(status="timed_out", error=str(exc), elapsed_seconds=time.perf_counter() - trial_started)
+            state["stop_reason"] = "timeout"
+            save_state()
+            break
+        except (ValueError, RuntimeError, OSError, ImportError, MemoryError) as exc:
+            record.update(status="failed", error=str(exc), elapsed_seconds=time.perf_counter() - trial_started)
+            save_state()
+            emit({"progress": .92 * index / len(plan), "stage": "optimize", "optimization_trial": index,
+                  "optimization_config": dict(parameters), "optimization_status": "failed", "error": str(exc),
+                  "message": f"Random Search: Versuch {index} fehlgeschlagen"})
+        except BaseException as exc:
+            record.update(status="interrupted", elapsed_seconds=time.perf_counter() - trial_started)
+            state["status"] = "interrupted"
+            state["stop_reason"] = "user_cancellation" if "Cancel" in type(exc).__name__ else "interrupted"
+            state["interruption_reason"] = str(exc) or type(exc).__name__
+            save_state()
+            raise
+    state["stop_reason"] = state["stop_reason"] or ("search_space_exhausted" if len(plan) < settings["max_trials"] else "max_trials")
+    state["search_elapsed_seconds"] = time.perf_counter() - started
+    if not completed:
+        state["status"] = "failed"
+        if state["stop_reason"] != "timeout":
+            state["stop_reason"] = "all_trials_failed"
+        save_state()
+        raise ValueError("Automatische Suche lieferte keinen abgeschlossenen validierten Versuch. Zeitbudget erhöhen oder Datensatz/Suchraum prüfen; Teilberichte stehen in optimization.json.")
+    best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"]))
+    report = copy.deepcopy(best["report"])
+    report["candidates"] = [{**trial["report"]["candidates"][0], "candidate": trial["trial"], "optimization_trial": trial["trial"]} for trial in completed]
+    report["selected_candidate"] = best["trial"]
+    report["selection"] = f"Automatische seeded Random Search, Validierungsziel {settings['objective']}; bei Gleichstand kleinere Modelldateien. Testdaten bestimmen die Wahl nicht."
+    report["selection_objective"] = settings["objective"]
+    winner_config = {**config, **best["config"], "optimization": {"enabled": False}, "segment_lengths": [best["config"]["segment_length"]],
+                     "learning_rates": [best["config"]["learning_rate"]], "batch_sizes": [best["config"]["batch_size"]]}
+    report["config"]["optimization"] = copy.deepcopy(settings)
+    report["config"].update(best["config"])
+    try:
+        final_seconds = _evaluate_optimized_test(report, winner_config, reference_length, progress)
+    except BaseException as exc:
+        state["status"] = "interrupted"
+        state["final_test_status"] = "interrupted"
+        state["search_stop_reason"] = state["stop_reason"]
+        state["stop_reason"] = "user_cancellation" if "Cancel" in type(exc).__name__ else "interrupted"
+        state["interruption_reason"] = str(exc) or type(exc).__name__
+        save_state()
+        raise
+    state.update(status="completed", best_trial=best["trial"], best_config=best["config"], test_evaluations=1, final_test_seconds=final_seconds)
+    save_state()
+    report["optimization"] = copy.deepcopy(state)
+    report["metrics"]["search_training_seconds"] = state["total_training_seconds"]
+    report["metrics"]["search_preprocessing_seconds"] = state["total_preprocessing_seconds"]
+    report["metrics"]["search_elapsed_seconds"] = state["search_elapsed_seconds"]
+    _json(output / "report.json", report)
+    _json(Path(report["model_path"]) / "report.json", report)
+    emit({"progress": 1., "stage": "complete", "optimization_trial": best["trial"],
+          "optimization_best_config": best["config"], "optimization_stop_reason": state["stop_reason"],
+          "message": "Automatische Suche abgeschlossen; gewähltes Modell einmalig auf Finaltest geprüft"})
     return report
 
 
@@ -1097,8 +1382,10 @@ def run_comparison(config: dict, output_dir, progress=None) -> dict:
                                                                              evaluation_available=bool(subreport["evaluation_available"])),
                         "score_rank": None, "accuracy_rank": None,
                         "report": subreport})
+    selection_objective = c["optimization"]["objective"] if c["optimization"]["enabled"] else "macro_f1"
     chosen = 0 if training_only else max(range(len(entries)),
-                                         key=lambda i: (entries[i]["validation"]["macro_f1"], -entries[i]["metrics"]["model_bytes"]))
+                                         key=lambda i: (entries[i]["score"]["total"] if selection_objective == "score" else entries[i]["validation"][selection_objective],
+                                                        -entries[i]["metrics"]["model_bytes"]))
     report = dict(entries[chosen]["report"])
     def valid_accuracy(index):
         validation = entries[index]["validation"]
@@ -1125,15 +1412,23 @@ def run_comparison(config: dict, output_dir, progress=None) -> dict:
                   rankings={"score": [entries[index]["topology_id"] for index in score_order],
                             "accuracy": [entries[index]["topology_id"] for index in accuracy_order]},
                   recommended_topology_ids=recommendations,
+                  selection_objective=selection_objective,
                   selected_topology_id=None if training_only else entries[chosen]["topology_id"],
                   selected_comparison_index=None if training_only else chosen,
                   selection="Keine Qualitätsrangfolge ohne Validierung; erstes Modell nur als Standardreferenz gespeichert" if training_only
-                            else "Höchstes Validierungs-Macro-F1 der gewählten Kandidaten; bei Gleichstand kleinere Modelldateien. Testwerte bestimmen die Auswahl nicht.")
+                            else f"Höchstes Validierungsziel {selection_objective} der gewählten Kandidaten; bei Gleichstand kleinere Modelldateien. Testwerte bestimmen die Auswahl nicht.")
     report["comparison_policy"] = {"sequential": True, "seed": c["seed"], "same_recording_groups": True,
                                    "same_augmentation_configuration": True, "selection_uses_test_metrics": False,
                                    "quality_ranking_available": bool(score_order),
+                                   "selection_objective": selection_objective,
                                    "accuracy_ranking_source": "validation_balanced_accuracy",
                                    "recommendation_source": "composite_validation_score_among_measured_cpu_p95_rtf_le_1"}
+    if c["optimization"]["enabled"]:
+        optimizations = [entry["report"]["optimization"] for entry in entries]
+        report["optimization_summary"] = {"scope": "all_topologies", "method": "random", "objective": selection_objective,
+                                          "topologies": len(optimizations),
+                                          **{key: sum(item.get(key, 0) for item in optimizations)
+                                             for key in ("total_training_seconds", "total_preprocessing_seconds", "elapsed_seconds", "completed_trials", "failed_trials", "timed_out_trials", "test_evaluations")}}
     _json(output / "report.json", report)
     if progress:
         progress({"progress": 1., "stage": "complete", "topology_count": total,

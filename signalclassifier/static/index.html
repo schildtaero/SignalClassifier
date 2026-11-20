@@ -1110,6 +1110,117 @@
                       ><input name="jitter" value="0, 0.05" required
                     /></label>
                   </div>
+                  <details
+                    class="advanced-settings optimization-settings"
+                    id="optimization-settings"
+                  >
+                    <summary>Automatische Hyperparameteroptimierung</summary>
+                    <div class="optimization-intro">
+                      <label class="checkbox"
+                        ><input
+                          type="checkbox"
+                          id="optimization-enabled"
+                          name="optimization_enabled"
+                        />Automatische Suche aktivieren</label
+                      >
+                      <p class="field-help">
+                        Reproduzierbare Random Search mit demselben Seed. Pro
+                        Topologie werden Einstellungen automatisch gezogen und
+                        anhand der Validierung bewertet. Die Lernrate wird
+                        logarithmisch gleichverteilt gezogen; nur der Gewinner
+                        wird anschließend am Finaltest geprüft.
+                      </p>
+                    </div>
+                    <fieldset id="optimization-fields" disabled>
+                      <label
+                        >Optimierungsziel<select name="optimization_objective">
+                          <option value="score">
+                            Gesamtscore · Validierung, Robustheit und Zeit
+                          </option>
+                          <option value="macro_f1">
+                            Macro-F1 der Validierung
+                          </option>
+                          <option value="balanced_accuracy">
+                            Ausgewogene Genauigkeit der Validierung
+                          </option>
+                        </select></label
+                      >
+                      <div class="form-pair">
+                        <label
+                          >Maximale Trials <em>je Topologie</em
+                          ><input
+                            name="optimization_max_trials"
+                            type="number"
+                            min="1"
+                            max="50"
+                            step="1"
+                            value="12" /></label
+                        ><label
+                          >Zeitbudget <em>s je Topologie; 0 = offen</em
+                          ><input
+                            name="optimization_timeout_seconds"
+                            type="number"
+                            min="0"
+                            max="86400"
+                            step="any"
+                            value="300"
+                        /></label>
+                      </div>
+                      <label
+                        >Segmentlängen <em>Samples, bis zu 8 Werte</em
+                        ><input
+                          name="optimization_segment_lengths"
+                          value="1024, 2048, 4096"
+                      /></label>
+                      <div class="form-pair">
+                        <label
+                          >Lernrate von<input
+                            name="optimization_learning_rate_min"
+                            type="number"
+                            min="0.00001"
+                            max="0.1"
+                            step="any"
+                            value="0.00001" /></label
+                        ><label
+                          >Lernrate bis<input
+                            name="optimization_learning_rate_max"
+                            type="number"
+                            min="0.00001"
+                            max="0.1"
+                            step="any"
+                            value="0.01"
+                        /></label>
+                      </div>
+                      <div class="form-pair">
+                        <label
+                          >Batchgrößen <em>Komma getrennt</em
+                          ><input
+                            name="optimization_batch_sizes"
+                            value="16, 32, 64" /></label
+                        ><label
+                          >Epochen <em>Komma getrennt</em
+                          ><input name="optimization_epochs" value="5, 10, 20"
+                        /></label>
+                      </div>
+                    </fieldset>
+                    <p
+                      class="field-help advanced-note"
+                      id="optimization-budget-note"
+                    >
+                      12 Trials und 300 Sekunden Zeitbudget je Topologie. Eine
+                      laufende Rechenstufe kann über das Budget hinausreichen;
+                      beendet wird kooperativ an einem sicheren Prüfpunkt.
+                    </p>
+                    <p
+                      class="notice error optimization-incompatible"
+                      id="optimization-incompatible"
+                      hidden
+                    >
+                      Automatische HPO benötigt eine unabhängige Bewertung. „Nur
+                      trainieren“ unterstützt keine Hyperparameterauswahl anhand
+                      der Validierung.
+                    </p>
+                  </details>
                   <details class="advanced-settings">
                     <summary>Training & Rechenressourcen</summary>
                     <div class="form-pair">
@@ -1246,6 +1357,20 @@
                       /></label>
                     </div>
                   </details>
+                  <label
+                    >Versuchsbeschreibung / Messaufbau<textarea
+                      name="experiment_notes"
+                      rows="4"
+                      maxlength="12000"
+                      placeholder="Ziel oder Hypothese, Empfänger und Antenne, Signalquelle, Bedingungen und Beobachtungen …"
+                    ></textarea>
+                  </label>
+                  <p class="field-help">
+                    Optionaler Kontext für das Versuchsprotokoll und einen
+                    späteren PDF-Bericht. Aufnahme-, Software- und
+                    Hardwaremetadaten werden zusätzlich automatisch
+                    dokumentiert.
+                  </p>
                   <p class="field-help">
                     SNR und Jitter prüfen die Robustheit. Ergebnisse
                     synthetischer Daten ersetzen keinen unabhängigen RF-Test.
@@ -1301,15 +1426,36 @@
                     <span class="panel-kicker">AUSWERTUNG</span>
                     <h2 id="experiment-result-title">Ergebnisse & Vergleich</h2>
                   </div>
-                  <a
-                    id="experiment-download"
-                    class="button button-quiet"
-                    hidden
-                    download
-                    ><svg class="icon"><use href="#i-download" /></svg
-                    >Bericht</a
-                  >
+                  <div class="experiment-export-actions">
+                    <a
+                      id="experiment-download"
+                      class="button button-quiet"
+                      hidden
+                      download
+                      ><svg class="icon"><use href="#i-download" /></svg
+                      >Bericht</a
+                    >
+                    <a
+                      id="experiment-report-bundle"
+                      class="button button-primary"
+                      hidden
+                      download
+                      aria-describedby="experiment-report-bundle-note"
+                      ><svg class="icon"><use href="#i-download" /></svg
+                      >Berichtsdaten exportieren</a
+                    >
+                  </div>
                 </div>
+                <p
+                  id="experiment-report-bundle-note"
+                  class="panel-note experiment-report-bundle-note"
+                  hidden
+                >
+                  ZIP mit JSON, Markdown, CSV, SVG, Logs, Herkunft und Hardware.
+                  In ChatGPT hochladen, um später einen PDF-Bericht zu
+                  erstellen. Auch laufende oder abgebrochene Versuche lassen
+                  sich mit ihrem verfügbaren Zwischenstand exportieren.
+                </p>
                 <div class="empty-state" id="experiment-result-empty">
                   <svg class="icon"><use href="#i-chart" /></svg>
                   <h3>Ein Versuch macht den Unterschied</h3>
