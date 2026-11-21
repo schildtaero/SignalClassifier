@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 20. November 2026, SignalClassifier 0.4.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 21. November 2026, SignalClassifier 0.4.1, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 149 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung und Telemetrie. Python-Wheel 0.4.0 gebaut und enthaltene Oberfläche sowie Leaflet-Dateien geprüft.
+- 153 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung und Telemetrie. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,13 @@ Prüfstand: 20. November 2026, SignalClassifier 0.4.0, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.4.1
+
+- Konkrete Fehlergruppen, Statuszahlen, Suchbudget und Teilberichtpfad bleiben bei einer Suche ohne validierten Abschluss in `failure_summary` und der Fehlermeldung erhalten. Hinweise zum Erhöhen des Budgets erscheinen nur bei tatsächlichem Zeitabbruch. Die letzte beobachtete Trialphase und Meldung werden gespeichert.
+- Vier neue Regressionstests prüfen vollständig fehlgeschlagene Berichtsübergaben, erneutes Einlesen eines zunächst nicht erreichbaren Completion-Berichts, Abbruch ohne vollständigen Trial und den Nested-Fall mit gemeinsamer PID: zwölf rohe Timeoutstatus werden korrekt als ein begonnener Abbruch und elf nicht gestartete Vorschläge erklärt. Bestehende Originalfehler-/Abbruchtests wurden erweitert.
+- Ein gültiger Abschlussbericht kann nach einem vorübergehenden Lesefehler erneut aus dem endgültigen Workerresultat übernommen werden. Endgültig defekte Berichte sind fehlgeschlagene Trials; sie erzeugen keinen Gewinner. Der Finaltest wird weiterhin genau einmal nach der Gewinnerwahl ausgeführt.
+- Gesamtsuite: 153 Tests bestanden (einschließlich CPU-PyTorch, echter Spawn-Worker und API-Pfade); für die API-/Loopback-Tests wurde in der verwalteten Entwicklungsumgebung Netzwerkzugriff freigegeben. JavaScript-Logik-/Syntaxprüfungen, Shell-Syntax und `git diff --check` bestanden. Die HPO-Zeitbudgetsemantik wurde nicht geändert; ein zu knappes Budget bleibt ein legitimer Abbruchgrund.
 
 ## Ergänzungen in 0.4.0
 

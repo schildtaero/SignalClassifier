@@ -1,8 +1,8 @@
-# SignalClassifier 0.4.0
+# SignalClassifier 0.4.1
 
 Lokales SDR-Labor für **Linux und Windows mit WSL2**: Breitband-IQ aufnehmen, belegte Kanäle selektiv speichern, Daten labeln und reproduzierbare Klassifikationsexperimente durchführen. Die deutsche Weboberfläche übernimmt die dunkle/cyanfarbene technische Gestaltung und den hellen Modus aus [KrakenDF](https://github.com/schildtaero/krakensdr), mit lokal ausgelieferten Assets.
 
-Zentrales Repository: [schildtaero/SignalClassifier](https://github.com/schildtaero/SignalClassifier). Version 0.4.0 ergänzt begrenzte parallele Experimentworker, eine effizientere Trainingsschleife und gemessene CPU-/GPU-Telemetrie. Automatische Hyperparameteroptimierung, Berichtsdatenexport, Sammelauswahl, Bereinigung kurzer Aufnahmen, Batchlabels, Mehrmodellvergleich und Live-Stichproben sind enthalten. Eine Abnahme an physischem PlutoSDR/RSP1A, der Windows-/WSL-Installation und einer CUDA-GPU steht aus. Synthetische Ergebnisse sind ausdrücklich gekennzeichnet.
+Zentrales Repository: [schildtaero/SignalClassifier](https://github.com/schildtaero/SignalClassifier). Version 0.4.1 zeigt konkrete Suchfehler mit Statuszahlen und Budgethinweisen an und übernimmt gültige Teilberichte nach vorübergehenden Lesefehlern erneut. Die in 0.4.0 eingeführten begrenzten parallelen Experimentworker, die effizientere Trainingsschleife und CPU-/GPU-Telemetrie bleiben enthalten. Automatische Hyperparameteroptimierung, Berichtsdatenexport, Sammelauswahl, Bereinigung kurzer Aufnahmen, Batchlabels, Mehrmodellvergleich und Live-Stichproben sind enthalten. Eine Abnahme an physischem PlutoSDR/RSP1A, der Windows-/WSL-Installation und einer CUDA-GPU steht aus. Synthetische Ergebnisse sind ausdrücklich gekennzeichnet.
 
 ## Start
 

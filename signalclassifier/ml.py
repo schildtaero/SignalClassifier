@@ -1337,6 +1337,52 @@ def _objective_value(report, objective):
     return float(value)
 
 
+def _optimization_failure_summary(state, report_path):
+    """Expose recorded trial causes instead of replacing them with budget advice."""
+    counts = {status: sum(trial["status"] == status for trial in state["trials"])
+              for status in ("completed", "failed", "timed_out", "skipped", "interrupted", "cancelled")}
+    def not_started(trial):
+        # Nested jobs retain their parent PID even when their shared deadline
+        # expires before entry. Keep raw statuses, but explain actual starts.
+        return trial["status"] == "skipped" or (trial["status"] == "timed_out" and trial.get("error") in (
+            "Zeitbudget vor Start erreicht", "Zeitbudget vor Jobstart erreicht"))
+    not_started_trials = sum(not_started(trial) for trial in state["trials"])
+    started_timed_out_trials = sum(trial["status"] == "timed_out" and not not_started(trial) for trial in state["trials"])
+    errors = []
+    for trial in state["trials"]:
+        if trial["status"] == "completed":
+            continue
+        error = trial.get("error") or trial["status"]
+        group = next((item for item in errors if item["status"] == trial["status"] and item["error"] == error), None)
+        if group is None:
+            group = {"status": trial["status"], "error": error, "trials": []}
+            errors.append(group)
+        group["trials"].append(trial["trial"])
+    budget = state["timeout_seconds"]
+    message = (f"Automatische Suche lieferte keinen abgeschlossenen validierten Versuch für {state['topology_id']}. "
+               f"{counts['failed']} fehlgeschlagen, {started_timed_out_trials} nach Start mit Zeitabbruch, "
+               f"{not_started_trials} nicht gestartet.")
+    if state["stop_reason"] == "timeout":
+        message += (f" Suchzeitbudget: {budget:g} s je Topologie einschließlich Vorverarbeitung, "
+                    "Warteschlange und CPU-Benchmarkpausen. Zeitbudget erhöhen oder 0 für kein Suchzeitlimit setzen.")
+    for item in errors[:3]:
+        # Full errors remain in the structured summary and trial records.
+        detail = " ".join(str(item["error"]).split())
+        if len(detail) > 400:
+            detail = detail[:397] + "..."
+        numbers = ", ".join(map(str, item["trials"][:5]))
+        if len(item["trials"]) > 5:
+            numbers += ", …"
+        message += f" Versuch(e) {numbers} [{item['status']}]: {detail}."
+    if state["stop_reason"] != "timeout":
+        message += " Die protokollierten Versuchsfehler prüfen."
+    message += f" Teilberichte: {report_path}."
+    return {"topology_id": state["topology_id"], "stop_reason": state["stop_reason"],
+            "trial_counts": counts, "timeout_seconds": budget, "errors": errors,
+            "started_timed_out_trials": started_timed_out_trials, "not_started_trials": not_started_trials,
+            "report_path": str(report_path), "message": message}
+
+
 def _evaluate_optimized_test(report, config, reference_length, progress=None):
     """Access final test IQ only after search has fixed the winning model."""
     started = time.perf_counter()
@@ -1440,7 +1486,6 @@ def _run_optimization(config, output_dir, progress=None):
         position = outcome["index"]
         if position in finalized:
             return
-        finalized.add(position)
         record = state["trials"][position]
         status = outcome["status"]
         record.update(status=status, elapsed_seconds=outcome.get("elapsed_seconds", 0.), pid=outcome.get("pid"), device=outcome.get("device"))
@@ -1455,13 +1500,28 @@ def _run_optimization(config, output_dir, progress=None):
             if subreport is None:
                 path = Path(outcome.get("report_path") or Path(jobs[position]["output_dir"]) / "report.json")
                 subreport = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(subreport, dict):
+                raise ValueError("Versuchsbericht ist kein JSON-Objekt.")
+            for field in ("config", "validation", "score", "metrics"):
+                if not isinstance(subreport.get(field), dict):
+                    raise ValueError(f"Versuchsbericht enthält kein gültiges {field}-Objekt.")
+            model_bytes = subreport["metrics"].get("model_bytes")
+            if isinstance(model_bytes, bool) or not isinstance(model_bytes, (int, float)) or not np.isfinite(model_bytes) or model_bytes < 0:
+                raise ValueError("Versuchsbericht enthält keine gültige Modellgröße.")
+            if not isinstance(subreport.get("model_path"), str) or not subreport["model_path"]:
+                raise ValueError("Versuchsbericht enthält keinen Modellpfad.")
+            candidates = subreport.get("candidates")
+            if not isinstance(candidates, list) or not candidates or not isinstance(candidates[0], dict):
+                raise ValueError("Versuchsbericht enthält keinen gültigen Modellkandidaten.")
             objective = _objective_value(subreport, settings["objective"])
             record.update(status="completed", objective_value=objective, validation=subreport["validation"],
                           score=subreport["score"], metrics=subreport["metrics"], model_path=subreport["model_path"], report=subreport,
                           training_execution=subreport.get("training_execution"), phase_timings=subreport.get("phase_timings"))
+            record.pop("error", None)
             completed.append(record)
             best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"], -trial["trial"]))
             state.update(best_trial=best["trial"], best_config=best["config"])
+        finalized.add(position)
         save_state()
         emit({"progress": .92 * fraction, "stage": "optimize", "optimization_trial": record["trial"],
               "optimization_max_trials": settings["max_trials"], "optimization_config": record["config"],
@@ -1480,7 +1540,7 @@ def _run_optimization(config, output_dir, progress=None):
         if result is not None:
             try:
                 finish_trial(result, fraction)
-            except (ValueError, OSError, KeyError) as exc:
+            except (ValueError, OSError, KeyError, TypeError) as exc:
                 record = state["trials"][result["index"]]
                 record.update(status="failed", error=str(exc))
                 save_state()
@@ -1489,6 +1549,11 @@ def _run_optimization(config, output_dir, progress=None):
             state["current_trial"] = trial_number
             if record["status"] == "queued":
                 record["status"] = "running"
+            if result is None:
+                if isinstance(update.get("stage"), str):
+                    record["last_stage"] = update["stage"]
+                if isinstance(update.get("message"), str):
+                    record["last_message"] = update["message"]
             if "epoch" in update:
                 point = {key: update[key] for key in ("epoch", "epoch_count", "training_loss", "validation_loss") if key in update}
                 record["epoch_history"].append(point)
@@ -1510,7 +1575,13 @@ def _run_optimization(config, output_dir, progress=None):
         state["execution"] = batch["execution"]
         for outcome in batch["outcomes"]:
             if outcome["index"] not in finalized:
-                finish_trial(outcome, 1.)
+                try:
+                    finish_trial(outcome, 1.)
+                except (ValueError, OSError, KeyError, TypeError) as exc:
+                    record = state["trials"][outcome["index"]]
+                    record.update(status="failed", error=str(exc))
+                    finalized.add(outcome["index"])
+                    save_state()
     except BaseException as exc:
         for record in state["trials"]:
             if record["status"] in ("queued", "running"):
@@ -1526,8 +1597,9 @@ def _run_optimization(config, output_dir, progress=None):
         state["status"] = "failed"
         if state["stop_reason"] != "timeout":
             state["stop_reason"] = "all_trials_failed"
+        state["failure_summary"] = _optimization_failure_summary(state, output / "optimization.json")
         save_state()
-        raise ValueError("Automatische Suche lieferte keinen abgeschlossenen validierten Versuch. Zeitbudget erhöhen oder Datensatz/Suchraum prüfen; Teilberichte stehen in optimization.json.")
+        raise ValueError(state["failure_summary"]["message"])
     best = max(completed, key=lambda trial: (trial["objective_value"], -trial["metrics"]["model_bytes"], -trial["trial"]))
     report = copy.deepcopy(best["report"])
     report["candidates"] = [{**trial["report"]["candidates"][0], "candidate": trial["trial"], "optimization_trial": trial["trial"]} for trial in completed]

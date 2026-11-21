@@ -702,15 +702,159 @@ class AutomaticOptimizationTests(unittest.TestCase):
 
     def test_all_failed_trials_leave_partial_report_without_fabricated_winner(self):
         config = ml._validate_config(self.config())
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=ValueError("bad trial")), \
+        config["optimization"]["timeout_seconds"] = 300.
+        def run(_config, _out, progress=None, **_kwargs):
+            progress({"progress": .5, "stage": "train", "message": "Trainingsdaten an das Modell übergeben"})
+            raise ValueError("bad trial: incompatible input dimensions")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "run_experiment", side_effect=run), \
              mock.patch.object(ml, "execute_jobs", side_effect=inline_execution), \
              mock.patch.object(ml, "_evaluate_optimized_test") as final:
-            with self.assertRaisesRegex(ValueError, "keinen abgeschlossenen"):
+            with self.assertRaisesRegex(ValueError, "keinen abgeschlossenen") as failure:
                 ml._run_optimization(config, directory)
             state = json.loads((Path(directory) / "optimization.json").read_text())
             self.assertEqual(state["failed_trials"], 3)
             self.assertEqual(state["stop_reason"], "all_trials_failed")
             self.assertIsNone(state["best_config"])
+            self.assertEqual(state["failure_summary"]["trial_counts"]["failed"], 3)
+            self.assertEqual(state["failure_summary"]["trial_counts"]["timed_out"], 0)
+            self.assertEqual(state["failure_summary"]["errors"], [
+                {"status": "failed", "error": "bad trial: incompatible input dimensions", "trials": [1, 2, 3]}])
+            self.assertIn("bad trial: incompatible input dimensions", str(failure.exception))
+            self.assertNotIn("Zeitbudget erhöhen", str(failure.exception))
+            self.assertNotIn("0 für kein Suchzeitlimit", str(failure.exception))
+            self.assertEqual(state["failure_summary"]["report_path"], str(Path(directory) / "optimization.json"))
+            for trial in state["trials"]:
+                self.assertEqual(trial["last_stage"], "train")
+                self.assertEqual(trial["last_message"], "Trainingsdaten an das Modell übergeben")
+            final.assert_not_called()
+
+    def test_timeout_without_completed_trial_exposes_budget_and_last_phase(self):
+        config = ml._validate_config(self.config())
+        config["optimization"]["timeout_seconds"] = 300.
+        now = [0.]
+        def run(_config, _out, progress=None, **_kwargs):
+            progress({"progress": .1, "stage": "preprocess", "message": "Eingangssegmente vorbereiten"})
+            now[0] = 301.
+            progress({"progress": .2, "stage": "train"})
+            self.fail("the cooperative deadline should stop the worker")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml.time, "perf_counter", side_effect=lambda: now[0]), \
+             mock.patch.object(ml.time, "monotonic", side_effect=lambda: now[0]), \
+             mock.patch.object(ml, "execute_jobs", side_effect=inline_execution), \
+             mock.patch.object(ml, "run_experiment", side_effect=run), \
+             mock.patch.object(ml, "_evaluate_optimized_test") as final:
+            with self.assertRaisesRegex(ValueError, "keinen abgeschlossenen") as failure:
+                ml._run_optimization(config, directory)
+            state = json.loads((Path(directory) / "optimization.json").read_text())
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["stop_reason"], "timeout")
+            self.assertEqual(state["completed_trials"], 0)
+            self.assertEqual(state["timed_out_trials"], 1)
+            self.assertEqual(state["skipped_trials"], 2)
+            self.assertEqual(state["failed_trials"], 0)
+            summary = state["failure_summary"]
+            self.assertEqual(summary["timeout_seconds"], 300.)
+            self.assertEqual(summary["trial_counts"]["timed_out"], 1)
+            self.assertEqual(summary["trial_counts"]["skipped"], 2)
+            self.assertEqual(summary["started_timed_out_trials"], 1)
+            self.assertEqual(summary["not_started_trials"], 2)
+            self.assertIn("300 s je Topologie", str(failure.exception))
+            self.assertIn("test deadline", str(failure.exception))
+            self.assertEqual(state["trials"][0]["last_stage"], "preprocess")
+            self.assertEqual(state["trials"][0]["last_message"], "Eingangssegmente vorbereiten")
+            self.assertEqual(state["test_evaluations"], 0)
+            final.assert_not_called()
+
+    def test_nested_timeouts_with_parent_pid_distinguish_unstarted_trials_without_changing_raw_status(self):
+        config = ml._validate_config(self.config(topology_id="feature-mlp-16"))
+        config["optimization"]["timeout_seconds"] = 300.
+        def execute(jobs, _config, progress=None, **_kwargs):
+            self.assertEqual(len(jobs), 12)
+            outcomes = []
+            progress({"trial": 1, "stage": "train", "message": "Begonnener Suchversuch"})
+            for index, _job in enumerate(jobs):
+                error = "Zeitbudget des Suchversuchs erreicht" if index == 0 else (
+                    "Zeitbudget vor Start erreicht" if index % 2 else "Zeitbudget vor Jobstart erreicht")
+                outcome = {"index": index, "status": "timed_out", "pid": 1498, "device": "cpu", "error": error}
+                outcomes.append(outcome)
+                progress({"stage": "execution_job_complete", "execution_job_result": outcome})
+            return {"outcomes": outcomes, "execution": {"axis": "trials"}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "execute_jobs", side_effect=execute), \
+             mock.patch.object(ml, "_evaluate_optimized_test") as final:
+            with self.assertRaisesRegex(ValueError, "keinen abgeschlossenen") as failure:
+                ml._run_optimization(config, directory)
+            state = json.loads((Path(directory) / "optimization.json").read_text())
+            summary = state["failure_summary"]
+            self.assertEqual(state["stop_reason"], "timeout")
+            self.assertEqual(state["timed_out_trials"], 12)
+            self.assertEqual(state["skipped_trials"], 0)
+            self.assertEqual(summary["trial_counts"]["timed_out"], 12)
+            self.assertEqual(summary["trial_counts"]["skipped"], 0)
+            self.assertEqual(summary["started_timed_out_trials"], 1)
+            self.assertEqual(summary["not_started_trials"], 11)
+            self.assertIn("1 nach Start mit Zeitabbruch, 11 nicht gestartet", str(failure.exception))
+            self.assertEqual([trial["status"] for trial in state["trials"]], ["timed_out"] * 12)
+            self.assertEqual([trial["pid"] for trial in state["trials"]], [1498] * 12)
+            self.assertEqual(state["trials"][0]["last_stage"], "train")
+            final.assert_not_called()
+
+    def test_completion_path_failure_retries_final_report_and_tests_winner_once(self):
+        config = ml._validate_config(self.config())
+        config["optimization"]["max_trials"] = 1
+        def execute(jobs, _config, progress=None, **_kwargs):
+            self.assertEqual(len(jobs), 1)
+            report = self.fake_report(jobs[0]["output_dir"], jobs[0]["config"])
+            outcome = {"index": 0, "status": "completed", "report_path": str(Path(directory) / "not-visible-yet.json"),
+                       "pid": 123, "device": "cpu", "elapsed_seconds": 1.}
+            progress({"stage": "execution_job_complete", "progress": 1., "execution_job_result": outcome})
+            # The completion event and final batch are separate handoffs. A
+            # failed first read must not discard the report delivered later.
+            interim = json.loads((Path(directory) / "optimization.json").read_text())
+            self.assertEqual(interim["trials"][0]["status"], "failed")
+            return {"outcomes": [{**outcome, "report": report}], "execution": {"axis": "trials"}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "execute_jobs", side_effect=execute), \
+             mock.patch.object(ml, "_evaluate_optimized_test", return_value=0.) as final:
+            report = ml._run_optimization(config, directory)
+            state = json.loads((Path(directory) / "optimization.json").read_text())
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["completed_trials"], 1)
+            self.assertEqual(state["failed_trials"], 0)
+            self.assertEqual(state["best_trial"], 1)
+            self.assertNotIn("error", state["trials"][0])
+            self.assertEqual(state["test_evaluations"], 1)
+            self.assertEqual(report["selected_candidate"], 1)
+            final.assert_called_once()
+
+    def test_irrecoverable_trial_report_errors_are_saved_without_interrupting_search(self):
+        config = ml._validate_config(self.config())
+        def execute(jobs, _config, progress=None, **_kwargs):
+            outcomes = []
+            for index, job in enumerate(jobs):
+                outcome = {"index": index, "status": "completed", "pid": 123, "device": "cpu",
+                           "report_path": str(Path(job["output_dir"]) / "missing.json")}
+                progress({"stage": "execution_job_complete", "execution_job_result": outcome})
+                if index == 1:
+                    # A permanently malformed deserialized report must also be
+                    # a failed trial, not a coordinator interruption.
+                    outcome["report"] = []
+                elif index == 2:
+                    outcome["report"] = self.fake_report(job["output_dir"], job["config"])
+                    outcome["report"]["metrics"].pop("model_bytes")
+                outcomes.append(outcome)
+            return {"outcomes": outcomes, "execution": {"axis": "trials"}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(ml, "execute_jobs", side_effect=execute), \
+             mock.patch.object(ml, "_evaluate_optimized_test") as final:
+            with self.assertRaisesRegex(ValueError, "keinen abgeschlossenen"):
+                ml._run_optimization(config, directory)
+            state = json.loads((Path(directory) / "optimization.json").read_text())
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["stop_reason"], "all_trials_failed")
+            self.assertEqual(state["failed_trials"], 3)
+            self.assertIsNone(state["best_trial"])
+            self.assertEqual(state["test_evaluations"], 0)
+            self.assertIn("missing.json", state["trials"][0]["error"])
+            self.assertIn("kein JSON-Objekt", state["trials"][1]["error"])
+            self.assertIn("Modellgröße", state["trials"][2]["error"])
+            self.assertNotIn("interruption_reason", state)
             final.assert_not_called()
 
     @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch optional")
