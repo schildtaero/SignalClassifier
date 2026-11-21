@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import importlib
+import copy
 import math
 import queue
 import threading
 import time
+import unicodedata
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,6 +17,42 @@ import numpy as np
 from scipy import fft, signal
 
 from .sigmf import FORMATS, SigMFWriter, read_metadata, read_recording, recording_info
+
+
+def _data_origin(source: str | None, metadata: dict | None = None) -> dict:
+    """Preserve declared synthetic ancestry without authenticating RF origin.
+
+    Inspect only known provenance containers with bounded depth/node count.
+    An absent flag means unknown recording origin, never verified real RF.
+    """
+    evidence = []
+    if source == "synthetic":
+        evidence.append("receiver_configuration.source")
+    elif source == "recording" and isinstance(metadata, dict):
+        containers = ("global", "metadata", "sc:data_provenance", "signalclassifier:data_provenance",
+                      "data_provenance", "parent", "parent_provenance", "sc:parent_provenance",
+                      "origin", "origin_provenance")
+        flags = ("synthetic", "declared_source_synthetic", "sc:synthetic", "sc:declared_source_synthetic")
+        stack, visited = [(metadata, "$", 0)], set()
+        while stack and len(visited) < 32:
+            value, path, depth = stack.pop()
+            if id(value) in visited:
+                continue
+            visited.add(id(value))
+            for key in ("sc:source", "source", "origin_declared_source"):
+                if value.get(key) == "synthetic":
+                    evidence.append(path + "." + key)
+            evidence.extend(path + "." + key for key in flags if value.get(key) is True)
+            if depth < 6:
+                stack.extend((value[key], path + "." + key, depth + 1) for key in containers
+                             if isinstance(value.get(key), dict))
+    declared_synthetic = bool(evidence)
+    return {"transport_source": source, "declared_source_synthetic": declared_synthetic,
+            "origin_kind": ("synthetic" if declared_synthetic else "unverified_recording" if source == "recording"
+                            else "live_receiver_unverified" if source in ("pluto", "rsp1a") else "unknown"),
+            "basis": "generator_configuration" if source == "synthetic" else "recording_metadata" if source == "recording" else "receiver_configuration",
+            "metadata_evidence_paths": evidence[:16], "rf_origin_verified": False,
+            "note": "Herkunftsdeklaration; fehlende Synthesekennzeichnung bestätigt keine reale oder authentifizierte HF-Quelle."}
 
 
 def _number(config: dict, key: str, default: float, minimum: float, maximum: float) -> float:
@@ -33,6 +72,12 @@ def validate_config(config: dict) -> dict:
     source = result.setdefault("source", "pluto")
     if source not in {"pluto", "rsp1a", "recording", "synthetic"}:
         raise ValueError("Unbekannte Empfangsquelle.")
+    for key in ("capture_group_id", "scan_id"):
+        if key in result:
+            value = result[key]
+            if (not isinstance(value, str) or not 1 <= len(value) <= 128
+                    or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value)):
+                raise ValueError(f"{key} muss 1 bis 128 Zeichen ohne Steuerzeichen enthalten.")
     if result.setdefault("mode", "monitor") not in {"monitor", "wideband", "energy"}:
         raise ValueError("Modus muss monitor, wideband oder energy sein.")
     result["sample_rate"] = _number(result, "sample_rate", 2_000_000, 8_000, 61_440_000)
@@ -47,6 +92,10 @@ def validate_config(config: dict) -> dict:
     result["spectrum_refresh_hz"] = _number(result, "spectrum_refresh_hz", 8, 1, 30)
     result["detection_interval_seconds"] = _number(result, "detection_interval_seconds", 0, 0, 1)
     result["max_channels"] = int(_number(result, "max_channels", 8, 1, 8))
+    analysis_limit = _number(result, "analysis_max_channels", 8, 1, 16)
+    if not analysis_limit.is_integer():
+        raise ValueError("analysis_max_channels muss eine Ganzzahl zwischen 1 und 16 sein.")
+    result["analysis_max_channels"] = int(analysis_limit)
     block_bytes = result["block_size"] * 8
     result["queue_capacity_bytes"] = int(_number(result, "queue_capacity_bytes", 64 * 1024 ** 2,
                                                 block_bytes, 256 * 1024 ** 2))
@@ -124,6 +173,7 @@ def spectrum_and_detections(iq: np.ndarray, sample_rate: float, center_frequency
     return {"frequencies_hz": frequencies.tolist(), "power_dbfs": db.tolist(),
             "noise_floor_dbfs": floor, "threshold_db": threshold_db,
             "fft_size": fft_size, "detections": detections[:16],
+            "detections_total": len(detections), "detections_limit": 16,
             "analysis_sample_count": windows * fft_size, "analysis_sample_offset": 0,
             "analysis_duration_seconds": windows * fft_size / sample_rate,
             "power_reference": "Digitaler FFT-Bin-Pegel; 0 dBFS = komplexer Ton mit Amplitude 1. Nicht in dBm kalibriert.",
@@ -413,6 +463,13 @@ class CaptureManager:
         self.latest_sample_rate = 0.0
         self.latest_center_frequency = 0.0
         self._session_id = ""
+        self._data_provenance = _data_origin(None)
+        self._analysis_buffers: list[dict] = []
+        self._analysis_probe: dict | None = None
+        self._analysis_detected_channels = 0
+        self._analysis_extra_channelizers = 0
+        self._ended_analysis_channels = deque(maxlen=32)
+        self._ended_analysis_channels_evicted = 0
 
     @staticmethod
     def _empty_performance():
@@ -436,9 +493,16 @@ class CaptureManager:
             self._error = None
             self._reason = None
             self._config = config
+            self._data_provenance = _data_origin(config["source"])
             self._state = "starting"
             self._performance = self._empty_performance()
             self._started_at = None
+            self._analysis_buffers = []
+            self._analysis_probe = None
+            self._analysis_detected_channels = 0
+            self._analysis_extra_channelizers = 0
+            self._ended_analysis_channels.clear()
+            self._ended_analysis_channels_evicted = 0
             self.latest_iq = np.empty(0, np.complex64)
             self.latest_sample_rate = 0.0
             self.latest_center_frequency = 0.0
@@ -450,6 +514,8 @@ class CaptureManager:
                 self._state = "error"
                 self._error = str(exc)
                 raise RuntimeError(str(exc)) from exc
+            self._data_provenance = _data_origin(config["source"],
+                self._receiver.info.get("metadata") if config["source"] == "recording" else None)
             config["sample_rate"] = self._receiver.sample_rate
             config["center_frequency_hz"] = self._receiver.center_frequency
             self._processing_seconds = 0.0
@@ -511,7 +577,9 @@ class CaptureManager:
                     "started_at": self._started_at, "elapsed_seconds": self._elapsed,
                     "samples": self._samples, "bytes_written": self._bytes,
                     "recordings_saved": list(self._saved), "session_id": self._session_id,
-                    "synthetic": self._config.get("source") == "synthetic",
+                    "synthetic": self._data_provenance["declared_source_synthetic"],
+                    "declared_source_synthetic": self._data_provenance["declared_source_synthetic"],
+                    "data_provenance": copy.deepcopy(self._data_provenance),
                     "hardware_verified": False,
                     "gap_free_verified": False,
                     "performance": dict(self._performance, **(self._capture_queue.metrics() if self._capture_queue else {}),
@@ -520,18 +588,105 @@ class CaptureManager:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return dict(self._snapshot, receiver=self.status())
+            return dict(self._snapshot, receiver=self.status(), analysis_status=self._analysis_status_locked(),
+                        synthetic=self._data_provenance["declared_source_synthetic"],
+                        declared_source_synthetic=self._data_provenance["declared_source_synthetic"],
+                        data_provenance=copy.deepcopy(self._data_provenance))
 
     def inference_segment(self) -> tuple[np.ndarray, float, float]:
         """Copy one consistent IQ/rate/frequency context for a classifier."""
         with self._lock:
             return self.latest_iq.copy(), self.latest_sample_rate, self.latest_center_frequency
 
+    def _analysis_status_locked(self) -> dict:
+        """Metadata only; IQ stays out of spectrum/status JSON responses."""
+        return {"detected_channels": self._analysis_detected_channels,
+                "buffered_channels": len(self._analysis_buffers),
+                "unbuffered_detections_count": max(0, self._analysis_detected_channels - len(self._analysis_buffers)),
+                "channel_limit": self._config.get("analysis_max_channels", 8), "detection_limit": 16, "max_samples": 65536,
+                "scope": "current_receiver_window",
+                "buffer_bytes": sum(entry["iq"].nbytes for entry in self._analysis_buffers),
+                "extra_channelizers": self._analysis_extra_channelizers,
+                "unresolved_window_probe_available": self._analysis_probe is not None,
+                "ended_channels": copy.deepcopy(list(self._ended_analysis_channels)),
+                "ended_channels_capacity": self._ended_analysis_channels.maxlen,
+                "ended_channels_evicted": self._ended_analysis_channels_evicted,
+                "note": "Nur detektierte Kanäle im aktuellen Empfangsfenster; Kanal-IDs bezeichnen Filterkontexte, keine bestätigten Emitter. Beendete Kanäle behalten begrenzte Metadaten, keine IQ. Zusätzliche Kanalfilter kosten CPU-Zeit; physischer Durchsatz bleibt zu prüfen."}
+
+    def analysis_snapshots(self, max_channels: int | None = None, max_samples: int = 65536) -> list[dict]:
+        """Atomic independent copies of bounded, contiguous per-channel rings.
+
+        IDs survive strength/order changes, but never a source restart, retune,
+        rate change, replaced filter or disappearance/reappearance. Timestamps
+        are frozen host receive-end times, not verified RF acquisition times.
+        Source indices identify output sample positions in the original input;
+        source_sample_stop is exclusive (last represented input index + one).
+        """
+        if max_channels is not None and (isinstance(max_channels, bool) or not isinstance(max_channels, int)
+                                         or not 1 <= max_channels <= 16):
+            raise ValueError("max_channels muss zwischen 1 und 16 liegen.")
+        if isinstance(max_samples, bool) or not isinstance(max_samples, int) or not 1 <= max_samples <= 65536:
+            raise ValueError("max_samples muss zwischen 1 und 65536 liegen.")
+        with self._lock:
+            selected = self._analysis_buffers[:max_channels] if max_channels is not None else self._analysis_buffers
+            result = []
+            for entry in selected:
+                value = {key: copy.deepcopy(item) for key, item in entry.items() if key != "iq"}
+                value["iq"] = entry["iq"][-max_samples:].copy()
+                value["sample_count"] = len(value["iq"])
+                value["duration_seconds"] = value["sample_count"] / value["sample_rate"]
+                value["source_sample_start"] = value["source_sample_stop"] - 1 - (value["sample_count"] - 1) * value["source_sample_stride"]
+                value["quality"].update(reported_gaps=self._performance["gaps"], overflows=self._performance["overflows"],
+                                        capture_error=self._error, capture_state=self._state)
+                result.append(value)
+            return result
+
+    def analysis_probe_snapshot(self, max_samples: int = 65536) -> dict | None:
+        """Copy the unresolved full-window context, never an isolated channel.
+
+        This is a periodic inspection opportunity, not a signal detection.
+        The capture loop shares its immutable legacy IQ ring with this entry;
+        no additional DSP or retained IQ copy is required.
+        """
+        if isinstance(max_samples, bool) or not isinstance(max_samples, int) or not 1 <= max_samples <= 65536:
+            raise ValueError("max_samples muss zwischen 1 und 65536 liegen.")
+        with self._lock:
+            entry = self._analysis_probe
+            if (entry is None or self._analysis_buffers or self._analysis_detected_channels
+                    or entry["iq"] is not self.latest_iq
+                    or entry["sample_rate"] != self.latest_sample_rate
+                    or entry["center_frequency_hz"] != self.latest_center_frequency):
+                return None
+            value = {key: copy.deepcopy(item) for key, item in entry.items() if key != "iq"}
+            value["iq"] = entry["iq"][-max_samples:].copy()
+            value["sample_count"] = len(value["iq"])
+            value["duration_seconds"] = value["sample_count"] / value["sample_rate"]
+            value["source_sample_start"] = value["source_sample_stop"] - value["sample_count"]
+            value["quality"].update(reported_gaps=self._performance["gaps"], overflows=self._performance["overflows"],
+                                    capture_error=self._error, capture_state=self._state)
+            return value
+
+    def _retire_analysis_channel(self, channel: dict, reason: str, ended_at: str):
+        entry = channel.get("entry")
+        if entry is None:
+            return
+        ended = {key: copy.deepcopy(value) for key, value in entry.items() if key != "iq"}
+        ended.update(ended_at=ended_at, end_reason=reason, iq_retained=False)
+        with self._lock:
+            ended["quality"].update(reported_gaps=self._performance["gaps"], overflows=self._performance["overflows"],
+                                    capture_error=self._error, capture_state=self._state)
+            if len(self._ended_analysis_channels) == self._ended_analysis_channels.maxlen:
+                self._ended_analysis_channels_evicted += 1
+            self._ended_analysis_channels.append(ended)
+
     def list_recordings(self) -> list[dict]:
         result = []
         for path in sorted(self.recordings_dir.glob("*.sigmf-meta"), reverse=True):
             try:
-                result.append(recording_info(path))
+                info = recording_info(path)
+                info["data_provenance"] = _data_origin("recording", info["metadata"])
+                info["synthetic"] = info["data_provenance"]["declared_source_synthetic"]
+                result.append(info)
             except (ValueError, OSError, TypeError) as exc:
                 result.append({"id": path.stem, "name": path.stem, "error": str(exc), "metadata_path": str(path)})
         return result
@@ -541,6 +696,8 @@ class CaptureManager:
                     "sc:session_id": self._session_id, "signalclassifier:session_id": self._session_id,
                     "sc:requested_gain_db": self._config["gain_db"],
                     "sc:gap_free_verified": False,
+                    "sc:declared_source_synthetic": self._data_provenance["declared_source_synthetic"],
+                    "sc:data_provenance": copy.deepcopy(self._data_provenance),
                     "sc:digital_scale": "unit complex amplitude; hardware path uncalibrated",
                     "sc:synthetic_modulation": self._config["synthetic_modulation"] if self._config["source"] == "synthetic" else None}
         if self._config["source"] == "recording":
@@ -550,7 +707,11 @@ class CaptureManager:
             metadata["sc:origin_group_id"] = origin_group
             metadata["signalclassifier:group_id"] = origin_group
         else:
-            metadata["signalclassifier:group_id"] = self._session_id
+            metadata["signalclassifier:group_id"] = self._config.get("capture_group_id") or self._session_id
+            if self._config.get("capture_group_id"):
+                metadata["sc:origin_group_id"] = self._config["capture_group_id"]
+        if self._config.get("scan_id"):
+            metadata["sc:scan_id"] = self._config["scan_id"]
         metadata.update(extras or {})
         return SigMFWriter(self.recordings_dir / f"{self._session_id}-{suffix}", rate, center, extra=metadata)
 
@@ -669,6 +830,11 @@ class CaptureManager:
         wideband: SigMFWriter | None = None
         channels: list[dict] = []
         channel_counter = 0
+        analysis_channels: list[dict] = []
+        analysis_channel_counter = 0
+        source_epoch = 0
+        origin_group = (receiver.info["group_id"] if self._config["source"] == "recording" else
+                        self._config.get("capture_group_id") or self._session_id)
         position = 0
         display_channel = None
         inference_context = None
@@ -741,6 +907,10 @@ class CaptureManager:
                                           reason="invalid_samples", reported_gap=True)
                 retuned = center != last_center or sample_rate != last_rate
                 if retuned:
+                    for channel in analysis_channels:
+                        self._retire_analysis_channel(channel, "retune_or_sample_rate_changed", received_at)
+                    analysis_channels = []
+                    source_epoch += 1
                     if wideband:
                         if sample_rate != last_rate:
                             # Single-file rate changes are outside this SigMF subset.
@@ -820,28 +990,111 @@ class CaptureManager:
                         if analyzed_now and position + len(iq) - channel["last_seen"] > sample_rate * 0.25:
                             self._finish_writer(channel["writer"], "energy_gate_closed", channel["source_stop"])
                             channels.remove(channel)
-                strongest = analysis["detections"][0] if analysis["detections"] else None
-                if strongest:
-                    # Reuse the exact already-filtered strongest recording channel.
-                    # Previously the same full-rate FIR/FFT ran a ninth time here.
-                    recorded = next((c for c in channels
-                                     if abs(c["frequency"] - strongest["frequency_hz"]) < c["bandwidth"] / 2), None)
-                    if recorded is not None:
-                        display_channel = {"frequency": recorded["frequency"], "bandwidth": recorded["bandwidth"],
-                                           "extractor": recorded["extractor"]}
-                        latest_iq = channel_outputs[recorded["extractor"]]
-                    else:
+                # Keep separate bounded inference contexts for every admitted
+                # detection. Recording and inference share FIR output where
+                # possible; inference-only channels never create a writer.
+                if analyzed_now:
+                    next_channels = []
+                    matched = set()
+                    used_extractors = set()
+                    bin_width = sample_rate / analysis["fft_size"]
+                    for detection in analysis["detections"][:self._config["analysis_max_channels"]]:
+                        frequency = detection["frequency_hz"]
                         bandwidth = min(sample_rate * 0.9,
-                                        max(self._config["minimum_channel_bandwidth_hz"],
-                                            sample_rate / analysis["fft_size"] * 8, strongest["bandwidth_hz"] * 1.5))
-                        if (display_channel is None
-                                or abs(display_channel["frequency"] - strongest["frequency_hz"]) > display_channel["bandwidth"] / 2
-                                or display_channel["extractor"].input_rate != sample_rate
-                                or bandwidth > display_channel["bandwidth"] * 1.5
-                                or display_channel["extractor"] in channel_outputs):
-                            display_channel = {"frequency": strongest["frequency_hz"], "bandwidth": bandwidth,
-                                               "extractor": _Channelizer(sample_rate, strongest["frequency_hz"] - center, bandwidth)}
-                        latest_iq = display_channel["extractor"].process(iq)
+                                        max(self._config["minimum_channel_bandwidth_hz"], 8 * bin_width,
+                                            detection["bandwidth_hz"] * 1.5))
+                        previous = sorted((c for c in analysis_channels if id(c) not in matched
+                                           and abs(c["frequency"] - frequency) < max(c["bandwidth"] / 2, 4 * bin_width)),
+                                          key=lambda c: abs(c["frequency"] - frequency))
+                        previous = previous[0] if previous else None
+                        if previous is not None:
+                            matched.add(id(previous))
+                        recorded = sorted((c for c in channels if c["extractor"] not in used_extractors
+                                           and abs(c["frequency"] - frequency) < max(c["bandwidth"] / 2, 4 * bin_width)),
+                                          key=lambda c: abs(c["frequency"] - frequency))
+                        recorded = recorded[0] if recorded else None
+                        if recorded is not None:
+                            extractor = recorded["extractor"]
+                            selected_frequency, selected_bandwidth = recorded["frequency"], recorded["bandwidth"]
+                        elif (previous is not None and previous["extractor"].input_rate == sample_rate
+                              and bandwidth <= previous["bandwidth"] * 1.5):
+                            extractor = previous["extractor"]
+                            selected_frequency, selected_bandwidth = previous["frequency"], previous["bandwidth"]
+                        else:
+                            extractor = _Channelizer(sample_rate, frequency - center, bandwidth)
+                            selected_frequency, selected_bandwidth = frequency, bandwidth
+                        if previous is not None and previous["extractor"] is extractor:
+                            channel = previous
+                            matched.add(id(previous))
+                        else:
+                            analysis_channel_counter += 1
+                            channel = {"frequency": selected_frequency, "bandwidth": selected_bandwidth,
+                                       "extractor": extractor, "iq": np.empty(0, np.complex64),
+                                       "channel_id": f"{self._session_id}:s{source_epoch}:c{analysis_channel_counter}",
+                                       "source_epoch": f"{self._session_id}:{source_epoch}"}
+                        channel.update(detection=dict(detection), detected_at=analysis_ended_at,
+                                       detection_source_sample_stop=analysis_position + analysis["analysis_sample_count"])
+                        next_channels.append(channel)
+                        used_extractors.add(extractor)
+                    for previous in analysis_channels:
+                        if not any(previous is current for current in next_channels):
+                            self._retire_analysis_channel(previous, "no_longer_buffered", received_at)
+                    analysis_channels = next_channels
+                extra_channelizers = 0
+                published_channels = []
+                for channel in analysis_channels:
+                    extractor = channel["extractor"]
+                    output = channel_outputs.get(extractor)
+                    if output is None:
+                        output = extractor.process(iq)
+                        channel_outputs[extractor] = output
+                        extra_channelizers += 1
+                    channel["block_output"] = output
+                    if not len(output):
+                        if "entry" in channel:
+                            published_channels.append(channel["entry"])
+                        continue
+                    channel["iq"] = (output[-65536:].copy() if len(output) >= 65536 else
+                                     np.concatenate((channel["iq"], output))[-65536:])
+                    if not len(channel["iq"]):
+                        continue
+                    stride = extractor.decimation
+                    previous_position = extractor.position - len(iq)
+                    first_offset = (-previous_position) % stride
+                    last_source_sample = position + first_offset + (len(output) - 1) * stride
+                    count = len(channel["iq"])
+                    entry = {"iq": channel["iq"], "sample_rate": extractor.output_rate,
+                             "center_frequency_hz": channel["frequency"],
+                             "bandwidth_hz": 2 * min(0.45 * extractor.output_rate, 0.49 * sample_rate),
+                             "selection_bandwidth_hz": channel["bandwidth"],
+                             "channel_id": channel["channel_id"], "source_epoch": channel["source_epoch"],
+                             "session_id": self._session_id, "origin_group_id": origin_group,
+                             "source": self._config["source"], "synthetic": self._data_provenance["declared_source_synthetic"],
+                             "declared_source_synthetic": self._data_provenance["declared_source_synthetic"],
+                             "data_provenance": copy.deepcopy(self._data_provenance),
+                             "observation_id": f"{channel['channel_id']}:{last_source_sample + 1}",
+                             "observed_at": received_at, "timestamp_source": "host_receive_end_utc",
+                             "rf_timestamp_verified": False, "detected_at": channel["detected_at"],
+                             "sample_count": count, "duration_seconds": count / extractor.output_rate,
+                             "source_sample_start": last_source_sample - (count - 1) * stride,
+                             "source_sample_stop": last_source_sample + 1, "source_sample_stride": stride,
+                             "source_block_stop": position + len(iq),
+                             "source_index_scope": "Original input indices of retained decimated output; stop = last represented index + 1. FIR group delay is separate.",
+                             "parent_sample_rate": sample_rate, "parent_center_frequency_hz": center,
+                             "fir_group_delay_input_samples": (len(extractor.taps) - 1) / 2,
+                             "detection_source_sample_stop": channel["detection_source_sample_stop"],
+                             "detection": dict(channel["detection"]),
+                             "quality": {"contiguous": True, "continuity_scope": "ordered software sample indices; RF/USB gaps unverified",
+                                         "gap_free_verified": False, "clipping_fraction": None,
+                                         "filter_settled": extractor.position >= len(extractor.taps)}}
+                    channel["entry"] = entry
+                    published_channels.append(entry)
+                strongest = analysis["detections"][0] if analysis["detections"] else None
+                if strongest and analysis_channels:
+                    selected = analysis_channels[0]
+                    display_channel = {"frequency": selected["frequency"], "bandwidth": selected["bandwidth"],
+                                       "extractor": selected["extractor"]}
+                    latest_iq = selected["block_output"]
                     latest_rate = display_channel["extractor"].output_rate
                     latest_center = display_channel["frequency"]
                 else:
@@ -859,8 +1112,36 @@ class CaptureManager:
                 source_seconds += len(iq) / sample_rate
                 processing_seconds = time.perf_counter() - processing_start
                 with self._lock:
+                    self._analysis_buffers = published_channels
+                    self._analysis_detected_channels = analysis.get("detections_total", len(analysis["detections"]))
+                    self._analysis_extra_channelizers = extra_channelizers
                     self.latest_iq = inference_iq.copy()
                     self.latest_sample_rate, self.latest_center_frequency = latest_rate, latest_center
+                    self._analysis_probe = None
+                    if not self._analysis_detected_channels and not analysis["detections"] and display_channel is None and len(self.latest_iq):
+                        channel_id = f"{self._session_id}:s{source_epoch}:whole-window"
+                        self._analysis_probe = {
+                            "iq": self.latest_iq, "sample_rate": sample_rate, "center_frequency_hz": center,
+                            "bandwidth_hz": sample_rate, "selection_bandwidth_hz": sample_rate,
+                            "channel_id": channel_id, "source_epoch": f"{self._session_id}:{source_epoch}",
+                            "session_id": self._session_id, "origin_group_id": origin_group,
+                            "source": self._config["source"], "synthetic": self._data_provenance["declared_source_synthetic"],
+                            "declared_source_synthetic": self._data_provenance["declared_source_synthetic"],
+                            "data_provenance": copy.deepcopy(self._data_provenance),
+                            "observation_type": "unresolved_window_probe", "observation_id": f"{channel_id}:{position}",
+                            "observed_at": received_at, "timestamp_source": "host_receive_end_utc",
+                            "rf_timestamp_verified": False, "detected_at": None,
+                            "sample_count": len(self.latest_iq), "duration_seconds": len(self.latest_iq) / sample_rate,
+                            "source_sample_start": position - len(self.latest_iq), "source_sample_stop": position,
+                            "source_sample_stride": 1, "source_block_stop": position,
+                            "source_index_scope": "Original full-window input sample indices; stop is exclusive.",
+                            "parent_sample_rate": sample_rate, "parent_center_frequency_hz": center,
+                            "fir_group_delay_input_samples": 0,
+                            "detection_source_sample_stop": analysis_position + analysis["analysis_sample_count"],
+                            "detection": {"method": "whole_window_probe", "detected": False,
+                                          "reason": "Keine isolierte Energiedetektion; rauschartige Nutzsignale nicht als Rauschen ausschließen."},
+                            "quality": {"contiguous": True, "continuity_scope": "ordered software sample indices; RF/USB gaps unverified",
+                                        "gap_free_verified": False, "clipping_fraction": None, "filter_settled": True}}
                     self._samples = position
                     self._elapsed = time.monotonic() - started
                     self._processing_seconds += processing_seconds
@@ -877,7 +1158,9 @@ class CaptureManager:
                     if source_seconds - last_publish_rf >= 1 / self._config["spectrum_refresh_hz"] or retuned:
                         self._snapshot = dict(analysis, sample_rate=sample_rate, center_frequency_hz=center,
                             source=self._config["source"], mode=self._config["mode"],
-                            synthetic=self._config["source"] == "synthetic", sample_index=analysis_position,
+                            synthetic=self._data_provenance["declared_source_synthetic"],
+                            declared_source_synthetic=self._data_provenance["declared_source_synthetic"],
+                            data_provenance=copy.deepcopy(self._data_provenance), sample_index=analysis_position,
                             block_sample_count=analysis_block_sample_count,
                             block_duration_seconds=analysis_block_sample_count / sample_rate,
                             timestamp=analysis_ended_at, analysis_timestamp=analysis_ended_at,

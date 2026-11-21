@@ -3,6 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230e151b'/%3E%3Cpath d='M3 17h6l3-9 5 17 4-13 3 5h5' fill='none' stroke='%2365d3da' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
     <meta name="theme-color" content="#10161b" />
     <meta
       name="description"
@@ -118,6 +123,9 @@
         title="Empfang"
       >
         <svg class="icon"><use href="#i-signal" /></svg><span>Empfang</span>
+      </button>
+      <button class="rail-btn" data-view="analyse" title="Analyse">
+        <svg class="icon"><use href="#i-chart" /></svg><span>Analyse</span>
       </button>
       <button class="rail-btn" data-view="aufnahmen" title="Aufnahmen">
         <svg class="icon"><use href="#i-folder" /></svg><span>Aufnahmen</span>
@@ -529,7 +537,7 @@
                     <summary>Aufnahmeleistung einstellen</summary>
                     <div class="form-pair">
                       <label
-                        >Max. Signalkanäle<input
+                        >Max. Aufnahmekanäle<input
                           name="max_channels"
                           type="number"
                           min="1"
@@ -550,6 +558,33 @@
                           required
                       /></label>
                     </div>
+                    <div class="analysis-channel-input">
+                      <label
+                        >Analyse-Filterkanäle<input
+                          id="rx-analysis-max-channels"
+                          name="analysis_max_channels"
+                          type="number"
+                          min="1"
+                          max="16"
+                          step="1"
+                          value="8"
+                          aria-describedby="rx-analysis-channels-help"
+                          required
+                      /></label>
+                      <button
+                        type="button"
+                        class="button button-quiet"
+                        id="rx-analysis-laptop"
+                      >
+                        4 Kanäle wählen
+                      </button>
+                    </div>
+                    <p class="field-help" id="rx-analysis-channels-help">
+                      Mehr Analyse-Filterkanäle erhöhen den CPU-Aufwand. Nicht
+                      gepufferte Detektionen werden gesondert gezählt und
+                      bleiben ohne Auswertung. Das ist vom Aufnahmekanalbudget
+                      getrennt; das Modellbudget greift erst nach der Filterung.
+                    </p>
                     <div class="form-pair">
                       <label
                         >Spektrumanzeige <em>Hz</em
@@ -648,6 +683,50 @@
                 <div id="model-explanation" class="explanation-body"></div>
               </details>
             </article>
+            <article class="panel reception-analysis-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker"
+                    >MEHRERE SIGNALE / STUFENWEISE</span
+                  >
+                  <h2>Analyse im Empfangsfenster</h2>
+                </div>
+                <button class="text-button" type="button" data-view="analyse">
+                  Analyse öffnen <span aria-hidden="true">→</span>
+                </button>
+              </div>
+              <div class="table-scroll">
+                <table class="data-table analysis-reception-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Signalkanal</th>
+                      <th scope="col">Modulation</th>
+                      <th scope="col">Protokoll</th>
+                      <th scope="col">
+                        <span class="sr-only">Entscheidungsweg</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody
+                    id="reception-analysis-body"
+                    class="analysis-reception-body"
+                  >
+                    <tr>
+                      <td colspan="4">
+                        <div class="empty-state compact">
+                          Noch keine Analyse vorhanden. Im Analyse-Tab den
+                          Bereich und die verfügbaren Experten konfigurieren.
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="panel-note" id="reception-analysis-status">
+                Filter- und Analysebudget werden getrennt begrenzt. Noch keine
+                Kanalstatistik verfügbar.
+              </p>
+            </article>
             <article
               class="panel live-comparison-panel"
               id="live-comparison-panel"
@@ -705,6 +784,588 @@
                 Funkdienst noch Emitter.
               </div>
             </article>
+          </div>
+        </section>
+        <section
+          class="view"
+          id="view-analyse"
+          hidden
+          aria-label="Hierarchische Signalanalyse"
+        >
+          <article class="panel analysis-intro">
+            <div class="analysis-intro-copy">
+              <span class="panel-kicker"
+                >VOM EMPFANGENEN KANAL ZUR BELEGTEN AUSSAGE</span
+              >
+              <h2>Jede Stufe braucht eigene Evidenz.</h2>
+              <p>
+                Die Analyse untersucht einzelne Signale im aktuellen
+                Empfangsfenster. Merkmale und optionales Vorwissen grenzen die
+                nächsten Tests ein. Passende trainierte Modelle können danach
+                Modulation, Protokoll, Funkdienst oder Emitter bewerten.
+              </p>
+            </div>
+            <ol
+              class="analysis-hierarchy"
+              aria-label="Stufen der Signalanalyse"
+            >
+              <li>
+                <span class="analysis-step-number" aria-hidden="true">1</span>
+                <div>
+                  <strong>Energie & Merkmale</strong
+                  ><span>Signal finden und beschreiben</span>
+                </div>
+              </li>
+              <li>
+                <span class="analysis-step-number" aria-hidden="true">2</span>
+                <div>
+                  <strong>Modulation</strong
+                  ><span>Geeignete Modelle prüfen</span>
+                </div>
+              </li>
+              <li>
+                <span class="analysis-step-number" aria-hidden="true">3</span>
+                <div>
+                  <strong>Protokoll & Funkdienst</strong
+                  ><span>Weitere Evidenz einordnen</span>
+                </div>
+              </li>
+              <li>
+                <span class="analysis-step-number" aria-hidden="true">4</span>
+                <div>
+                  <strong>Emitter</strong
+                  ><span>Nur mit ausreichenden Belegen</span>
+                </div>
+              </li>
+            </ol>
+            <p class="analysis-intro-note">
+              Unbekannt ist ein gültiges Ergebnis. Ein Frequenzhinweis ist keine
+              bestätigte Identität; eine erkannte Modulation bestätigt noch kein
+              Protokoll.
+            </p>
+          </article>
+
+          <div class="analysis-overview-grid">
+            <article class="panel analysis-coverage-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker"
+                    >TATSÄCHLICH BEOBACHTETER BEREICH</span
+                  >
+                  <h2>Abdeckung & Quelle</h2>
+                </div>
+                <svg class="icon secondary" aria-hidden="true">
+                  <use href="#i-signal" />
+                </svg>
+              </div>
+              <div id="analysis-coverage" class="analysis-coverage-body">
+                <div class="empty-state compact">
+                  Noch keine Abdeckung bekannt. Eine Empfangsquelle starten oder
+                  einen Scan planen. Ausgewertet wird nur tatsächlich
+                  empfangenes IQ-Material.
+                </div>
+              </div>
+            </article>
+            <div
+              class="analysis-stats"
+              id="analysis-stats"
+              aria-label="Analysestatus"
+            >
+              <div class="analysis-stat">
+                <span class="metric-label">ANALYSE</span><strong>—</strong>
+                <small>Noch kein Status verfügbar</small>
+              </div>
+              <div class="analysis-stat">
+                <span class="metric-label">SIGNALE</span><strong>—</strong>
+                <small>Keine Beobachtung vorhanden</small>
+              </div>
+              <div class="analysis-stat">
+                <span class="metric-label">EXPERTEN</span><strong>—</strong>
+                <small>Verfügbare Modelle werden geladen</small>
+              </div>
+              <div class="analysis-stat">
+                <span class="metric-label">RECHENZEIT</span><strong>—</strong>
+                <small>Noch kein Messwert</small>
+              </div>
+            </div>
+          </div>
+
+          <div class="analysis-workspace">
+            <article class="panel analysis-settings-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker"
+                    >BEREICH / RECHENBUDGET / EXPERTEN</span
+                  >
+                  <h2>Analyse konfigurieren</h2>
+                </div>
+                <svg class="icon secondary" aria-hidden="true">
+                  <use href="#i-gear" />
+                </svg>
+              </div>
+              <form id="analysis-settings-form">
+                <div class="form-body">
+                  <div class="analysis-toggle-group">
+                    <label class="checkbox"
+                      ><input
+                        type="checkbox"
+                        id="analysis-enabled"
+                        name="enabled"
+                      />Analyse aktivieren</label
+                    >
+                    <label class="checkbox"
+                      ><input
+                        type="checkbox"
+                        id="analysis-use-priors"
+                        name="use_priors"
+                      />Frequenz- und Regionsvorwissen nutzen</label
+                    >
+                    <label class="checkbox"
+                      ><input
+                        type="checkbox"
+                        id="analysis-use-active-model"
+                        name="use_active_model"
+                        checked
+                      />Aktives Modell zusätzlich verwenden</label
+                    >
+                  </div>
+                  <p class="field-help" id="analysis-settings-help">
+                    Änderungen werden erst mit „Einstellungen speichern“
+                    übernommen. Das Aktivieren startet keinen Empfänger.
+                  </p>
+                  <fieldset class="analysis-fieldset">
+                    <legend>Untersuchungsbereich</legend>
+                    <div class="form-pair">
+                      <label
+                        >Von <em>MHz</em
+                        ><input
+                          type="number"
+                          id="analysis-start-mhz"
+                          name="start_frequency_mhz"
+                          min="0"
+                          max="6000"
+                          step="0.000001"
+                          value="0"
+                          required
+                      /></label>
+                      <label
+                        >Bis <em>MHz</em
+                        ><input
+                          type="number"
+                          id="analysis-stop-mhz"
+                          name="stop_frequency_mhz"
+                          min="0.000001"
+                          max="6000"
+                          step="0.000001"
+                          value="6000"
+                          required
+                      /></label>
+                    </div>
+                    <div class="form-pair">
+                      <label
+                        >Max. Signale je Durchlauf<input
+                          type="number"
+                          id="analysis-max-signals"
+                          name="max_signals_per_cycle"
+                          min="1"
+                          max="16"
+                          step="1"
+                          value="4"
+                          required
+                      /></label>
+                      <label
+                        >Prüfintervall <em>s</em
+                        ><input
+                          type="number"
+                          id="analysis-interval"
+                          name="interval_seconds"
+                          min="0.1"
+                          max="30"
+                          step="0.1"
+                          value="0.5"
+                          required
+                      /></label>
+                    </div>
+                    <p class="field-help">
+                      Der Bereich ist ein Filter für empfangene Signale. Er
+                      erweitert weder die Bandbreite noch den Frequenzbereich
+                      des angeschlossenen Geräts.
+                    </p>
+                  </fieldset>
+                  <details class="analysis-advanced" open>
+                    <summary>Auswahlregeln & Rechenbudget</summary>
+                    <div class="analysis-advanced-body">
+                      <div class="form-pair">
+                        <label
+                          >Mindest-Klassenwert <em>0,5–1</em
+                          ><input
+                            type="number"
+                            id="analysis-min-score"
+                            name="min_model_score"
+                            min="0.5"
+                            max="1"
+                            step="0.01"
+                            value="0.65"
+                            required
+                        /></label>
+                        <label
+                          >Mindestabstand <em>0–1</em
+                          ><input
+                            type="number"
+                            id="analysis-min-margin"
+                            name="min_margin"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value="0.15"
+                            required
+                        /></label>
+                      </div>
+                      <div class="form-pair">
+                        <label
+                          >Zeitbudget <em>ms</em
+                          ><input
+                            type="number"
+                            id="analysis-budget-ms"
+                            name="budget_ms"
+                            min="0"
+                            max="60000"
+                            step="1"
+                            value="500"
+                            required
+                        /></label>
+                        <label
+                          >Max. Modelle je Signal<input
+                            type="number"
+                            id="analysis-max-models"
+                            name="max_models"
+                            min="0"
+                            max="8"
+                            step="1"
+                            value="3"
+                            required
+                        /></label>
+                      </div>
+                      <label class="checkbox"
+                        ><input
+                          type="checkbox"
+                          id="analysis-require-evaluated"
+                          name="require_evaluated_models"
+                          checked
+                        />Nur unabhängig bewertete Modelle verwenden</label
+                      >
+                      <label class="checkbox"
+                        ><input
+                          type="checkbox"
+                          id="analysis-explain-models"
+                          name="explain_models"
+                          aria-describedby="analysis-explain-help"
+                        />Modelleinflüsse mitberechnen</label
+                      >
+                      <p class="field-help" id="analysis-explain-help">
+                        Benötigt zusätzliche Rechenzeit. Lineare Beiträge oder
+                        lokale Sensitivitätsprofile zeigen, worauf die aktuelle
+                        Modellausgabe reagiert; sie belegen keine Kausalität.
+                        Die Ergebnisse stehen im Entscheidungsbericht.
+                      </p>
+                      <p class="field-help">
+                        Der Mindestabstand vergleicht die beiden stärksten
+                        Klassen eines Modells. Modellwerte sind ohne passende
+                        Kalibrierung keine bestätigte Wahrscheinlichkeit. 0
+                        Modelle nutzt nur Merkmale; ein Zeitbudget von 0
+                        deaktiviert das Zeitlimit. Das Budget wird zwischen
+                        Tests geprüft, ein laufender Test kann es überschreiten.
+                      </p>
+                    </div>
+                  </details>
+                  <fieldset class="analysis-fieldset analysis-experts-fieldset">
+                    <legend>Verfügbare Experten</legend>
+                    <p class="field-help">
+                      Nur tatsächlich geladene, passende Modelle auswählen.
+                      Ebene und Signalfamilie legen fest, welche Frage ein
+                      Experte beantworten darf. Ohne Experten sind weiterhin
+                      Merkmals-Hypothesen und optional das aktive Modell
+                      verfügbar. Modell-Ausgaben sind Kandidaten, keine Beweise.
+                    </p>
+                    <div id="analysis-experts" class="analysis-experts">
+                      <div class="empty-state compact">
+                        Noch keine Experten geladen. Trainierte Modelle in der
+                        Modellverwaltung importieren oder aus einem Experiment
+                        übernehmen.
+                      </div>
+                    </div>
+                  </fieldset>
+                </div>
+                <div class="panel-actions">
+                  <button
+                    type="submit"
+                    id="analysis-save"
+                    class="button button-primary"
+                  >
+                    <svg class="icon"><use href="#i-check" /></svg>Einstellungen
+                    speichern
+                  </button>
+                  <button type="button" class="text-button" data-view="modelle">
+                    Zur Modellverwaltung
+                  </button>
+                </div>
+              </form>
+            </article>
+
+            <div class="analysis-observations">
+              <article class="panel analysis-scan-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker"
+                      >EIN EMPFÄNGER / AUFEINANDERFOLGENDE FENSTER</span
+                    >
+                    <h2>Frequenzbereich scannen</h2>
+                  </div>
+                  <span class="pill">Schrittweiser Empfang</span>
+                </div>
+                <form id="analysis-scan-form">
+                  <div class="form-body">
+                    <p class="field-help" id="analysis-scan-help">
+                      Der Scanner stimmt den Empfänger nacheinander auf einzelne
+                      Fenster im oben gewählten Bereich ab. 0–6 GHz werden
+                      niemals gleichzeitig empfangen. Geräte- und Treibergrenzen
+                      bestimmen den tatsächlich möglichen Plan. Experten und
+                      Analysebudget werden mit „Einstellungen speichern“ oben
+                      gespeichert; Plan und Start verwenden die aktuellen
+                      Scanparameter und den oben eingestellten Frequenzbereich.
+                    </p>
+                    <div class="analysis-scan-fields">
+                      <label
+                        >Hardwarequelle<select
+                          id="analysis-scan-source"
+                          name="source"
+                        >
+                          <option value="rsp1a">SDRplay RSP1A</option>
+                          <option value="pluto">PlutoSDR</option>
+                        </select></label
+                      >
+                      <label
+                        >Geräteadresse<input
+                          id="analysis-scan-uri"
+                          name="uri"
+                          placeholder="Automatisch / Geräte-URI"
+                          autocomplete="off"
+                      /></label>
+                      <label
+                        >Abtastrate <em>Hz</em
+                        ><input
+                          type="number"
+                          id="analysis-scan-sample-rate"
+                          name="sample_rate"
+                          min="8000"
+                          max="61440000"
+                          step="1"
+                          value="2000000"
+                          required
+                      /></label>
+                      <label
+                        >Verstärkung <em>dB</em
+                        ><input
+                          type="number"
+                          id="analysis-scan-gain"
+                          name="gain_db"
+                          min="-20"
+                          max="100"
+                          step="1"
+                          value="30"
+                          required
+                      /></label>
+                      <label
+                        >Verweildauer je Fenster <em>s</em
+                        ><input
+                          type="number"
+                          id="analysis-scan-dwell"
+                          name="dwell_seconds"
+                          min="0.1"
+                          max="3600"
+                          step="0.1"
+                          value="1"
+                          required
+                      /></label>
+                      <label
+                        >Überlappungsanteil <em>0–0,9</em
+                        ><input
+                          type="number"
+                          id="analysis-scan-overlap"
+                          name="overlap"
+                          min="0"
+                          max="0.9"
+                          step="0.01"
+                          value="0.15"
+                          required
+                      /></label>
+                    </div>
+                    <div class="analysis-channel-input">
+                      <label
+                        >Analyse-Filterkanäle je Fenster<input
+                          id="analysis-scan-max-channels"
+                          name="analysis_max_channels"
+                          type="number"
+                          min="1"
+                          max="16"
+                          step="1"
+                          value="8"
+                          aria-describedby="analysis-scan-channels-help"
+                          required
+                      /></label>
+                      <button
+                        type="button"
+                        class="button button-quiet"
+                        id="analysis-scan-laptop"
+                      >
+                        4 Kanäle wählen
+                      </button>
+                    </div>
+                    <p class="field-help" id="analysis-scan-channels-help">
+                      Mehr Filter erhöhen den CPU-Aufwand. Nicht gepufferte
+                      Detektionen werden gesondert gezählt. „Max. Signale je
+                      Durchlauf“ begrenzt die nachgelagerte Modellauswertung und
+                      ersetzt dieses Filterbudget nicht.
+                    </p>
+                    <label class="checkbox"
+                      ><input
+                        type="checkbox"
+                        id="analysis-scan-repeat"
+                        name="repeat"
+                      />Scan nach dem letzten Fenster wiederholen</label
+                    >
+                    <div id="analysis-scan-plan" class="analysis-scan-plan">
+                      <span class="secondary"
+                        >Noch kein Plan berechnet. Zuerst Quelle und Parameter
+                        prüfen.</span
+                      >
+                    </div>
+                  </div>
+                  <div class="panel-actions">
+                    <button
+                      type="button"
+                      id="analysis-scan-plan-button"
+                      class="button"
+                    >
+                      <svg class="icon"><use href="#i-chart" /></svg>Scan planen
+                    </button>
+                    <button
+                      type="submit"
+                      id="analysis-scan-start"
+                      class="button button-primary"
+                    >
+                      <svg class="icon"><use href="#i-play" /></svg>Scan starten
+                    </button>
+                    <button
+                      type="button"
+                      id="analysis-scan-stop"
+                      class="button button-quiet"
+                      disabled
+                    >
+                      <svg class="icon"><use href="#i-stop" /></svg>Scan stoppen
+                    </button>
+                  </div>
+                </form>
+                <div
+                  id="analysis-scan-status"
+                  class="analysis-scan-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Noch kein Scan aktiv.
+                </div>
+              </article>
+
+              <article class="panel analysis-signals-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker"
+                      >KANALWEISE / BEOBACHTETE STICHPROBEN</span
+                    >
+                    <h2>Gefundene Signale</h2>
+                  </div>
+                  <span class="secondary analysis-table-hint"
+                    >Signal für den Entscheidungsweg wählen</span
+                  >
+                </div>
+                <div
+                  class="table-scroll"
+                  tabindex="0"
+                  role="region"
+                  aria-label="Tabelle der analysierten Signale, horizontal scrollbar"
+                >
+                  <table class="data-table analysis-signals-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Signal</th>
+                        <th scope="col">Mitte</th>
+                        <th scope="col">Bandbreite</th>
+                        <th scope="col">Modulation</th>
+                        <th scope="col">Protokoll</th>
+                        <th scope="col">Dienst / Emitter</th>
+                        <th scope="col">Zustand</th>
+                        <th scope="col">
+                          <span class="sr-only">Details</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody id="analysis-signals-body">
+                      <tr>
+                        <td colspan="8">
+                          <div class="empty-state">
+                            <svg class="icon" aria-hidden="true">
+                              <use href="#i-signal" /></svg
+                            ><strong>Noch keine Signale analysiert</strong>
+                            <p>
+                              Empfangsquelle starten und die Analyse bewusst
+                              aktivieren. Hier erscheinen die tatsächlich
+                              untersuchten Kanäle.
+                            </p>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p class="panel-note">
+                  Eine Zeile beschreibt eine beobachtete Signalstichprobe.
+                  Unbeobachtete Frequenzen und Zeiträume bleiben unbekannt.
+                </p>
+              </article>
+
+              <article class="panel analysis-detail-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker"
+                      >MERKMALE / TESTS / ENTSCHEIDUNG</span
+                    >
+                    <h2>Entscheidungsweg je Signal</h2>
+                  </div>
+                  <svg class="icon secondary" aria-hidden="true">
+                    <use href="#i-network" />
+                  </svg>
+                </div>
+                <div
+                  id="analysis-detail"
+                  class="analysis-detail"
+                  tabindex="-1"
+                  role="region"
+                  aria-label="Entscheidungsweg des ausgewählten Signals"
+                >
+                  <div class="empty-state">
+                    <svg class="icon" aria-hidden="true">
+                      <use href="#i-chart" /></svg
+                    ><strong>Ein Signal auswählen</strong>
+                    <p>
+                      Der Trace zeigt Messwerte, eingesetztes Vorwissen,
+                      ausgewählte und übersprungene Experten sowie die Grenzen
+                      der Entscheidung. Verfügbare Ergebnisse können als Daten
+                      exportiert werden.
+                    </p>
+                  </div>
+                </div>
+              </article>
+            </div>
           </div>
         </section>
         <section class="view" id="view-aufnahmen" hidden aria-label="Aufnahmen">

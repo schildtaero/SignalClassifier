@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 21. November 2026, SignalClassifier 0.4.1, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 21. November 2026, SignalClassifier 0.5.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 153 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung und Telemetrie. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
+- 225 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie und die Mehrsignalanalyse. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,15 @@ Prüfstand: 21. November 2026, SignalClassifier 0.4.1, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.5.0
+
+- 29 Tests der Entscheidungsengine prüfen frequenzunabhängige Expertenauswahl, Qualitätsablehnung, erhaltene Mehrträger-/Spreizhypothesen, getrennte Aussageebenen, kompatible Signalformen, Konflikte, unbekannte Klassen, Expertenfehler und kooperative Budgets. Gemeinsame und kürzere Modelleingaben haben getrennte Sampleprüfwerte; lokale Modelleinflüsse bleiben optional.
+- 13 Laufzeit-/API-Tests prüfen rotierende Mehrkanalanalyse, vollständiges Abarbeiten der maximal gehaltenen Scanpuffer, ungeklärte Fensterproben, sichere Modellkennungen, gespeicherte Quellenpositionen, Modellwechsel, geänderte Artefakte sowie aktualisierte Qualitäts-/Herkunftsangaben bei unverändertem IQ. Datenbankneustart, historische Aufnahmezeiten, sichtbare Aufbewahrungsgrenzen, JSON-Download und Hardware-freie Planaufrufe sind abgedeckt.
+- 20 Scan-Tests prüfen Empfängergrenzen, Überlappung und Fensterbudgets, konservative analoge Bandbreite, Sitzungseigentum, Abbruch, blockierende Treiber, Samplefortschritt und getrennte Abstimm-/Analysepausen. Alle Fenster eines Scans tragen dieselbe Ursprungsgruppe; neue Sitzungen machen sie nicht zu unabhängigen Trainingsdaten.
+- Mehrkanal-Empfangstests prüfen stabile Filterkontexte, getrennte atomare IQ-Ringe, Samplepositionen und Filterverzögerung, begrenzte Ressourcen, ungeklärte Fensterproben und erhaltene synthetische Herkunft über Aufnahme und Replay. Zwei zusätzliche Gruppentests prüfen gemeinsame Scan-Ursprünge bei verschiedenen Sitzungen und den Schutz der ursprünglichen Replay-Gruppe.
+- Gesamtsuite: **225 Tests bestanden** in 40,2 Sekunden. JavaScript-Logik und -Syntax, Shell-Syntax sowie `git diff --check` bestanden. API-/Loopbackprüfungen liefen mit freigegebenem Netzwerkzugriff in der verwalteten Umgebung.
+- Echte Chromium-Prüfung über lokalen Uvicorn-Server: Analyseansicht, Signaldetails und Scanplanung mit synthetischen Softwarefixtures; keine Seiten-/Konsolenfehler. Desktop 1440 und Mobil 390 Pixel zeigten keinen Seitenüberlauf; breite Signaltabellen und Modellrouten scrollen innerhalb ihrer Begrenzung. Detailansicht, offene Scan-Historie und Tastaturfokus blieben beim Polling erhalten. Ein Planaufruf startete keinen Empfänger. Das ist eine Browserprüfung unter Linux, keine physische Empfangs- oder Windows-Abnahme.
 
 ## Ergänzungen in 0.4.1
 
@@ -69,7 +78,7 @@ Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten
 - Reeller Empfang, Gain-Skalierung und langfristiger Durchsatz von Pluto/RSP1A sowie USB-/Netzwerktransport und Treiberversionen.
 - Installation auf einem echten Windows-/WSL2-System, USB-Durchreichung und WSL-CUDA.
 - Training auf der genannten Thinkstation-GPU; CPU-PyTorch wurde getestet. Hardwareerkennung verwendet tatsächliche Gerätedaten statt einer Annahme zur GPU-Bezeichnung.
-- Visuelle Browser-/Viewport-Prüfung: Die verwaltete Vorschau konnte in dieser Umgebung nicht an `127.0.0.1:4173` binden. Die Startdiagnose und `sites-preview status` bestätigten eine gestoppte Vorschau. Es wurde keine alternative Browserinfrastruktur eingesetzt. JavaScript-/HTML-Prüfungen ersetzen diesen visuellen Test nicht.
+- Vollständige visuelle Abnahme sämtlicher älterer Tabs und echter Hardwareflüsse. Die neue Analyseansicht wurde in 0.5.0 mit Chromium geprüft; ältere dokumentierte Vorschauprobleme und frühere Prüfstände bleiben in den Versionsabschnitten erhalten.
 - Echtes OpenDroneID über Bluetooth/WLAN, DJI-/proprietäre HF-Decoder oder Videolinks: siehe [konkreter Decoderumfang](drohnen.md).
 - Reale unbekannte Gegenklassen, absolute Fehlalarmrate und kalibrierte HF-Empfindlichkeit in dBm. Fehlende Werte werden nicht mit synthetischen Erfolgszahlen gefüllt.
 

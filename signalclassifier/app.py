@@ -26,12 +26,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import __version__, experiment_log, labels, ml
+from . import __version__, decision, experiment_log, labels, ml
+from .analysis_runtime import AnalysisManager
 from .db import Store, utcnow
 from .drones import Bridge, DroneStore, capabilities, example_payload
 from .receivers import CaptureManager
 from .sigmf import read_recording
 from .telemetry import ResourceSummary, ResourceTelemetry
+from .surveillance import ScanController, build_scan_plan
 
 LOG = logging.getLogger(__name__)
 IDENTIFIER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
@@ -156,6 +158,10 @@ class Runtime:
         if self.store.get("settings", "main") is None:
             self.store.put("settings", "main", SettingsInput().model_dump())
         self.telemetry = ResourceTelemetry(on_sample=self.resource_sample)
+        self.analysis = AnalysisManager(self.capture, self.store, data_dir, self.model,
+            lambda: (self.store.get("active_model", "main") or {}).get("model_id"),
+            lambda frequency: labels.suggest(self.store, frequency))
+        self.scanner = ScanController(self.capture, on_window=self.analysis.finish_window)
 
     def resource_sample(self, sample):
         with self.lock:
@@ -622,6 +628,8 @@ class Runtime:
     def close(self):
         for event in self.cancel_events.values():
             event.set()
+        self.scanner.stop()
+        self.analysis.close()
         self.capture.stop()
         self.bridge.stop()
         self.telemetry.close()
@@ -770,6 +778,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.post("/api/receiver/start")
     def receiver_start(config: dict):
         with runtime.lock:
+            if runtime.scanner.status().get("running"):
+                raise ValueError("Ein Scan läuft; vor manueller Abstimmung zuerst den Scan stoppen")
+            if not runtime.capture.status().get("busy"):
+                runtime.analysis.finish_window()
             config = dict(config)
             config.pop("recording_path", None)
             if config.get("source") == "recording":
@@ -778,7 +790,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/receiver/stop")
     def receiver_stop():
-        return finite_json(runtime.capture.stop())
+        with runtime.lock:
+            if runtime.scanner.status().get("running"):
+                raise ValueError("Ein Scan läuft; zum Beenden den Scan stoppen")
+            return finite_json(runtime.capture.stop())
 
     @app.get("/api/spectrum")
     def spectrum():
@@ -795,7 +810,125 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if channel.get("center_frequency_hz") == center_frequency and channel.get("sample_rate") == sample_rate:
                 snapshot["classification"]["bandwidth_hz"] = channel.get("bandwidth_hz")
         snapshot["classification_comparison"] = finite_json(runtime.compare_latest(iq, sample_rate, center_frequency, snapshot, snapshot.get("classification")))
+        snapshot["signal_classifications"] = finite_json(runtime.analysis.overlay(snapshot.get("receiver", {}).get("session_id")))
+        snapshot["analysis_stats"] = finite_json({**runtime.analysis.stats, **runtime.analysis.signals.stats()})
         return finite_json(snapshot)
+
+    @app.get("/api/analysis")
+    def analysis_status():
+        return finite_json({**runtime.analysis.snapshot(), "scan": runtime.scanner.status()})
+
+    @app.get("/api/analysis/settings")
+    def analysis_settings():
+        return runtime.analysis.get_settings()
+
+    @app.post("/api/analysis/settings")
+    def set_analysis_settings(payload: dict):
+        return finite_json(runtime.analysis.set_settings(payload))
+
+    @app.get("/api/analysis/catalogue")
+    def analysis_catalogue():
+        models = []
+        for item in runtime.store.all("model"):
+            summary = {key: item.get(key) for key in ("id", "name", "topology_id", "evaluation_available", "validation_status")}
+            try:
+                metadata = ml.load_model_metadata(item["model_path"])
+                summary.update(classes=metadata["classes"], segment_length=metadata["segment_length"],
+                               evaluation_available=metadata.get("evaluation_available", False))
+            except (ValueError, OSError, KeyError) as exc:
+                summary["error"] = str(exc)
+            models.append(summary)
+        return finite_json({"taxonomy": decision.get_taxonomy(), "models": models,
+                            "settings": runtime.analysis.get_settings()})
+
+    @app.get("/api/analysis/signals")
+    def analysis_signals(limit: int = 100, session_id: str | None = None):
+        if not 1 <= limit <= 2000:
+            raise ValueError("Signallimit muss zwischen 1 und 2000 liegen")
+        return finite_json({"signals": runtime.analysis.signals.list(limit, session_id, compact=True),
+                            "stats": runtime.analysis.signals.stats()})
+
+    def signal_detail(identifier):
+        value = runtime.analysis.signals.get(clean_id(identifier))
+        if value is None:
+            raise HTTPException(404, "Signalentscheidung nicht gefunden")
+        return {**value, "history": runtime.analysis.signals.history(identifier, 500),
+                "retention": {"history_limit_in_export": 500, **runtime.analysis.signals.stats()}}
+
+    @app.get("/api/analysis/signals/{identifier}")
+    def analysis_signal(identifier: str):
+        return finite_json(signal_detail(identifier))
+
+    @app.get("/api/analysis/signals/{identifier}/download")
+    def download_analysis_signal(identifier: str):
+        value = finite_json(signal_detail(identifier))
+        return JSONResponse(value, headers={"Content-Disposition": f'attachment; filename="signal-{clean_id(identifier)}.json"'})
+
+    @app.post("/api/analysis/recordings/{identifier}")
+    def analyze_recording(identifier: str, payload: dict | None = None):
+        payload = payload or {}
+        if set(payload) - {"model_ids", "explain_models"}:
+            raise ValueError("Unbekannte Felder der Aufnahmeauswertung")
+        recording = runtime.recording(identifier)
+        path = runtime.recording_path(recording)
+        iq, metadata = read_recording(path, count=65536)
+        glob = metadata.get("global", {})
+        captures = metadata.get("captures") or [{}]
+        # A recording can contain retunes. Analyze only one consistent prefix.
+        boundaries = [int(c["core:sample_start"]) for c in captures if c.get("core:sample_start", 0) > 0]
+        if boundaries:
+            iq = iq[:min(boundaries)]
+        models = None
+        if "model_ids" in payload:
+            ids = payload["model_ids"]
+            if not isinstance(ids, list) or len(ids) > 8 or not all(isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
+                raise ValueError("Höchstens acht eindeutige Modellkennungen erforderlich")
+            models = [{"id": item, "name": runtime.model(item).get("name", item),
+                       "model_path": runtime.model(item)["model_path"], "level": "modulation"} for item in ids]
+        entry = {"iq": iq, "channel_id": identifier, "session_id": f"recording:{identifier}",
+                 "source_epoch": recording.get("group_id", identifier), "origin_group_id": recording.get("group_id"),
+                 "source": "recording", "recording_id": identifier,
+                 "synthetic": recording.get("synthetic", False),
+                 "data_provenance": recording.get("data_provenance", {}),
+                 "observed_at": captures[0].get("core:datetime") or utcnow(),
+                 "sample_rate": glob.get("core:sample_rate"),
+                 "center_frequency_hz": captures[0].get("core:frequency"),
+                 "bandwidth_hz": glob.get("sc:selected_bandwidth_hz", glob.get("core:sample_rate")),
+                 "sample_count": len(iq), "source_sample_start": 0, "source_sample_stop": len(iq),
+                 "observation_id": hashlib.sha256(iq.tobytes()).hexdigest(),
+                 "quality": glob.get("sc:integrity", {}),
+                 "scope": "consistent_recording_prefix; replay_wideband_for_multisignal_detection"}
+        settings = runtime.analysis.get_settings()
+        if "explain_models" in payload:
+            if type(payload["explain_models"]) is not bool:
+                raise ValueError("explain_models muss true oder false sein")
+            settings["policy"]["explain_models"] = payload["explain_models"]
+        with runtime.analysis.cycle_lock:
+            return finite_json(runtime.analysis.analyze_entry(entry, models=models, settings=settings))
+
+    @app.post("/api/analysis/scan/plan")
+    def analysis_scan_plan(payload: dict):
+        return finite_json(build_scan_plan(payload))
+
+    @app.get("/api/analysis/scan")
+    def analysis_scan():
+        return finite_json(runtime.scanner.status())
+
+    @app.post("/api/analysis/scan/start")
+    def start_analysis_scan(payload: dict):
+        with runtime.lock:
+            plan = build_scan_plan(payload)
+            # Match the decision filter to this requested scan, without changing expert scopes.
+            settings = runtime.analysis.get_settings()
+            settings.update(start_frequency_hz=plan["requested_range"]["start_frequency_hz"],
+                            stop_frequency_hz=plan["requested_range"]["stop_frequency_hz"])
+            runtime.analysis.set_settings(settings)
+            return finite_json(runtime.scanner.start(payload))
+
+    @app.post("/api/analysis/scan/stop")
+    def stop_analysis_scan():
+        with runtime.lock:
+            return finite_json(runtime.scanner.stop())
 
     @app.get("/api/live/compare")
     def live_comparison():
@@ -894,7 +1027,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         iq, metadata = read_recording(path, count=length)
         glob = metadata.get("global", metadata)
         captures = metadata.get("captures", [{}])
-        return finite_json(ml.classify(iq, glob.get("core:sample_rate", metadata.get("sample_rate", 1)), center_frequency_hz=captures[0].get("core:frequency"), use_priors=bool(payload.get("use_priors", False)), model_path=model_path, explain=True))
+        result = ml.classify(iq, glob.get("core:sample_rate", metadata.get("sample_rate", 1)), center_frequency_hz=captures[0].get("core:frequency"), use_priors=bool(payload.get("use_priors", False)), model_path=model_path, explain=True)
+        result["signal_analysis"] = analyze_recording(identifier, {"model_ids": [payload["model_id"]]} if payload.get("model_id") else {})
+        return finite_json(result)
 
     @app.get("/api/emitters")
     def emitters():

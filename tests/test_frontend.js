@@ -28,13 +28,65 @@ const source = original.replace(
   rankedComparisonEntries, liveModelRecommendations, liveSampleMetrics, recordingSelectionWithAdditions,
   topologyAvailable, validateTopologyIds, selectedTopologyIds, prepareExperimentDraft, cleanupDeletionPlan,
   normalizeOptimizationConfig, optimizationBaseConfig, optimizationBestConfig, selectionObjectiveLabel, partialOptimizationReports,
-  normalizeExecutionConfig, telemetrySummary, phaseTimingRows, phaseTime, resourceMetricSummary
+  normalizeExecutionConfig, telemetrySummary, phaseTimingRows, phaseTime, resourceMetricSummary,
+  analysisDecision, analysisStatus, analysisConclusionRows, analysisStageOrder,
+  matchedSignalClassifications, analysisExpertSelection, analysisSettingsPayload, analysisCoverageSummary,
+  analysisPredictionExplanation, presentChildren, replaceContent, analysisLabel, analysisScoreKind
 };`,
 );
 const sandbox = { Intl, console, Set, Map, Date, window: {}, document: {} };
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: sourcePath });
 const f = sandbox.helpers;
+const labels = {
+  waveform_family: [
+    { id: "multicarrier", name: "Mehrträgerartig" },
+    { id: "single_carrier", name: "Einträgerartig" },
+  ],
+};
+assert.equal(
+  f.analysisLabel("multicarrier", "waveform_family", labels),
+  "Mehrträgerartig",
+);
+assert.equal(
+  f.analysisLabel("single_carrier", "waveform_family", labels),
+  "Einträgerartig",
+);
+assert.equal(
+  f.analysisLabel("Eigene Klasse", "modulation", labels),
+  "Eigene Klasse",
+);
+assert.equal(
+  f.analysisScoreKind("heuristic_support_not_probability"),
+  "heuristischer Hinweis, keine Wahrscheinlichkeit",
+);
+assert.ok(
+  f
+    .analysisScoreKind("uncalibrated_model_scores_not_averaged")
+    .includes("nicht gemittelt"),
+);
+assert.deepEqual(
+  Array.from(f.presentChildren([null, undefined, false, 0, "", "Signal"])),
+  [0, "", "Signal"],
+);
+let replaced;
+f.replaceContent(
+  {
+    replaceChildren(...children) {
+      replaced = children;
+    },
+  },
+  null,
+  "Status",
+  null,
+  undefined,
+  0,
+);
+assert.deepEqual(
+  Array.from(replaced),
+  ["Status", 0],
+  "Conditional absent nodes must not become literal null text",
+);
 
 // Averaging dB values would erase the stronger signal's actual contribution.
 assert.ok(
@@ -1022,6 +1074,331 @@ const samplerError = f.telemetrySummary(
 );
 assert.ok(samplerError.reason.includes("Messfehler"));
 
+// Multi-signal decisions keep levels separate. A modulation candidate cannot
+// supply a protocol, service or emitter label, even if a stale label is present.
+const hierarchy = f.analysisConclusionRows({
+  label: "FM",
+  status: "candidate",
+  conclusions: {
+    modulation: { status: "candidate", label: "FM", reason: "Netzvotum" },
+    protocol: { status: "unknown", label: "DVB-T" },
+    service: { status: "conflict", label: "Radio" },
+    emitter: {
+      status: "observed",
+      label: "Decoder-Beleg",
+      evidence_ids: ["ev1"],
+    },
+  },
+});
+assert.equal(hierarchy.length, 5);
+assert.equal(hierarchy[1].label, "FM");
+assert.equal(hierarchy[1].status, "candidate");
+assert.equal(hierarchy[2].label, "Unbekannt");
+assert.equal(hierarchy[3].label, "Unbekannt");
+assert.equal(hierarchy[4].label, "Decoder-Beleg");
+assert.equal(f.analysisStatus("candidate"), "Modellkandidat");
+assert.equal(f.analysisConclusionRows({ label: "AM" })[1].label, "Unbekannt");
+const ofdmAndQam = f.analysisConclusionRows({
+  conclusions: {
+    waveform_family: { status: "candidate", label: "OFDM" },
+    modulation: { status: "candidate", label: "QAM" },
+  },
+});
+assert.equal(ofdmAndQam[0].label, "OFDM");
+assert.equal(ofdmAndQam[1].label, "QAM");
+assert.ok(
+  ofdmAndQam.slice(0, 2).every((row) => row.status === "candidate"),
+  "Waveform and modulation candidates remain distinct statements",
+);
+
+const graph = f.analysisStageOrder({
+  stages: [
+    { id: "fusion", parents: ["models", "hypotheses"] },
+    { id: "models", parents: ["routing"] },
+    { id: "routing", parents: ["hypotheses"] },
+    { id: "hypotheses", parents: ["quality"] },
+    { id: "quality", parents: [] },
+  ],
+});
+assert.deepEqual(
+  Array.from(graph, (v) => v.id),
+  ["quality", "hypotheses", "routing", "models", "fusion"],
+);
+assert.ok(graph.every((v) => !v.dependency_unresolved));
+assert.ok(
+  f
+    .analysisStageOrder({
+      stages: [
+        { id: "a", parents: ["b"] },
+        { id: "b", parents: ["a"] },
+      ],
+    })
+    .every((v) => v.dependency_unresolved),
+);
+assert.equal(
+  f.analysisStageOrder({ stages: [{ id: "child", parents: ["missing"] }] })[0]
+    .dependency_unresolved,
+  true,
+);
+
+const multiSnapshot = {
+  timestamp: new Date(epoch).toISOString(),
+  sample_rate: 2e6,
+  session_id: "now",
+};
+const decisions = [
+  {
+    channel_id: "fm",
+    session_id: "now",
+    observed_at: new Date(epoch).toISOString(),
+    center_frequency_hz: 100.5e6,
+    bandwidth_hz: 40000,
+    sample_rate: 50000,
+    decision: {
+      conclusions: { modulation: { status: "candidate", label: "FM" } },
+    },
+  },
+  {
+    channel_id: "am",
+    session_id: "now",
+    observed_at: new Date(epoch - 500).toISOString(),
+    center_frequency_hz: 100e6,
+    bandwidth_hz: 20000,
+    sample_rate: 25000,
+    decision: {
+      conclusions: { modulation: { status: "candidate", label: "AM" } },
+    },
+  },
+];
+const multi = f.classifiedDetections(
+  detections,
+  prediction,
+  decisions,
+  multiSnapshot,
+);
+assert.deepEqual(
+  Array.from(multi, (v) => v.detected_modulation),
+  ["AM", "FM", "Unbekannt"],
+);
+assert.equal(
+  f.matchedSignalClassifications(
+    detections,
+    decisions.slice(0, 1),
+    multiSnapshot,
+  ).size,
+  1,
+  "One channel observation must never be cloned to all detections",
+);
+assert.ok(
+  f
+    .classifiedDetections(detections, prediction, [], multiSnapshot)
+    .every((v) => !v.modulation_evaluated),
+  "Present but empty pipeline data suppresses legacy fallback",
+);
+for (const mutation of [
+  { observed_at: new Date(epoch - 2001).toISOString() },
+  { observed_at: null },
+  { session_id: "old" },
+  { sample_rate: 1000 },
+  { sample_rate: 3e6 },
+  { center_frequency_hz: 500e6 },
+])
+  assert.equal(
+    f.matchedSignalClassifications(
+      detections,
+      [{ ...decisions[0], ...mutation }],
+      multiSnapshot,
+    ).size,
+    0,
+  );
+assert.equal(f.matchedSignalClassifications(detections, decisions, {}).size, 0);
+assert.equal(
+  f.matchedSignalClassifications(
+    [{ ...detections[1], channel_id: "other" }],
+    decisions,
+    multiSnapshot,
+  ).size,
+  0,
+);
+
+const experts = f.analysisExpertSelection(
+  [{ id: "m1" }],
+  [
+    {
+      model_id: "m1",
+      enabled: false,
+      level: "protocol",
+      families: ["chirp", "chirp"],
+    },
+    { model_id: "imported", enabled: true, level: "modulation", families: [] },
+  ],
+);
+assert.equal(
+  experts[0].enabled,
+  false,
+  "A disabled active model also blocks its automatic fallback",
+);
+assert.equal(experts[0].families.length, 1);
+assert.equal(experts[1].available, false);
+const waveformExpert = f.analysisExpertSelection(
+  [{ id: "ofdm" }],
+  [{ model_id: "ofdm", enabled: true, level: "waveform_family", families: [] }],
+)[0];
+assert.equal(waveformExpert.level, "waveform_family");
+assert.equal(
+  f.analysisExpertSelection([{ id: "default" }], [{ model_id: "default" }])[0]
+    .level,
+  "modulation",
+);
+assert.equal(
+  f.analysisExpertSelection([{ id: "m1" }], []).length,
+  0,
+  "Catalogue loading never selects models",
+);
+const analysisConfig = {
+  enabled: true,
+  use_priors: false,
+  use_active_model: true,
+  start_frequency_hz: 0,
+  stop_frequency_hz: 6e9,
+  max_signals_per_cycle: 4,
+  interval_seconds: 0.5,
+  min_model_score: 0.65,
+  min_margin: 0.15,
+  budget_ms: 500,
+  max_models: 3,
+  require_evaluated_models: true,
+};
+const featureOnly = f.analysisSettingsPayload(
+  { ...analysisConfig, budget_ms: 0, max_models: 0 },
+  experts,
+);
+assert.equal(
+  f.analysisSettingsPayload(analysisConfig, [waveformExpert]).experts[0].level,
+  "waveform_family",
+);
+assert.throws(() =>
+  f.analysisSettingsPayload(analysisConfig, [
+    { ...waveformExpert, level: "invalid" },
+  ]),
+);
+assert.equal(featureOnly.policy.budget_ms, 0);
+assert.equal(featureOnly.policy.max_models, 0);
+assert.equal(
+  featureOnly.policy.explain_models,
+  false,
+  "Model influences stay opt-in",
+);
+assert.equal(
+  f.analysisSettingsPayload({ ...analysisConfig, explain_models: true }, [])
+    .policy.explain_models,
+  true,
+);
+assert.equal(featureOnly.experts[0].enabled, false);
+assert.equal(Object.hasOwn(featureOnly.experts[0], "available"), false);
+const registeredExperts = Array.from({ length: 64 }, (_, index) => ({
+  model_id: `model-${index}`,
+  enabled: false,
+  level: "modulation",
+  families: [],
+}));
+assert.equal(
+  f.analysisSettingsPayload(analysisConfig, registeredExperts).experts.length,
+  64,
+);
+assert.throws(() =>
+  f.analysisSettingsPayload(analysisConfig, [
+    ...registeredExperts,
+    { model_id: "overflow", families: [] },
+  ]),
+);
+for (const mutation of [
+  { start_frequency_hz: 6e9 },
+  { stop_frequency_hz: 7e9 },
+  { max_signals_per_cycle: 17 },
+  { max_signals_per_cycle: 1.5 },
+  { interval_seconds: 0 },
+  { min_model_score: 0.49 },
+  { max_models: 9 },
+  { budget_ms: -1 },
+])
+  assert.throws(() =>
+    f.analysisSettingsPayload({ ...analysisConfig, ...mutation }, []),
+  );
+const noCoverage = f.analysisCoverageSummary({
+  requested_range: { start_frequency_hz: 0, stop_frequency_hz: 6e9 },
+  current_window: null,
+  simultaneous: false,
+  full_range_covered: false,
+});
+assert.equal(noCoverage.active, false);
+assert.equal(noCoverage.fullRangeCovered, false);
+assert.equal(noCoverage.current, "Kein beobachtetes Empfangsfenster");
+assert.equal(noCoverage.simultaneous, false);
+const stoppedCoverage = f.analysisCoverageSummary({
+  current_window: {
+    start_frequency_hz: 99e6,
+    stop_frequency_hz: 101e6,
+    active: false,
+  },
+});
+assert.equal(
+  stoppedCoverage.active,
+  false,
+  "A remembered receiver window is not live coverage",
+);
+
+const attributionSource = {
+  method: "local gradient",
+  contributions: Array.from({ length: 20 }, (_, index) => ({
+    window: index,
+    magnitude: index / 20,
+  })),
+};
+const attributionPreview = f.analysisPredictionExplanation({
+  explanation: attributionSource,
+});
+assert.equal(attributionPreview.total_contributions, 20);
+assert.equal(attributionPreview.contributions.length, 12);
+assert.equal(
+  attributionPreview.contributions[11].window,
+  11,
+  "Preview preserves order and discloses truncation",
+);
+assert.equal(
+  attributionSource.contributions.length,
+  20,
+  "Preview must retain complete exported data",
+);
+assert.equal(f.analysisPredictionExplanation({ explanation: null }), null);
+assert.equal(f.analysisPredictionExplanation({}), null);
+
+const staticHTML = fs.readFileSync(
+  path.join(__dirname, "..", "signalclassifier", "static", "index.html"),
+  "utf8",
+);
+assert.match(
+  staticHTML,
+  /<tbody[^>]*id="reception-analysis-body"/,
+  "Multi-signal rows require a real table body",
+);
+for (const id of [
+  "view-analyse",
+  "analysis-settings-form",
+  "analysis-scan-form",
+  "analysis-signals-body",
+  "analysis-detail",
+  "analysis-explain-models",
+  "rx-analysis-max-channels",
+  "analysis-scan-max-channels",
+]) {
+  assert.equal(
+    staticHTML.split(`id="${id}"`).length,
+    2,
+    `${id} exists exactly once`,
+  );
+}
+
 console.log(
-  "Frontend pure-logic regressions passed: waterfall, selection/drafts, reviewed cleanup, automatic HPO, execution/telemetry, capture budget, validation rankings and live warmup.",
+  "Frontend pure-logic regressions passed: waterfall, selection/drafts, cleanup, HPO, execution/telemetry, multi-signal hierarchy/association, expert policy and coverage.",
 );

@@ -36,6 +36,14 @@
     cleanupPlan: null,
     cleanupBusy: false,
     cleanupSequence: 0,
+    analysis: null,
+    analysisCatalogue: null,
+    analysisExpertDrafts: new Map(),
+    analysisSettingsLoaded: false,
+    analysisPolling: false,
+    analysisSelectedId: null,
+    analysisDetail: null,
+    analysisScanPlan: null,
   };
   const titles = {
     empfang: [
@@ -45,6 +53,10 @@
     aufnahmen: [
       "Aufnahmen & Datensätze",
       "IQ-Daten organisieren, Labels bestätigen und Versuche vorbereiten.",
+    ],
+    analyse: [
+      "Analyse & Entscheidungswege",
+      "Mehrere Signale einzeln prüfen. Kandidaten und Belege nachvollziehen.",
     ],
     emitter: [
       "Emitter & Labeling",
@@ -128,6 +140,14 @@
   }
   function itemArray(value, key) {
     return Array.isArray(value) ? value : arr(value?.[key]);
+  }
+  function presentChildren(children) {
+    return children.filter(
+      (child) => child !== null && child !== undefined && child !== false,
+    );
+  }
+  function replaceContent(node, ...children) {
+    node.replaceChildren(...presentChildren(children));
   }
   function el(tag, props = {}, children = []) {
     const n = document.createElement(tag);
@@ -305,6 +325,7 @@
     $("#page-description").textContent = titles[view][1];
     const actions = {
       empfang: ["play", "Empfang starten"],
+      analyse: ["refresh", "Analyse aktualisieren"],
       aufnahmen: ["upload", "SigMF importieren"],
       emitter: ["plus", "Eintrag hinzufügen"],
       topologien: ["plus", "Eigene Topologie"],
@@ -320,6 +341,7 @@
       history.replaceState(null, "", `#${view}`);
     try {
       if (view === "aufnahmen") await loadRecordings();
+      if (view === "analyse") await loadAnalysis(true);
       if (view === "emitter") await loadEmitters();
       if (view === "topologien") await loadTopologies();
       if (view === "experimente") {
@@ -897,6 +919,7 @@
       duration_seconds: Number(f.get("duration_seconds")),
       max_bytes: Number(f.get("max_mib")) * 1048576,
       max_channels: Number(f.get("max_channels")),
+      analysis_max_channels: Number(f.get("analysis_max_channels")),
       queue_capacity_bytes: Number(f.get("queue_mib")) * 1048576,
       spectrum_refresh_hz: Number(f.get("spectrum_refresh_hz")),
       detection_interval_seconds: Number(f.get("detection_interval_ms")) / 1000,
@@ -1163,7 +1186,218 @@
     });
     return chosen;
   }
-  function classifiedDetections(detections, classification) {
+  function analysisDecision(value) {
+    return value?.decision && typeof value.decision === "object"
+      ? value.decision
+      : value || {};
+  }
+  function analysisStatus(value) {
+    return (
+      {
+        unknown: "Unbekannt",
+        hypothesis: "Merkmalshypothese",
+        candidate: "Modellkandidat",
+        model_candidate: "Modellkandidat",
+        observed: "Beobachtet",
+        conflict: "Widerspruch",
+        no_signal: "Kein Signal",
+        invalid: "Ungültige Eingabe",
+        insufficient_samples: "Zu wenige Samples",
+        budget_exhausted: "Rechenbudget erschöpft",
+        not_run_budget: "Wartet auf Rechenbudget",
+        not_evaluated: "Nicht geprüft",
+        unsupported: "Nicht unterstützt",
+        run: "Ausgeführt",
+        skipped: "Übersprungen",
+        error: "Fehler",
+        rejected: "Abgelehnt",
+        passed: "Bestanden",
+        completed: "Abgeschlossen",
+        running: "Läuft",
+        idle: "Bereit",
+        stopped: "Gestoppt",
+        starting: "Startet",
+        stopping: "Stoppt",
+        analyzing: "Wertet Empfangsfenster aus",
+        cancelled: "Abgebrochen",
+      }[value] || text(value, "Unbekannt")
+    );
+  }
+  function analysisLabel(
+    label,
+    level = null,
+    taxonomy = state.analysisCatalogue?.taxonomy,
+  ) {
+    const value = text(label, "Unbekannt");
+    const candidates = level
+      ? arr(taxonomy?.[level])
+      : Object.values(taxonomy || {}).flatMap((items) => arr(items));
+    const item = candidates.find(
+      (entry) =>
+        String(entry.id).toLocaleLowerCase("de") ===
+        value.toLocaleLowerCase("de"),
+    );
+    return item?.name || value;
+  }
+  function analysisScoreKind(kind) {
+    return (
+      {
+        heuristic_support_not_probability:
+          "heuristischer Hinweis, keine Wahrscheinlichkeit",
+        uncalibrated_model_scores_not_averaged:
+          "unkalibrierte Modellwerte, nicht gemittelt",
+        uncalibrated_model_score: "unkalibrierter Modellwert",
+      }[kind] || "unkalibrierter Bewertungswert"
+    );
+  }
+  function analysisConclusionRows(value) {
+    const decision = analysisDecision(value);
+    return [
+      ["waveform_family", "Signalform / Übertragungsverfahren"],
+      ["modulation", "Modulation"],
+      ["protocol", "Protokoll"],
+      ["service", "Funkdienst"],
+      ["emitter", "Emitter"],
+    ].map(([key, title]) => {
+      const source = decision.conclusions?.[key] || {};
+      const status = source.status || "unknown";
+      const hasLabel =
+        !["unknown", "conflict", "not_evaluated", "unsupported"].includes(
+          status,
+        ) && !!source.label;
+      return {
+        key,
+        title,
+        status,
+        label: hasLabel ? String(source.label) : "Unbekannt",
+        reason:
+          source.reason ||
+          "Für diese Ebene liegt keine belastbare Aussage vor.",
+        candidates: arr(source.candidates),
+        evidenceIds: arr(source.evidence_ids),
+      };
+    });
+  }
+  function analysisStageOrder(value) {
+    const stages = arr(analysisDecision(value).stages);
+    const ids = new Set(stages.map((s) => String(s.id)));
+    const done = new Set(),
+      ordered = [],
+      pending = [...stages];
+    while (pending.length) {
+      const index = pending.findIndex((s) =>
+        arr(s.parents).every(
+          (id) => !ids.has(String(id)) || done.has(String(id)),
+        ),
+      );
+      if (index < 0) {
+        ordered.push(
+          ...pending.map((s) => ({ ...s, dependency_unresolved: true })),
+        );
+        break;
+      }
+      const [stage] = pending.splice(index, 1);
+      ordered.push({
+        ...stage,
+        dependency_unresolved: arr(stage.parents).some(
+          (id) => !ids.has(String(id)),
+        ),
+      });
+      done.add(String(stage.id));
+    }
+    return ordered;
+  }
+  function matchedSignalClassifications(detections, observations, snapshot) {
+    const now = Date.parse(
+      snapshot?.analysis_timestamp || snapshot?.timestamp || "",
+    );
+    if (!Number.isFinite(now)) return new Map();
+    const session = snapshot?.session_id || snapshot?.receiver?.session_id;
+    const pairs = [];
+    arr(observations).forEach((observation, observationIndex) => {
+      const when = Date.parse(observation.observed_at || "");
+      if (!Number.isFinite(when) || Math.abs(now - when) > 2000) return;
+      if (
+        session &&
+        observation.session_id &&
+        observation.session_id !== session
+      )
+        return;
+      const input = analysisDecision(observation).input || {};
+      const bounds = detectionBounds({ ...input, ...observation });
+      const rate = finiteNumber(observation.sample_rate ?? input.sample_rate);
+      if (
+        !bounds ||
+        rate === null ||
+        rate <= 0 ||
+        bounds.bandwidth > rate * 1.01
+      )
+        return;
+      const receiverRate = finiteNumber(snapshot.sample_rate);
+      if (receiverRate > 0 && rate > receiverRate * 1.01) return;
+      arr(detections).forEach((detection, detectionIndex) => {
+        const d = detectionBounds(detection);
+        if (!d) return;
+        if (
+          detection.channel_id &&
+          observation.channel_id &&
+          String(detection.channel_id) !== String(observation.channel_id)
+        )
+          return;
+        const overlap =
+          Math.min(d.high, bounds.high) - Math.max(d.low, bounds.low);
+        if (
+          overlap <= 0 ||
+          Math.abs(d.center - bounds.center) >
+            Math.max(d.bandwidth, bounds.bandwidth) / 2
+        )
+          return;
+        pairs.push({
+          observation,
+          observationIndex,
+          detectionIndex,
+          overlap: overlap / Math.min(d.bandwidth, bounds.bandwidth),
+          distance: Math.abs(d.center - bounds.center),
+        });
+      });
+    });
+    pairs.sort((a, b) => b.overlap - a.overlap || a.distance - b.distance);
+    const result = new Map(),
+      used = new Set();
+    for (const pair of pairs) {
+      if (result.has(pair.detectionIndex) || used.has(pair.observationIndex))
+        continue;
+      result.set(pair.detectionIndex, pair.observation);
+      used.add(pair.observationIndex);
+    }
+    return result;
+  }
+  function classifiedDetections(
+    detections,
+    classification,
+    observations = null,
+    snapshot = null,
+  ) {
+    if (Array.isArray(observations)) {
+      const matched = matchedSignalClassifications(
+        detections,
+        observations,
+        snapshot,
+      );
+      return arr(detections).map((d, index) => {
+        const observation = matched.get(index);
+        const conclusion = analysisConclusionRows(observation).find(
+          (row) => row.key === "modulation",
+        );
+        return {
+          ...d,
+          detected_modulation: conclusion.label,
+          modulation_evaluated: !!observation,
+          modulation_status: conclusion.status,
+          analysis_signal_id: observation?.signal_id || observation?.id,
+        };
+      });
+    }
     const index = associatedDetectionIndex(detections, classification);
     return arr(detections).map((d, i) => ({
       ...d,
@@ -1171,6 +1405,14 @@
         i === index ? String(classification.label) : "unbekannt",
       modulation_evaluated: i === index,
     }));
+  }
+  function detectionModulationLabel(detection) {
+    const label = text(detection.detected_modulation, "unbekannt");
+    return ["candidate", "model_candidate", "hypothesis"].includes(
+      detection.modulation_status,
+    )
+      ? `${label} · ${detection.modulation_status === "hypothesis" ? "Hypothese" : "Kandidat"}`
+      : label;
   }
   function detectionTone(detection) {
     const label = String(detection.detected_modulation || "").toUpperCase();
@@ -1280,6 +1522,8 @@
       detections: classifiedDetections(
         arr(snapshot.detections),
         snapshot.classification,
+        snapshot.signal_classifications,
+        snapshot,
       ),
     };
   }
@@ -1629,7 +1873,7 @@
       ctx.textAlign = "left";
       ctx.fillStyle = color;
       ctx.fillText(
-        `${text(d.detected_modulation, "unbekannt")} · ${num(bounds.center / 1e6, 4)} MHz`,
+        `${detectionModulationLabel(d)} · ${num(bounds.center / 1e6, 4)} MHz`,
         badge.x + 7,
         badge.y + 13,
       );
@@ -1658,6 +1902,8 @@
     for (const d of classifiedDetections(
       arr(snapshot.detections),
       snapshot.classification,
+      snapshot.signal_classifications,
+      snapshot,
     )) {
       const box = frequencyBox(
         d,
@@ -1742,7 +1988,8 @@
     if (!result) return;
     const steps = arr(result.steps || result.decision_path);
     if (container) {
-      container.replaceChildren(
+      replaceContent(
+        container,
         el("div", { class: "classification-result" }, [
           el("span", { class: "metric-label", text: "ERGEBNIS" }),
           el("strong", { text: text(result.label) }),
@@ -1842,8 +2089,18 @@
     );
     return node;
   }
-  function renderDetections(detections, classification = null) {
-    const rows = classifiedDetections(arr(detections), classification);
+  function renderDetections(
+    detections,
+    classification = null,
+    observations = null,
+    snapshot = null,
+  ) {
+    const rows = classifiedDetections(
+      arr(detections),
+      classification,
+      observations,
+      snapshot,
+    );
     $("#detection-count").textContent = String(rows.length);
     $("#detection-list").replaceChildren(
       ...(rows.length
@@ -1856,7 +2113,7 @@
                 el("div", { class: "detection-card-heading" }, [
                   el("strong", { text: mhz(bounds?.center) }),
                   pill(
-                    text(d.detected_modulation, "unbekannt"),
+                    detectionModulationLabel(d),
                     d.modulation_evaluated ? "cyan" : "",
                   ),
                 ]),
@@ -1869,7 +2126,7 @@
                 el("span", {
                   class: "detection-class-note",
                   text: d.modulation_evaluated
-                    ? "Modulation für diesen Kanal ausgewertet · keine Emitterbestätigung"
+                    ? `${d.modulation_status ? analysisStatus(d.modulation_status) : "Ausgewertet"} für diesen Kanal · keine Emitterbestätigung`
                     : "Modulation dieses Kanals noch nicht ausgewertet",
                 }),
               ],
@@ -1896,8 +2153,17 @@
     if (power.length) addWaterfall(snapshot);
     drawSpectrum();
     drawWaterfall();
-    renderDetections(snapshot.detections, snapshot.classification);
-    if (snapshot.classification) renderClassification(snapshot.classification);
+    renderDetections(
+      snapshot.detections,
+      snapshot.classification,
+      snapshot.signal_classifications,
+      snapshot,
+    );
+    renderReceptionAnalysis(snapshot);
+    if (Array.isArray(snapshot.signal_classifications))
+      renderReceptionDecision(snapshot);
+    else if (snapshot.classification)
+      renderClassification(snapshot.classification);
   }
   async function loadLiveComparison() {
     const selection = await api("/api/live/compare");
@@ -2213,8 +2479,29 @@
                   body: { use_priors: !!state.settings.use_priors },
                 },
               );
-              renderClassification(result, $("#recording-classification"));
+              if (result.signal_analysis)
+                renderAnalysisDetail(
+                  result.signal_analysis,
+                  $("#recording-classification"),
+                );
+              else renderClassification(result, $("#recording-classification"));
               openDialog("classification-dialog");
+            }),
+          ),
+          button("Analyse", () =>
+            action(async () => {
+              const signal = await api(
+                `/api/analysis/recordings/${encodeURIComponent(r.id)}`,
+                { method: "POST", body: {} },
+              );
+              state.analysisSelectedId = signal.id || signal.signal_id;
+              state.analysisDetail = signal;
+              await changeView("analyse");
+              renderAnalysisDetail(signal);
+              $("#analysis-detail").scrollIntoView({
+                behavior: "smooth",
+                block: "start",
+              });
             }),
           ),
           download(
@@ -5478,6 +5765,1084 @@
     );
     if (state.map) renderMapTracks();
   }
+  const ANALYSIS_LEVELS = {
+    waveform_family: "Signalform / Übertragungsverfahren",
+    modulation: "Modulation",
+    protocol: "Protokoll",
+    service: "Funkdienst",
+    emitter: "Emitter",
+  };
+  function analysisExpertSelection(models, drafts) {
+    const known = new Set(arr(models).map((m) => String(m.id || m.model_id)));
+    return arr(drafts)
+      .map((d) => ({
+        model_id: String(d.model_id || ""),
+        enabled: d.enabled === true,
+        level: Object.hasOwn(ANALYSIS_LEVELS, d.level) ? d.level : "modulation",
+        families: [
+          ...new Set(
+            arr(d.families)
+              .map((v) => String(v).trim())
+              .filter(Boolean),
+          ),
+        ],
+        available: known.has(String(d.model_id)),
+      }))
+      .filter((d) => d.model_id);
+  }
+  function analysisSettingsPayload(values, experts) {
+    const number = (key) => {
+      const value = finiteNumber(values[key]);
+      if (value === null)
+        throw new Error(`Analyse: gültige Zahl für ${key} erforderlich.`);
+      return value;
+    };
+    const start = number("start_frequency_hz"),
+      stop = number("stop_frequency_hz");
+    if (start < 0 || stop > 6e9 || stop <= start)
+      throw new Error(
+        "Analysebereich: Beginn und Ende zwischen 0 und 6 000 MHz, Ende größer als Beginn.",
+      );
+    const maxSignals = number("max_signals_per_cycle"),
+      interval = number("interval_seconds");
+    const minScore = number("min_model_score"),
+      margin = number("min_margin");
+    const budget = number("budget_ms"),
+      maxModels = number("max_models");
+    if (
+      !Number.isInteger(maxSignals) ||
+      maxSignals < 1 ||
+      maxSignals > 16 ||
+      interval < 0.1 ||
+      interval > 30 ||
+      !Number.isInteger(maxModels) ||
+      maxModels < 0 ||
+      maxModels > 8 ||
+      budget < 0 ||
+      budget > 60000 ||
+      minScore < 0.5 ||
+      minScore > 1 ||
+      margin < 0 ||
+      margin > 1
+    )
+      throw new Error(
+        "Ungültiges Analysebudget: 1–16 Signale, Intervall 0,1–30 s, 0–8 Modelle, Budget 0–60 000 ms, Klassenwert 0,5–1 und Abstand 0–1 erforderlich.",
+      );
+    if (
+      arr(experts).length > 64 ||
+      arr(experts).some(
+        (e) =>
+          !e.model_id ||
+          !Object.hasOwn(ANALYSIS_LEVELS, e.level) ||
+          arr(e.families).length > 32 ||
+          arr(e.families).some((f) => f.length > 80),
+      )
+    )
+      throw new Error(
+        "Experten benötigen eine gültige Zielebene; höchstens 64 Einträge mit jeweils 32 Familien (bis 80 Zeichen) sind zulässig.",
+      );
+    return {
+      enabled: values.enabled === true,
+      use_priors: values.use_priors === true,
+      use_active_model: values.use_active_model === true,
+      start_frequency_hz: start,
+      stop_frequency_hz: stop,
+      max_signals_per_cycle: maxSignals,
+      interval_seconds: interval,
+      policy: {
+        min_model_score: minScore,
+        min_margin: margin,
+        budget_ms: budget,
+        max_models: maxModels,
+        require_evaluated_models: values.require_evaluated_models === true,
+        explain_models: values.explain_models === true,
+      },
+      experts: arr(experts).map(({ model_id, enabled, level, families }) => ({
+        model_id,
+        enabled,
+        level,
+        families,
+      })),
+    };
+  }
+  function analysisRangeText(range) {
+    const start = finiteNumber(range?.start_frequency_hz),
+      stop = finiteNumber(range?.stop_frequency_hz);
+    return start !== null && stop !== null && stop > start
+      ? `${mhz(start)} – ${mhz(stop)}`
+      : "Bereich unbekannt";
+  }
+  function analysisCoverageSummary(coverage) {
+    const c = coverage || {},
+      w = c.current_window || {};
+    const start = finiteNumber(w.start_frequency_hz),
+      stop = finiteNumber(w.stop_frequency_hz);
+    const known = start !== null && stop !== null && stop > start;
+    return {
+      requested: analysisRangeText(c.requested_range),
+      current: known
+        ? analysisRangeText(w)
+        : "Kein beobachtetes Empfangsfenster",
+      active: w.active === true,
+      observedAt: w.observed_at || null,
+      source: w.source || null,
+      simultaneous: c.simultaneous === true,
+      fullRangeCovered: c.full_range_covered === true,
+      notes: arr(c.notes),
+    };
+  }
+  function analysisJSONDetails(title, value, open = false) {
+    return el("details", { class: "analysis-json-details", open }, [
+      el("summary", { text: title }),
+      el("pre", { text: JSON.stringify(value ?? null, null, 2) }),
+    ]);
+  }
+  function analysisNotice(message, tone = "") {
+    return el("p", { class: `notice ${tone}`, text: message });
+  }
+  function populateAnalysisSettings(settings) {
+    const values = {
+      "analysis-start-mhz": settings.start_frequency_hz / 1e6,
+      "analysis-stop-mhz": settings.stop_frequency_hz / 1e6,
+      "analysis-max-signals": settings.max_signals_per_cycle,
+      "analysis-interval": settings.interval_seconds,
+      "analysis-min-score": settings.policy?.min_model_score,
+      "analysis-min-margin": settings.policy?.min_margin,
+      "analysis-budget-ms": settings.policy?.budget_ms,
+      "analysis-max-models": settings.policy?.max_models,
+    };
+    for (const [id, value] of Object.entries(values))
+      if (value !== undefined && Number.isFinite(value))
+        $(`#${id}`).value = value;
+    for (const [id, value] of Object.entries({
+      "analysis-enabled": settings.enabled,
+      "analysis-use-priors": settings.use_priors,
+      "analysis-use-active-model": settings.use_active_model,
+      "analysis-require-evaluated": settings.policy?.require_evaluated_models,
+      "analysis-explain-models": settings.policy?.explain_models,
+    }))
+      $(`#${id}`).checked = value === true;
+    state.analysisExpertDrafts = new Map(
+      arr(settings.experts).map((e) => [
+        e.model_id,
+        { ...e, families: arr(e.families) },
+      ]),
+    );
+    state.analysisSettingsLoaded = true;
+  }
+  function renderAnalysisExperts() {
+    const cards = itemArray(state.analysisCatalogue?.models, "models");
+    const known = new Map(cards.map((m) => [String(m.id || m.model_id), m]));
+    const ids = [
+      ...new Set([...known.keys(), ...state.analysisExpertDrafts.keys()]),
+    ];
+    $("#analysis-experts").replaceChildren(
+      ...(ids.length
+        ? ids.map((id) => {
+            const card = known.get(id),
+              draft = state.analysisExpertDrafts.get(id) || {
+                model_id: id,
+                enabled: false,
+                level: "modulation",
+                families: [],
+              };
+            const checked = el("input", {
+              type: "checkbox",
+              checked: draft.enabled === true,
+              "aria-label": `${text(card?.name, id)} als Experte`,
+            });
+            const level = el(
+              "select",
+              { "aria-label": `Zielebene für ${text(card?.name, id)}` },
+              Object.entries(ANALYSIS_LEVELS).map(([value, title]) =>
+                el("option", {
+                  value,
+                  text: title,
+                  selected: draft.level === value,
+                }),
+              ),
+            );
+            const families = el("input", {
+              type: "text",
+              value: arr(draft.families).join(", "),
+              placeholder: "Alle Familien",
+              "aria-label": `Signalfamilien für ${text(card?.name, id)}`,
+            });
+            const update = () =>
+              state.analysisExpertDrafts.set(id, {
+                model_id: id,
+                enabled: checked.checked,
+                level: level.value,
+                families: families.value
+                  .split(",")
+                  .map((v) => v.trim())
+                  .filter(Boolean),
+              });
+            checked.addEventListener("change", update);
+            level.addEventListener("change", update);
+            families.addEventListener("input", update);
+            return el("div", { class: "analysis-expert-row" }, [
+              el("label", {}, [
+                checked,
+                el("span", {}, [
+                  el("strong", { text: text(card?.name, id) }),
+                  el("small", { text: id }),
+                ]),
+              ]),
+              pill(
+                !card
+                  ? "Nicht in Bibliothek"
+                  : card.evaluation_available === true
+                    ? "Bewertet"
+                    : "Bewertung nicht belegt",
+                card?.evaluation_available === true ? "green" : "amber",
+              ),
+              el("label", {}, [el("span", { text: "Zielebene" }), level]),
+              el("label", {}, [
+                el("span", {
+                  text: "Familien-Kennungen, durch Komma getrennt",
+                }),
+                families,
+              ]),
+              card?.classes
+                ? el("small", {
+                    text: `Gelernte Klassen: ${arr(card.classes).join(", ")}`,
+                  })
+                : null,
+              card?.error
+                ? el("small", {
+                    text: `Modellmetadaten nicht verfügbar: ${card.error}`,
+                  })
+                : null,
+            ]);
+          })
+        : [
+            empty(
+              "Keine Modelle in der Bibliothek. Merkmale können Hypothesen liefern; für Modellkandidaten zunächst ein Netz trainieren oder importieren.",
+            ),
+          ]),
+    );
+    const taxonomy = state.analysisCatalogue?.taxonomy;
+    if (taxonomy)
+      $("#analysis-experts").append(
+        el("details", { class: "analysis-json-details" }, [
+          el("summary", { text: "Klassensystem: Aussagen und Grenzen" }),
+          ...Object.entries(ANALYSIS_LEVELS).map(([key, title]) =>
+            el("div", {}, [
+              el("strong", { text: title }),
+              el("p", {
+                text:
+                  arr(taxonomy[key])
+                    .map((v) =>
+                      v.name && v.name !== v.id ? `${v.name} (${v.id})` : v.id,
+                    )
+                    .join(" · ") || "Keine Einträge",
+              }),
+            ]),
+          ),
+          ...arr(taxonomy.limitations).map((note) =>
+            el("p", { text: String(note) }),
+          ),
+        ]),
+      );
+  }
+  function analysisSettingsFromForm() {
+    const value = (id) => $(`#analysis-${id}`).value;
+    const payload = analysisSettingsPayload(
+      {
+        enabled: $("#analysis-enabled").checked,
+        use_priors: $("#analysis-use-priors").checked,
+        use_active_model: $("#analysis-use-active-model").checked,
+        start_frequency_hz: Number(value("start-mhz")) * 1e6,
+        stop_frequency_hz: Number(value("stop-mhz")) * 1e6,
+        max_signals_per_cycle: value("max-signals"),
+        interval_seconds: value("interval"),
+        min_model_score: value("min-score"),
+        min_margin: value("min-margin"),
+        budget_ms: value("budget-ms"),
+        max_models: value("max-models"),
+        require_evaluated_models: $("#analysis-require-evaluated").checked,
+        explain_models: $("#analysis-explain-models").checked,
+      },
+      analysisExpertSelection(
+        itemArray(state.analysisCatalogue?.models, "models"),
+        [...state.analysisExpertDrafts.values()],
+      ),
+    );
+    return {
+      ...state.analysis?.settings,
+      ...payload,
+      policy: { ...state.analysis?.settings?.policy, ...payload.policy },
+    };
+  }
+  function renderAnalysisCoverage() {
+    const coverage = state.analysis?.coverage || {},
+      c = analysisCoverageSummary(coverage);
+    const window = coverage.current_window || {};
+    const limits = coverage.receiver_limits || {};
+    replaceContent(
+      $("#analysis-coverage"),
+      pill(
+        c.active ? "Empfangsfenster aktiv" : "Kein aktives Empfangsfenster",
+        c.active ? "green" : "",
+      ),
+      el("strong", { text: c.current }),
+      el("p", {
+        text: `Angeforderter Suchbereich: ${c.requested}. Quelle: ${sourceLabel(c.source)}. Letzte Beobachtung: ${date(c.observedAt)}.`,
+      }),
+      el("p", {
+        text: `${c.simultaneous ? "Gleichzeitige Abdeckung gemeldet" : "Ein Empfängerfenster zu einer Zeit"} · ${c.fullRangeCovered ? "Gesamtbereich laut Backend abgedeckt" : "Keine vollständige Abdeckung von 0–6 GHz belegt"}.`,
+      }),
+      finiteNumber(window.sample_rate) !== null
+        ? el("small", {
+            text: `Abtastrate ${num(window.sample_rate / 1e6, 3)} MS/s`,
+          })
+        : null,
+      finiteNumber(limits.min_frequency_hz) !== null
+        ? el("small", {
+            text: `Empfängergrenzen: ${mhz(limits.min_frequency_hz)} – ${mhz(limits.max_frequency_hz)}`,
+          })
+        : null,
+      ...c.notes.map((note) => el("small", { text: String(note) })),
+    );
+  }
+  function renderAnalysisStats() {
+    const stats = state.analysis?.stats || {},
+      settings = state.analysis?.settings || {};
+    const cards = [
+      [
+        "ANALYSE",
+        settings.enabled === true ? "Aktiviert" : "Deaktiviert",
+        `${num(stats.cycles, 0)} Auswertungszyklen`,
+      ],
+      [
+        "SIGNALE",
+        num(stats.signal_count, 0),
+        `${num(stats.observation_count ?? stats.analyzed_observations, 0)} Beobachtungen · ${num(stats.pending_signals, 0)} ausstehend`,
+      ],
+      [
+        "EXPERTEN",
+        num(arr(settings.experts).filter((e) => e.enabled).length, 0),
+        settings.use_active_model
+          ? "Aktives Modell zusätzlich, sofern zugelassen"
+          : "Aktives Modell nicht zusätzlich verwenden",
+      ],
+      [
+        "ZYKLUSDAUER",
+        stats.last_cycle_ms === null || stats.last_cycle_ms === undefined
+          ? "—"
+          : `${num(stats.last_cycle_ms, 1)} ms`,
+        `${num(stats.unbuffered_detections, 0)} Detektionen ohne IQ-Puffer`,
+      ],
+    ];
+    $("#analysis-stats").replaceChildren(
+      ...cards.map(([label, value, note]) =>
+        el("div", { class: "analysis-stat" }, [
+          el("span", { class: "metric-label", text: label }),
+          el("strong", { text: value }),
+          el("small", { text: note }),
+        ]),
+      ),
+      ...(stats.last_error
+        ? [
+            analysisNotice(
+              `Letzter Analysefehler: ${stats.last_error}`,
+              "error",
+            ),
+          ]
+        : []),
+    );
+  }
+  function analysisSignalRow(signal, compact = false) {
+    const decision = analysisDecision(signal),
+      levels = analysisConclusionRows(decision);
+    const byKey = Object.fromEntries(levels.map((r) => [r.key, r]));
+    const id = signal.id || signal.signal_id;
+    const inspect = button(
+      "Entscheidungsweg",
+      () => action(() => inspectAnalysisSignal(id)),
+      "button button-quiet",
+    );
+    inspect.disabled = !id;
+    if (compact)
+      return el("tr", {}, [
+        detailCell(
+          mhz(signal.center_frequency_hz),
+          `${num(signal.bandwidth_hz / 1e3)} kHz`,
+        ),
+        detailCell(
+          analysisLabel(byKey.modulation.label, "modulation"),
+          analysisStatus(byKey.modulation.status),
+        ),
+        detailCell(
+          analysisLabel(byKey.protocol.label, "protocol"),
+          analysisStatus(byKey.protocol.status),
+        ),
+        el("td", {}, [inspect]),
+      ]);
+    return el(
+      "tr",
+      { class: state.analysisSelectedId === id ? "selected" : "" },
+      [
+        detailCell(
+          text(signal.channel_id, id),
+          `${sourceLabel(signal.source)} · ${num(signal.observation_count, 0)} Beobachtungen`,
+        ),
+        detailCell(
+          mhz(signal.center_frequency_hz),
+          `${num(signal.sample_rate / 1e3)} kS/s`,
+        ),
+        el("td", { text: `${num(signal.bandwidth_hz / 1e3)} kHz` }),
+        detailCell(
+          analysisLabel(byKey.modulation.label, "modulation"),
+          analysisStatus(byKey.modulation.status),
+        ),
+        detailCell(
+          analysisLabel(byKey.protocol.label, "protocol"),
+          analysisStatus(byKey.protocol.status),
+        ),
+        detailCell(
+          analysisLabel(byKey.service.label, "service"),
+          `Emitter: ${analysisLabel(byKey.emitter.label, "emitter")}`,
+        ),
+        detailCell(
+          analysisStatus(decision.status || signal.status),
+          `Zuletzt ${date(signal.last_seen || signal.observed_at)}`,
+        ),
+        el("td", {}, [
+          el("div", { class: "table-actions" }, [
+            inspect,
+            id
+              ? download(
+                  `/api/analysis/signals/${encodeURIComponent(id)}/download`,
+                  "Signalbericht JSON",
+                  true,
+                )
+              : null,
+          ]),
+        ]),
+      ],
+    );
+  }
+  function renderReceptionAnalysis(snapshot) {
+    const holder = $("#reception-analysis-body");
+    if (!holder) return;
+    const channel = snapshot.analysis_status || {},
+      stats = snapshot.analysis_stats || {};
+    $("#reception-analysis-status").textContent =
+      `Empfangsfenster: ${num(channel.detected_channels, 0)} detektiert · ${num(channel.buffered_channels, 0)} gepuffert (Filterlimit ${num(channel.channel_limit, 0)}) · ${num(channel.unbuffered_detections_count, 0)} ohne IQ-Puffer. Nachgelagerte Analyse: ${num(stats.pending_signals, 0)} ausstehend. Mehr Filterkanäle benötigen zusätzliche CPU-Zeit; unbekannte oder ungepufferte Signale sind keine negativen Klassifikationsergebnisse.`;
+    if (holder.contains(document.activeElement)) return;
+    const signals = [
+      ...matchedSignalClassifications(
+        arr(snapshot.detections),
+        snapshot.signal_classifications,
+        snapshot,
+      ).values(),
+    ];
+    holder.replaceChildren(
+      ...(signals.length
+        ? signals.map((s) => analysisSignalRow(s, true))
+        : [
+            el("tr", {}, [
+              el("td", { colSpan: 4 }, [
+                empty(
+                  "Noch keine kanalspezifische Analyse. Im Tab Analyse aktivieren; jede Auswertung gehört zu genau einem IQ-Kanal.",
+                ),
+              ]),
+            ]),
+          ]),
+    );
+  }
+  function renderReceptionDecision(snapshot) {
+    if ($("#decision-steps").contains(document.activeElement)) return;
+    const observations = [
+      ...matchedSignalClassifications(
+        arr(snapshot.detections),
+        snapshot.signal_classifications,
+        snapshot,
+      ).values(),
+    ];
+    $("#classification-label").textContent =
+      observations.length > 1
+        ? `${observations.length} Signale einzeln ausgewertet`
+        : observations.length
+          ? analysisConclusionRows(observations[0]).find(
+              (r) => r.key === "modulation",
+            ).label
+          : "Keine aktuelle Kanalanalyse";
+    $("#classification-confidence").textContent =
+      "Hierarchische Analyse · Modellwerte sind unkalibrierte Kandidaten";
+    $("#classification-time").textContent =
+      observations.length === 1
+        ? `${num(analysisDecision(observations[0]).elapsed_ms, 1)} ms`
+        : "Je Kanal";
+    $("#decision-steps").replaceChildren(
+      ...(observations.length
+        ? observations.map((o) => {
+            const conclusion = analysisConclusionRows(o).find(
+              (r) => r.key === "modulation",
+            );
+            return el("div", { class: "analysis-reception-summary" }, [
+              el("strong", {
+                text: `${mhz(o.center_frequency_hz)} · ${analysisLabel(conclusion.label, "modulation")} · ${analysisStatus(conclusion.status)}`,
+              }),
+              el("p", { text: conclusion.reason }),
+              button("Alle Aussageebenen und Belege", () =>
+                action(() => inspectAnalysisSignal(o.signal_id || o.id)),
+              ),
+            ]);
+          })
+        : [
+            empty(
+              "Noch kein aktuelles, zu diesem Empfangsfenster passendes Analyseergebnis. Im Tab Analyse aktivieren; unbekannte Signale bleiben unbekannt.",
+            ),
+          ]),
+    );
+    $("#features-grid").replaceChildren(
+      ...(observations.length === 1
+        ? Object.entries(analysisDecision(observations[0]).features || {}).map(
+            ([key, value]) =>
+              el("div", { class: "feature" }, [
+                el("span", { text: key.replaceAll("_", " ") }),
+                el("strong", {
+                  text: typeof value === "number" ? num(value, 4) : text(value),
+                }),
+              ]),
+          )
+        : [
+            el("span", {
+              class: "secondary",
+              text: "Merkmale sind im Bericht des jeweiligen Signals gespeichert.",
+            }),
+          ]),
+    );
+    $("#model-explanation-details").hidden = true;
+  }
+  function renderAnalysisSignals() {
+    if ($("#analysis-signals-body").contains(document.activeElement)) return;
+    const signals = itemArray(state.analysis?.signals, "signals");
+    $("#analysis-signals-body").replaceChildren(
+      ...(signals.length
+        ? signals.map((s) => analysisSignalRow(s))
+        : [
+            el("tr", {}, [
+              el("td", { colSpan: 8 }, [
+                empty(
+                  "Noch keine Signale analysiert. Empfang oder Scan starten, oder eine gespeicherte Aufnahme über „Analyse“ auswerten.",
+                ),
+              ]),
+            ]),
+          ]),
+    );
+    // The inspected report is deliberately stable while the list refreshes.
+    // Polling must not collapse an expanded trace or move keyboard focus.
+  }
+  async function inspectAnalysisSignal(id) {
+    if (!id) return;
+    state.analysisSelectedId = String(id);
+    const signal = await api(`/api/analysis/signals/${encodeURIComponent(id)}`);
+    state.analysisDetail = signal;
+    await changeView("analyse");
+    renderAnalysisDetail(signal);
+    $("#analysis-detail").scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }
+  function analysisPredictionExplanation(prediction, limit = 12) {
+    const explanation = prediction?.explanation;
+    if (
+      !explanation ||
+      typeof explanation !== "object" ||
+      Array.isArray(explanation)
+    )
+      return null;
+    const contributions = arr(explanation.contributions);
+    const maximum =
+      Number.isInteger(limit) && limit > 0 ? Math.min(limit, 32) : 12;
+    return {
+      ...explanation,
+      contributions: contributions.slice(0, maximum),
+      total_contributions: contributions.length,
+    };
+  }
+  function renderAnalysisPredictions(decision) {
+    const predictions = arr(decision.predictions);
+    return el(
+      "div",
+      { class: "analysis-model-predictions" },
+      predictions.length
+        ? predictions.map((prediction) => {
+            const explanation = analysisPredictionExplanation(prediction);
+            const name =
+              arr(decision.routes).find(
+                (route) => route.model_id === prediction.model_id,
+              )?.name || prediction.model_id;
+            return el("section", { class: "analysis-conclusion" }, [
+              el("h3", { text: text(name) }),
+              el("p", {
+                text: `Ausgabe: ${analysisLabel(prediction.model_label, prediction.label_level)} · ${analysisStatus(prediction.status)} · Klassenwert ${num(prediction.score, 3)} (unkalibriert)`,
+              }),
+              explanation
+                ? el("details", { class: "analysis-json-details" }, [
+                    el("summary", {
+                      text: "Modelleinflüsse dieser Vorhersage",
+                    }),
+                    el("p", {
+                      text: "Beiträge und Sensitivitäten beschreiben die lokale Reaktion des geladenen Modells nach Vorverarbeitung. Daraus folgt keine physikalische Kausalität oder bestätigte Identität.",
+                    }),
+                    explanationNode(explanation),
+                    explanation.total_contributions >
+                    explanation.contributions.length
+                      ? el("p", {
+                          class: "field-help",
+                          text: `Erste ${explanation.contributions.length} von ${explanation.total_contributions} Einträgen dargestellt; sämtliche Werte stehen in den vollständigen Einflussdaten.`,
+                        })
+                      : null,
+                    analysisJSONDetails(
+                      "Vollständige Einflussdaten",
+                      prediction.explanation,
+                    ),
+                  ])
+                : el("p", {
+                    class: "field-help",
+                    text: "Für diese Beobachtung wurden keine Modelleinflüsse gespeichert. Die Berechnung kann in den Auswahlregeln aktiviert werden.",
+                  }),
+            ]);
+          })
+        : [empty("Keine Modellvorhersage im Bericht gespeichert.")],
+    );
+  }
+  function renderAnalysisDetail(signal, container = null) {
+    const holder = container || $("#analysis-detail"),
+      decision = analysisDecision(signal);
+    const id = signal.id || signal.signal_id;
+    const rows = analysisConclusionRows(decision);
+    const stages = analysisStageOrder(decision);
+    const evidence = Array.isArray(decision.evidence)
+      ? decision.evidence
+      : Object.entries(decision.evidence || {}).map(([key, value]) => ({
+          id: key,
+          ...value,
+        }));
+    const routes = arr(decision.routes);
+    replaceContent(
+      holder,
+      el("div", { class: "analysis-detail-heading" }, [
+        el("strong", {
+          text: `${mhz(signal.center_frequency_hz ?? decision.input?.center_frequency_hz)} · ${analysisStatus(decision.status)}`,
+        }),
+        id
+          ? download(
+              `/api/analysis/signals/${encodeURIComponent(id)}/download`,
+              "Vollständigen Signalbericht als JSON",
+            )
+          : null,
+      ]),
+      el("p", {
+        class: "secondary",
+        text: `Berichtsstand: ${date(signal.last_seen || signal.observed_at)} · ${num(decision.input?.analyzed_samples, 0)} ausgewertete IQ-Samples. Dieser Detailbericht bleibt beim Lesen stabil; die Signalliste wird separat aktualisiert.`,
+      }),
+      analysisNotice(
+        "Ein Modellkandidat ist eine plausible Zuordnung innerhalb der gelernten Klassen. Ohne unabhängigen Protokollbeleg ist damit weder Funkdienst noch konkreter Emitter bestätigt.",
+      ),
+      el(
+        "div",
+        { class: "analysis-conclusions" },
+        rows.map((r) =>
+          el("section", { class: "analysis-conclusion" }, [
+            el("h3", { text: r.title }),
+            pill(
+              analysisStatus(r.status),
+              r.status === "observed"
+                ? "green"
+                : r.status === "conflict"
+                  ? "amber"
+                  : "",
+            ),
+            el("strong", { text: analysisLabel(r.label, r.key) }),
+            el("p", { text: r.reason }),
+            ...r.candidates.map((candidate) =>
+              el("small", {
+                text: `${analysisLabel(candidate.label, r.key)}${finiteNumber(candidate.score) !== null ? ` · Wert ${num(candidate.score, 3)}` : ""} · ${analysisScoreKind(candidate.score_kind)}`,
+              }),
+            ),
+            r.evidenceIds.length
+              ? el("small", { text: `Belege: ${r.evidenceIds.join(", ")}` })
+              : null,
+          ]),
+        ),
+      ),
+      el("h3", { text: "So entstand die Entscheidung" }),
+      stages.length
+        ? el(
+            "ol",
+            { class: "analysis-stage-list" },
+            stages.map((stage) =>
+              el("li", {}, [
+                el("div", {}, [
+                  el("strong", {
+                    text: text(
+                      stage.name ||
+                        stage.title ||
+                        {
+                          quality: "Signalqualität prüfen",
+                          features: "Signalmerkmale messen",
+                          hypotheses: "Breite Hypothesen bilden",
+                          routing: "Geeignete Modelle auswählen",
+                          models: "Modelle auswerten",
+                          fusion: "Aussagen getrennt zusammenführen",
+                        }[stage.id] ||
+                        stage.id,
+                    ),
+                  }),
+                  pill(analysisStatus(stage.status)),
+                ]),
+                el("small", {
+                  text: `Abhängig von: ${arr(stage.parents).length ? stage.parents.join(", ") : "Eingangssignal"} · ${num(stage.elapsed_ms, 2)} ms`,
+                }),
+                el("p", {
+                  text: text(
+                    stage.reason,
+                    "Kein zusätzlicher Grund protokolliert.",
+                  ),
+                }),
+                stage.decision !== undefined
+                  ? el("p", {
+                      text:
+                        typeof stage.decision === "string"
+                          ? stage.decision
+                          : JSON.stringify(stage.decision),
+                    })
+                  : null,
+                stage.dependency_unresolved
+                  ? analysisNotice(
+                      "Abhängigkeit fehlt oder bildet einen Kreis. Reihenfolge kann nicht vollständig aufgelöst werden.",
+                      "amber",
+                    )
+                  : null,
+              ]),
+            ),
+          )
+        : empty("Keine Entscheidungsschritte im Bericht gespeichert."),
+      el("h3", { text: "Modellauswahl und Rechenbudget" }),
+      routes.length
+        ? el(
+            "div",
+            {
+              class: "table-scroll analysis-routes-scroll",
+              tabIndex: 0,
+              role: "region",
+              "aria-label":
+                "Modellauswahl und Rechenbudget, horizontal scrollbar",
+            },
+            [
+              el("table", { class: "data-table analysis-routes-table" }, [
+                el("thead", {}, [
+                  el(
+                    "tr",
+                    {},
+                    ["Modell", "Ebene", "Ausführung", "Grund"].map((v) =>
+                      el("th", { text: v }),
+                    ),
+                  ),
+                ]),
+                el(
+                  "tbody",
+                  {},
+                  routes.map((r) =>
+                    el("tr", {}, [
+                      detailCell(text(r.name, r.model_id), r.model_id),
+                      el("td", {
+                        text: ANALYSIS_LEVELS[r.level] || text(r.level),
+                      }),
+                      el("td", { text: analysisStatus(r.status) }),
+                      el("td", {
+                        text: Array.isArray(r.why)
+                          ? r.why.join(" ")
+                          : text(r.why || r.reason),
+                      }),
+                    ]),
+                  ),
+                ),
+              ]),
+            ],
+          )
+        : empty(
+            "Kein Modell ausgeführt oder keine Route protokolliert. Merkmalsregeln können dennoch Hypothesen liefern.",
+          ),
+      el("h3", { text: "Was wurde im Signal gemessen?" }),
+      el("p", {
+        text: "Hüllkurve beschreibt die Stärke über der Zeit, Phase beschreibt die Schwingungslage, das Spektrum verteilt die Energie auf Frequenzen. Diese Merkmale begründen Hypothesen; sie identifizieren allein keinen Sender.",
+      }),
+      el(
+        "dl",
+        { class: "analysis-feature-list" },
+        Object.entries(decision.features || {}).flatMap(([key, value]) => [
+          el("dt", {
+            text:
+              {
+                amplitude_cv: "Schwankung der Hüllkurve",
+                amplitude_kurtosis: "Spitzen in der Hüllkurve",
+                phase_std: "Streuung der Phasenänderung [Radiant/Winkelmaß]",
+                phase_dispersion: "Verteilung der Phase",
+                spectral_flatness: "Flachheit des Spektrums",
+                spectral_entropy: "Verteilung der Spektralenergie",
+                occupied_bandwidth_fraction: "Belegter Bandbreitenanteil",
+                spectral_kurtosis: "Spektrale Spitzen",
+                peak_to_rms_db: "Spitzenpegel über Effektivpegel [dB]",
+                active_fraction: "Anteil aktiver Signalabschnitte",
+                ridge_linear_r2: "Geradlinigkeit des Frequenzverlaufs (0–1)",
+                ridge_span_fraction: "Relativer Frequenzdurchlauf",
+                ridge_peak_fraction:
+                  "Energieanteil der wandernden Spektralspitze",
+                fourth_cumulant:
+                  "Kumulantenmerkmal vierter Ordnung (Form der Verteilung)",
+                envelope_correlation:
+                  "Ähnlichkeit aufeinanderfolgender Hüllkurvenwerte",
+                rms_dbfs: "Digitaler Effektivpegel [dBFS]",
+                sample_rate: "Abtastrate [Samples/s]",
+              }[key] || key.replaceAll("_", " "),
+          }),
+          el("dd", {
+            text: typeof value === "number" ? num(value, 5) : text(value),
+          }),
+        ]),
+      ),
+      analysisJSONDetails("Technische Merkmalswerte", decision.features),
+      analysisJSONDetails(`Belege und Herkunft (${evidence.length})`, evidence),
+      el("h3", { text: "Modellvorhersagen und lokale Einflüsse" }),
+      renderAnalysisPredictions(decision),
+      analysisJSONDetails(
+        "Modellvorhersagen mit Gültigkeitsbereich",
+        decision.predictions,
+      ),
+      analysisJSONDetails(
+        "Vorwissen (getrennt von Signalbelegen)",
+        decision.prior_hints,
+      ),
+      ...arr(decision.warnings).map((v) => analysisNotice(String(v), "amber")),
+      ...arr(decision.limitations).map((v) =>
+        el("p", { class: "muted", text: String(v) }),
+      ),
+      analysisJSONDetails(
+        "Gesamter Entscheidungsbericht mit Eingang und Budget",
+        signal,
+      ),
+    );
+  }
+  function analysisScanConfig() {
+    const f = $("#receiver-form").elements;
+    return {
+      start_frequency_hz: Number($("#analysis-start-mhz").value) * 1e6,
+      stop_frequency_hz: Number($("#analysis-stop-mhz").value) * 1e6,
+      source: $("#analysis-scan-source").value,
+      sample_rate: Number($("#analysis-scan-sample-rate").value),
+      dwell_seconds: Number($("#analysis-scan-dwell").value),
+      overlap_fraction: Number($("#analysis-scan-overlap").value),
+      repeat: $("#analysis-scan-repeat").checked,
+      receiver_config: {
+        mode: "monitor",
+        gain_db: Number($("#analysis-scan-gain").value),
+        uri: $("#analysis-scan-uri").value,
+        threshold_db: Number(f.threshold_db.value),
+        max_channels: Number(f.max_channels.value),
+        duration_seconds: Number(f.duration_seconds.value),
+        analysis_max_channels: Number($("#analysis-scan-max-channels").value),
+        queue_capacity_bytes: Number(f.queue_mib.value) * 1048576,
+        spectrum_refresh_hz: Number(f.spectrum_refresh_hz.value),
+        detection_interval_seconds:
+          Number(f.detection_interval_ms.value) / 1000,
+      },
+    };
+  }
+  function renderAnalysisScanPlan(plan) {
+    const ranges = arr(plan.uncovered_ranges);
+    $("#analysis-scan-plan").replaceChildren(
+      el("strong", {
+        text: `${num(plan.step_count, 0)} geplante Schritte · mindestens ${duration(plan.estimated_min_sweep_seconds)} je Durchlauf`,
+      }),
+      el("p", {
+        text: `Angefordert: ${analysisRangeText(plan.requested_range)}. Geplante Abdeckung ${percent(plan.coverage_fraction)}. Dies ist ein Plan, kein Nachweis empfangener Signale.`,
+      }),
+      analysisNotice(
+        "Frequenzen werden nacheinander angefahren. Signale außerhalb des aktuellen Empfangsfensters können währenddessen übersehen werden.",
+      ),
+      ranges.length
+        ? el("div", {}, [
+            el("strong", { text: "Nicht abgedeckte Bereiche" }),
+            ...ranges.map((r) =>
+              el("p", {
+                text: `${analysisRangeText(r)}${r.reason ? ` · ${r.reason}` : ""}`,
+              }),
+            ),
+          ])
+        : el("p", {
+            text: "Keine Bereichslücken im Plan gemeldet. Tatsächlicher Empfang ist damit nicht verifiziert.",
+          }),
+      ...arr(plan.notes).map((note) => el("p", { text: String(note) })),
+      analysisJSONDetails("Geplante Schritte und Empfängergrenzen", plan),
+    );
+  }
+  function renderAnalysisScan(scan) {
+    const running = scan?.running === true;
+    const holder = $("#analysis-scan-status");
+    let summary = $(".analysis-scan-summary", holder);
+    if (!summary) {
+      summary = el("div", { class: "analysis-scan-summary" });
+      holder.replaceChildren(summary);
+    }
+    replaceContent(
+      summary,
+      pill(analysisStatus(scan?.state), running ? "green" : ""),
+      el("span", {
+        text: `Schritte ${num(scan?.completed_steps, 0)} · Abgeschlossene Durchläufe ${num(scan?.completed_cycles ?? scan?.cycles, 0)}`,
+      }),
+      scan?.current_step
+        ? el("span", {
+            text: `Aktuell: ${mhz(scan.current_step.center_frequency_hz)}`,
+          })
+        : null,
+      ...arr(scan?.errors).map((error) =>
+        analysisNotice(
+          typeof error === "string" ? error : JSON.stringify(error),
+          "error",
+        ),
+      ),
+      scan?.error ? analysisNotice(String(scan.error), "error") : null,
+      arr(scan?.observation_gaps).length
+        ? analysisNotice(
+            `${scan.observation_gaps.length} protokollierte Beobachtungslücken im begrenzten Verlauf. Ein Scan sieht jeden Frequenzbereich nur zeitweise.`,
+            "amber",
+          )
+        : null,
+    );
+    const previous = $("details", holder);
+    // Keep the same DOM subtree while the user reads or focuses the history.
+    // The status summary and stop control still update independently.
+    if (
+      scan?.observed_windows &&
+      !(previous?.open || previous?.contains(document.activeElement))
+    ) {
+      const detail = analysisJSONDetails(
+        "Beobachtete Fenster und zeitliche Lücken · Stand bleibt beim Lesen erhalten",
+        {
+          observed_windows: scan.observed_windows,
+          observation_gaps: scan.observation_gaps,
+        },
+      );
+      if (previous) previous.replaceWith(detail);
+      else holder.append(detail);
+    }
+    $("#analysis-scan-start").disabled = running;
+    $("#analysis-scan-stop").disabled = !running;
+  }
+  async function loadAnalysis(withCatalogue = false) {
+    const results = await Promise.allSettled([
+      api("/api/analysis"),
+      ...(withCatalogue ? [api("/api/analysis/catalogue")] : []),
+    ]);
+    if (results[1]?.status === "fulfilled")
+      state.analysisCatalogue = results[1].value;
+    if (results[0].status === "rejected") throw results[0].reason;
+    state.analysis = results[0].value;
+    if (!state.analysisSettingsLoaded && state.analysis.settings)
+      populateAnalysisSettings(state.analysis.settings);
+    if (withCatalogue) renderAnalysisExperts();
+    renderAnalysisCoverage();
+    renderAnalysisStats();
+    renderAnalysisSignals();
+    renderAnalysisScan(state.analysis.scan);
+    if (results[1]?.status === "rejected") throw results[1].reason;
+  }
+  async function pollAnalysis() {
+    if (state.view !== "analyse" || state.analysisPolling) return;
+    state.analysisPolling = true;
+    try {
+      await loadAnalysis();
+    } catch (error) {
+      $("#analysis-stats").replaceChildren(
+        analysisNotice(
+          `Analyse nicht aktualisiert: ${errorMessage(error)}`,
+          "error",
+        ),
+      );
+    } finally {
+      state.analysisPolling = false;
+    }
+  }
+  function setupAnalysisEvents() {
+    $("#rx-analysis-laptop").addEventListener("click", () => {
+      $("#rx-analysis-max-channels").value = 4;
+    });
+    $("#analysis-scan-laptop").addEventListener("click", () => {
+      $("#analysis-scan-max-channels").value = 4;
+      $("#analysis-scan-form").dispatchEvent(
+        new Event("input", { bubbles: true }),
+      );
+    });
+    $("#analysis-settings-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      action(async () => {
+        const settings = await api("/api/analysis/settings", {
+          method: "POST",
+          body: analysisSettingsFromForm(),
+        });
+        populateAnalysisSettings(settings.settings || settings);
+        renderAnalysisExperts();
+        await loadAnalysis();
+        toast("Analysekonfiguration gespeichert.");
+      }, event.currentTarget);
+    });
+    $("#analysis-scan-form").addEventListener("submit", (event) =>
+      event.preventDefault(),
+    );
+    const runScan = (operation) =>
+      action(async () => {
+        if (
+          !$("#analysis-scan-form").reportValidity() ||
+          !$("#analysis-settings-form").reportValidity()
+        )
+          return;
+        const result = await api(`/api/analysis/scan/${operation}`, {
+          method: "POST",
+          body: analysisScanConfig(),
+        });
+        if (operation === "plan") {
+          state.analysisScanPlan = result.plan || result;
+          renderAnalysisScanPlan(state.analysisScanPlan);
+        } else {
+          state.analysisScanPlan = null;
+          await loadAnalysis();
+          toast("Scan gestartet. Der Empfänger wird schrittweise abgestimmt.");
+        }
+      }, $("#analysis-scan-form"));
+    $("#analysis-scan-plan-button").addEventListener("click", () =>
+      runScan("plan"),
+    );
+    $("#analysis-scan-start").addEventListener("click", () => runScan("start"));
+    $("#analysis-scan-stop").addEventListener("click", () =>
+      action(async () => {
+        await api("/api/analysis/scan/stop", { method: "POST", body: {} });
+        await loadAnalysis();
+      }),
+    );
+    $("#analysis-scan-form").addEventListener("input", () => {
+      state.analysisScanPlan = null;
+      $("#analysis-scan-plan").replaceChildren(
+        empty(
+          "Scanparameter geändert. Vor dem Start einen aktuellen Plan berechnen.",
+        ),
+      );
+    });
+    for (const id of ["analysis-start-mhz", "analysis-stop-mhz"])
+      $(`#${id}`).addEventListener("input", () => {
+        state.analysisScanPlan = null;
+        $("#analysis-scan-plan").replaceChildren(
+          empty("Frequenzbereich geändert. Plan neu berechnen."),
+        );
+      });
+  }
   function positionText(p) {
     return p &&
       Number.isFinite(Number(p.lat)) &&
@@ -5945,6 +7310,7 @@
     );
   }
   function setupEvents() {
+    setupAnalysisEvents();
     $("#optimization-enabled").addEventListener(
       "change",
       updateOptimizationControls,
@@ -6049,6 +7415,7 @@
         });
       } else if (state.view === "modelle") openDialog("model-import-dialog");
       else if (state.view === "drohnen") openDialog("bridge-dialog");
+      else if (state.view === "analyse") action(() => loadAnalysis(true));
     });
     $("#receiver-form").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -6452,6 +7819,7 @@
     drawSpectrum();
     drawWaterfall();
     setInterval(poll, 1800);
+    setInterval(pollAnalysis, 1000);
   }
   init().catch(showError);
 })();
