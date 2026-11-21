@@ -44,6 +44,8 @@ Die Prüfsummen haben unterschiedliche Geltungsbereiche: Das ZIP-Manifest hasht 
 
 ## Verwendung in ChatGPT
 
+Für neue wissenschaftliche Berichte gilt die am 21.11.2026 bestätigte [Berichtsvorlage](berichtsvorlage.md) mit zehn Hauptkapiteln. Die [maschinenlesbare Gliederung](berichtsgliederung.json) bewahrt Kapitel und Berichtsregeln für folgende Auswertungen. Abweichende ausdrückliche Nutzerwünsche haben Vorrang.
+
 1. Das vollständige Berichtspaket herunterladen und später an ChatGPT übergeben.
 2. Den Vorschlag aus `README.txt` verwenden und Umfang, Zielpublikum sowie gewünschte PDF-Gliederung ergänzen.
 3. Für den Bericht Versuchsziel, Empfänger/Messaufbau, Datenherkunft und Gruppenaufteilung, Modelltopologien, Suchräume/Budgets, sämtliche Trials, Trainingsverläufe, Hardware, Scoredefinitionen und Aussagegrenzen auswerten lassen.

@@ -1,0 +1,117 @@
+{
+  "schema_title": "SignalClassifier – bestätigte Berichtsgliederung für wissenschaftliche Experimentberichte",
+  "schema_version": 1,
+  "version": "1.0.0",
+  "approved_date": "2026-11-21",
+  "approved_date_display": "21.11.2026",
+  "language": "de",
+  "purpose": "Verbindliche Wiederverwendung der zehn Hauptkapitel für künftige PDF-Berichte; keine privaten Experimentdaten.",
+  "chapter_titles_are_fixed": true,
+  "front_matter": [
+    "Deckblatt mit Berichtstitel, Experiment-IDs, Datenstand und Zeitzone, Software- und Berichtsversion",
+    "Inhaltsverzeichnis und kurze Zusammenfassung mit Laufstatus, Datenherkunft und Bewertungsumfang; keine zusätzlichen Hauptkapitel"
+  ],
+  "reporting_rules": [
+    "Nur belegte Messwerte, historische Provenienz und tatsächlich ausgeführte Modellläufe verwenden; keine aktuellen Daten als historische ersetzen.",
+    "Fehlende, veraltete oder nicht anwendbare Werte mit Status und Begründung kennzeichnen; sie sind keine gemessenen Nullwerte.",
+    "Synthetisch, reale HF-Aufnahme und Replay sowie Vorlabel, bestätigtes Label und Decoderevidenz unterscheiden.",
+    "Modellwahl und Qualitätsranking auf dokumentierte Validierung stützen; Finaltest getrennt berichten. Ausschließlich trainierte Modelle haben keine unabhängige Qualitätsbewertung.",
+    "CPU-Inferenzmessungen nicht als GPU-Messungen oder Messungen auf einem anderen Zielrechner darstellen; historische und aktuelle Hardware getrennt halten.",
+    "Alle Größen mit Definition, Einheit, Aggregation und Messumfang versehen. dBFS ist nicht dBm; zusätzlich injiziertes SNR ist kein gemessener absoluter RF-SNR.",
+    "Parallel überlappende Phasen- und Workerzeiten nicht als Job-Wandzeit addieren; CPU-Wandzeiten, GPU-Eventzeiten und Telemetriestichproben kennzeichnen.",
+    "Keine SOTA-Überlegenheit, Signifikanz, Generalisierung oder physische Empfindlichkeit ohne entsprechende Evidenz behaupten.",
+    "Literatur und interne Ergebnisquellen nachvollziehbar zitieren; keine Quellen erfinden. Für Abbildungen Dateiquelle beziehungsweise JSON-Pointer, Einheiten und Aggregation nennen.",
+    "Vollständige Rohwerte und Trialstatus im Begleitpaket erhalten; PDF-Kürzungen kennzeichnen und auf vollständige Dateien verweisen.",
+    "Den fertigen PDF-Bericht auf Zahlen, Einheiten, Abbildungslesbarkeit, Umbrüche, Seitenlayout und Quellen visuell prüfen."
+  ],
+  "chapters": [
+    {
+      "number": 1,
+      "title": "Einleitung, Zielsetzung und Stand der Technik",
+      "content_expectations": [
+        "Motivation, Forschungsfrage, Hypothese, Erfolgskriterien und Abgrenzung aus dokumentiertem Versuchskontext.",
+        "Kurzer, quellenbasierter Stand der Technik relevanter klassischer und lernbasierter Modulationsklassifikation; keine unbelegte umfassende SOTA-Behauptung."
+      ]
+    },
+    {
+      "number": 2,
+      "title": "Getestete Netzwerktopologien: Aufbau, typische Stärken und Schwächen",
+      "content_expectations": [
+        "Nur Familien mit nachgewiesenen tatsächlichen Läufen; Katalogvorschläge nicht als getestet darstellen, unvollständige Läufe kennzeichnen und klassische Baselines korrekt benennen.",
+        "Eingang, Schichten, Dimensionen, Regularisierung und Parameterzahl; typische quellenbasierte Eigenschaften getrennt von eigenen Beobachtungen.",
+        "Bei tatsächlich geprüften Promotionsadaptionen Herkunft und Änderungen für RF nennen; keine unbelegte Originalreproduktion behaupten."
+      ]
+    },
+    {
+      "number": 3,
+      "title": "Datengrundlage und Vorverarbeitung",
+      "content_expectations": [
+        "Quelle, Klassen, Labelstatus, RF-Parameter, Umfang und unabhängige Herkunftsgruppen aus historischem Inventar.",
+        "Train-/Validierungs-/Testtrennung vor Segmentierung, Augmentation und Normalisierung; tatsächliche Gruppen- und Beispielzahlen.",
+        "Darstellungen und Augmentationen mit Einheiten; ursprünglichen RF-SNR und zusätzlich injiziertes Rauschen unterscheiden."
+      ]
+    },
+    {
+      "number": 4,
+      "title": "Versuchsaufbau, Hardware und Hyperparameteroptimierung",
+      "content_expectations": [
+        "Messaufbau, Softwarestände, Training-/Inferenzhardware, Batchgrößen und Messbedingungen.",
+        "Suchmethode, Seed, Zielfunktion, Suchraum, Budgets, alle Trialstatus, Ausschlüsse, Gewinner und Finaltest-Isolation.",
+        "Angeforderte und aufgelöste Parallelität, Worker-/Job-Wandzeiten und CPU-/GPU-Phasenumfang sowie Telemetriescope getrennt dokumentieren."
+      ]
+    },
+    {
+      "number": 5,
+      "title": "Bewertungsmetriken und Gesamtscore",
+      "content_expectations": [
+        "Qualitätsmetriken einschließlich Split, Nenner, Klassen und Aggregation definieren; fehlende Kennzahlen nicht ergänzen.",
+        "p50/p95, Trainings-/Suchzeiten, Modellgröße und RTF einheitenkonsistent für den dokumentierten Messpfad erklären.",
+        "Scoreformel, Komponenten, Gewichte und tatsächliche Auswahlzielfunktion aus dem Paket versionsgetreu übernehmen."
+      ]
+    },
+    {
+      "number": 6,
+      "title": "Ergebnisse: Genauigkeit, Robustheit und Rechenaufwand",
+      "content_expectations": [
+        "Validierung und Finaltest, Status, Zählmatrizen und klar definierte Normalisierung getrennt darstellen.",
+        "Robustheit über tatsächlich geprüfte SNR-/Jitterwerte; Mittelung und Wertebereiche benennen, korrelierte Augmentationen nicht als unabhängige Replikate ausgeben.",
+        "Job-Wandzeit, summierte Such-/Workerzeit, Gewinnertraining, Phasen, CPU-Latenz, RTF und Modellgröße mit korrektem Hardwarebezug."
+      ]
+    },
+    {
+      "number": 7,
+      "title": "Modellranking und Auswahl der besten Kandidaten",
+      "content_expectations": [
+        "Gespeicherte Validierungsrangfolgen, Auswahlregel, Bindungsregeln und Live-Eignung nachvollziehbar übernehmen.",
+        "Berichtsmodell und Top-Kandidatenempfehlung unterscheiden; Finaltest nicht nachträglich zur Auswahl verwenden.",
+        "Keine Qualitätsrangfolge für unbewertete Modelle; Zielrechner-Nachmessungen und importierte historische Scores getrennt halten."
+      ]
+    },
+    {
+      "number": 8,
+      "title": "Diskussion und Aussagegrenzen",
+      "content_expectations": [
+        "Zielerreichung und Kosten anhand der Evidenz diskutieren; Theorie, Beobachtung und vermutete Ursachen unterscheiden.",
+        "Gruppenabhängigkeiten, Vorwissen, Empfangsbedingungen und fehlende HF-/Hardware-/Unbekannt-/Langzeitprüfungen offenlegen.",
+        "Abbrüche, Fehler, Datenlücken und Telemetriegrenzen berücksichtigen; keine unbelegte Generalisierung oder SOTA-Überlegenheit."
+      ]
+    },
+    {
+      "number": 9,
+      "title": "Fazit und Empfehlungen für weitere Experimente",
+      "content_expectations": [
+        "Forschungsfrage mit belegten Ergebnissen beantworten und Empfehlungen an Datenbasis und Messhardware binden.",
+        "Folgeversuche mit offener Frage, kontrollierter Änderung, unabhängigen Daten, Metrik und Erfolgskriterium priorisieren; künftige Resultate nicht vorwegnehmen."
+      ]
+    },
+    {
+      "number": 10,
+      "title": "Literaturverzeichnis und Anhang",
+      "content_expectations": [
+        "Tatsächlich verwendete Quellen mit konsistentem Zitierstil, DOI oder stabiler URL, Version und gegebenenfalls Abrufdatum.",
+        "Anhang innerhalb dieses Kapitels: Konfiguration, Inventar, Provenienz, Prüfsummenscope, vollständige Trials/Epochen, zusätzliche Ergebnisse und Fehler-/Ereignisprotokolle.",
+        "Auf vollständige Begleitdateien verweisen; private IQ-Daten, Datenbanken, Gewichte und personenbezogene Rohdaten nicht in die Git-Vorlage aufnehmen."
+      ]
+    }
+  ]
+}

@@ -12,3 +12,4 @@
 - Automatic optimization must keep test IQ unread until the winner is fixed. Retain trial failures, budgets, structured events and immutable queue-time inputs; report exports must never replace historical labels or hardware with current values.
 - Independent training uses bounded persistent spawn workers, with fresh per-job RNG/context and no nested training pools. Respect effective CPU/RAM/GPU limits; pause managed compute for CPU ranking measurements and keep coordination waits separate from active training costs. Missing/stale telemetry is not zero utilization.
 - Keep README, version, supported capability documentation and verification notes consistent with the delivered implementation.
+- For scientific experiment reports, reuse the user-approved ten-chapter structure in `docs/berichtsvorlage.md` and `docs/berichtsgliederung.json` unless the user explicitly requests another structure. Keep private experiment/report artifacts outside Git.
