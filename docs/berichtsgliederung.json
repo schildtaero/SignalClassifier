@@ -1,7 +1,7 @@
 {
   "schema_title": "SignalClassifier – bestätigte Berichtsgliederung für wissenschaftliche Experimentberichte",
   "schema_version": 1,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "approved_date": "2026-11-21",
   "approved_date_display": "21.11.2026",
   "language": "de",
@@ -12,6 +12,9 @@
     "Inhaltsverzeichnis und kurze Zusammenfassung mit Laufstatus, Datenherkunft und Bewertungsumfang; keine zusätzlichen Hauptkapitel"
   ],
   "reporting_rules": [
+    "Jede fachliche Abkürzung bei der ersten Verwendung ausschreiben und ihre Funktion erklären; ein Glossar ersetzt diese Einführung nicht. Executive Summary und allein lesbare Abbildungen/Tabellen auf eigene Verständlichkeit prüfen.",
+    "Fachbegriffe, Symbole, Einheiten und Modellnamensbestandteile bei der ersten Verwendung verständlich definieren. Zuerst Frage und praktische Bedeutung, anschließend Methode und Details erläutern.",
+    "Executive Summary mit Ziel, Kernergebnissen, Rechenaufwand, Aussagegrenzen und nächster Entscheidung auch ohne Methodenteil verständlich verfassen. Keine Spezialkenntnisse voraussetzen.",
     "Nur belegte Messwerte, historische Provenienz und tatsächlich ausgeführte Modellläufe verwenden; keine aktuellen Daten als historische ersetzen.",
     "Fehlende, veraltete oder nicht anwendbare Werte mit Status und Begründung kennzeichnen; sie sind keine gemessenen Nullwerte.",
     "Synthetisch, reale HF-Aufnahme und Replay sowie Vorlabel, bestätigtes Label und Decoderevidenz unterscheiden.",
@@ -112,6 +115,22 @@
         "Anhang innerhalb dieses Kapitels: Konfiguration, Inventar, Provenienz, Prüfsummenscope, vollständige Trials/Epochen, zusätzliche Ergebnisse und Fehler-/Ereignisprotokolle.",
         "Auf vollständige Begleitdateien verweisen; private IQ-Daten, Datenbanken, Gewichte und personenbezogene Rohdaten nicht in die Git-Vorlage aufnehmen."
       ]
+    }
+  ],
+  "writing_guidance_updated": "2026-11-21",
+  "target_audience": "Menschen mit guter Allgemeinbildung; keine Fachpromotion oder Spezialkenntnisse in Funktechnik und maschinellem Lernen vorausgesetzt.",
+  "abbreviation_examples": [
+    {
+      "abbreviation": "CNN",
+      "expansion": "Convolutional Neural Network",
+      "german": "Faltungsnetz",
+      "explanation": "Erkennt wiederkehrende lokale Muster in einem Signal oder Bild."
+    },
+    {
+      "abbreviation": "LNA",
+      "expansion": "Low-Noise Amplifier",
+      "german": "rauscharmer Vorverstärker",
+      "explanation": "Verstärkt schwache Empfangssignale und fügt möglichst wenig eigenes Rauschen hinzu."
     }
   ]
 }

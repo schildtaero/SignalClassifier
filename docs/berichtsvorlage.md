@@ -1,6 +1,6 @@
 # Bestätigte Berichtsvorlage für SignalClassifier
 
-Vorlagenversion: **1.0.0** · Bestätigt am **21.11.2026** · Sprache: Deutsch
+Vorlagenversion: **1.1.0** · Bestätigt am **21.11.2026** · Sprache: Deutsch
 
 Diese Vorlage legt die wiederzuverwendende Gliederung wissenschaftlicher PDF-Berichte fest. Die zehn nummerierten Hauptkapitel und ihre Titel bleiben unverändert. Unterabschnitte richten sich nach den tatsächlich vorhandenen Daten. Deckblatt und Inhaltsverzeichnis dürfen vorangestellt werden; sie sind keine zusätzlichen Hauptkapitel. Die maschinenlesbare Entsprechung steht in [berichtsgliederung.json](berichtsgliederung.json).
 
@@ -8,6 +8,11 @@ Auf dem Deckblatt stehen Berichtstitel, betrachtete Experiment-IDs, Datenstand m
 
 Für jeden Folgebericht gelten diese Regeln:
 
+- Für Menschen mit guter Allgemeinbildung schreiben; keine Promotion, Spezialkenntnisse in Funktechnik oder Erfahrung mit maschinellem Lernen voraussetzen. Zuerst die fachliche Frage und praktische Bedeutung erklären, danach Methode und Details.
+- Jede fachliche Abkürzung bei der ersten Verwendung im Fließtext ausschreiben und ihre Funktion kurz erklären. Beispielsweise: „Faltungsnetz (englisch Convolutional Neural Network, CNN), das wiederkehrende lokale Muster erkennt“ oder „rauscharmer Vorverstärker (englisch Low-Noise Amplifier, LNA), der schwache Empfangssignale verstärkt“. Ein Abkürzungsverzeichnis ergänzt diese Einführung, ersetzt sie aber nicht. Zusammenfassung, Haupttext und allein lesbare Bildunterschriften/Tabellen jeweils auf Verständlichkeit prüfen.
+- Fachbegriffe wie Topologie, Validierung, Signal-Rausch-Verhältnis, Klassifikation oder Balanced Accuracy beim ersten Auftreten in verständlichem Deutsch erläutern. Symbole und Einheiten vor ihrer ersten Verwendung definieren. Alltagssprachliche Erklärung, Messdefinition und fachliche Einschränkung sinnvoll verbinden.
+- Modellnamen unverändert lassen und ihre Bestandteile beim ersten Auftreten erklären: Eingabedarstellung, Architekturprinzip und Bedeutung der Zahlen. Eine Modellziffer nicht pauschal als Schichtzahl ausgeben; ihre tatsächliche Bedeutung aus der gespeicherten Topologie ableiten. Hardwarebausteine und Lernverfahren begrifflich sauber zuordnen.
+- Eine kurze Executive Summary soll Ziel, wichtigste Ergebnisse, Rechenaufwand, Aussagegrenzen und nächste Entscheidung ohne Rückgriff auf den Methodenteil verständlich machen. Beobachtete Unterschiede nennen, ohne kleine Rangabstände oder veränderte Versuchsbedingungen als gesicherte Überlegenheit darzustellen.
 - Aussagen und Abbildungen müssen auf konkrete Paketdateien und Felder beziehungsweise JSON-Pointer zurückführbar sein. Historische Queue-Snapshots verwenden; fehlende historische Angaben nicht durch aktuelle Labels, Hardware oder Einstellungen ersetzen.
 - Abgeschlossen, laufend, fehlgeschlagen, abgebrochen und ausschließlich trainiert unterscheiden. Fehlende Messwerte mit „nicht erfasst“, „nicht verfügbar“ oder „nicht anwendbar“ samt Begründung kennzeichnen. Fehlend ist weder null Prozent noch ein Nachweis des Ausbleibens eines Effekts.
 - Synthetische Daten, reale HF-Aufnahmen und Replay ausdrücklich unterscheiden. Frequenzbasierte Vorlabels sind keine unabhängige Ground Truth. Klassifikation, Funkdienst und Emitteridentität getrennt behandeln.
