@@ -2,6 +2,16 @@
 
 Die Anwendung verwendet genau einen Empfänger. Die Quelle wird ausdrücklich als **PlutoSDR**, **RSP1A**, **Recording** oder **synthetisches Signal** gewählt. Fehlende Hardware oder Treiber erzeugen einen sichtbaren Fehler; sie starten keine Simulation. Die Softwareadapter sind implementiert, tatsächlicher USB-Empfang und Maximaldurchsatz wurden in der Entwicklungsumgebung nicht an physischer Hardware verifiziert.
 
+## Aufnahme ohne automatische Klassifikation
+
+Vor dem Empfangsstart **Signale klassifizieren** ausschalten. Der Schalter gilt für Live-Empfänger, Recording-Wiedergabe und synthetische Quelle; der Scan besitzt dieselbe Option. In der Programmschnittstelle heißt sie `classification_enabled: false` in der Empfängerkonfiguration beziehungsweise in `receiver_config` des Scans. Standardmäßig ist sie eingeschaltet. Eine Änderung des Formulars gilt beim nächsten Start.
+
+Im ausgeschalteten Zustand bleiben Spektrum, Energiedetektion und die gewählte Breitband- oder selektive Aufnahme aktiv. Automatische Modelle, Merkmalsklassifikation, Live-Vergleiche, zusätzliche Analysekanalfilter und IQ-Analyseringe werden übersprungen. Für selektive Aufnahmen notwendige Kanalfilter laufen weiterhin. Die Anzeige meldet „Klassifikation deaktiviert“; das ist kein ausgeführter Befund „unbekannt“. Gespeicherte Entscheidungsberichte bleiben lesbar. Ein ausdrücklich gestartetes Offline-Experiment oder eine manuelle Aufnahmeauswertung wird dadurch nicht beendet.
+
+**Überläufe unterscheiden:** `SoapySDR -4` ist ein vom Gerät beziehungsweise Treiber gemeldeter Streamüberlauf. Die Anwendungseingangsqueue hat eine eigene Diagnose. `performance.stream_diagnostic` enthält die betroffene Ebene, gegebenenfalls den Soapy-Code, Queuezustand, Verarbeitungskosten und den damaligen Klassifikationsschalter. Die verlorene Samplezahl bleibt unbekannt. CPU-/Scheduling-Verzögerung, Geräte-/Treiberpuffer und USB-/WSL-Transport sind mögliche Ursachen; der Fehlercode identifiziert keine einzelne Ursache. Auch eine geringe angeforderte Ausgangsrate oder eine mittlere Verarbeitungszeit unter der Signaldauer schließt kurze Aussetzer nicht aus.
+
+Zur Eingrenzung dieselbe Einstellung zunächst ohne Klassifikation wiederholen und Queuefüllung, Verarbeitungs- und Schreibzeiten vergleichen. Die Leserzeit enthält auch Warten auf neue Samples und ist keine reine CPU-Zeit. Unter Windows USB-Durchreichung und Treiber prüfen. Der Empfang stoppt weiterhin am zugelassenen Präfix, statt eine bekannte Datenlücke still zu übergehen; beschädigte Daten werden nicht durch Simulation ersetzt.
+
 ## Quellen und Installation
 
 ### PlutoSDR

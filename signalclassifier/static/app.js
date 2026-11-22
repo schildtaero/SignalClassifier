@@ -36,6 +36,9 @@
     cleanupPlan: null,
     cleanupBusy: false,
     cleanupSequence: 0,
+    cleanupMode: "short",
+    cleanupSelection: [],
+    publicationStatus: null,
     analysis: null,
     analysisCatalogue: null,
     analysisExpertDrafts: new Map(),
@@ -257,7 +260,9 @@
           .map((v) => `${arr(v.loc).join(".")}: ${v.msg}`)
           .join("; ");
       if (typeof message === "object") message = JSON.stringify(message);
-      throw new Error(String(message));
+      const error = new Error(String(message));
+      error.status = response.status;
+      throw error;
     }
     return body;
   }
@@ -349,6 +354,7 @@
           loadExperiments(),
           loadTopologies(),
           loadRecordings(),
+          loadPublicationStatus(),
         ]);
       }
       if (view === "modelle") await loadModels();
@@ -371,6 +377,18 @@
       ["running", "recording", "receiving", "starting"].includes(rx.status) ||
       rx.active === true
     );
+  }
+  function classificationEnabled(context = {}) {
+    return context?.classification_enabled !== false && context?.config?.classification_enabled !== false &&
+      context?.receiver?.classification_enabled !== false && context?.receiver?.config?.classification_enabled !== false &&
+      context?.classification?.enabled !== false && context?.classification?.status !== "disabled";
+  }
+  function currentClassificationEnabled(snapshot = state.spectrum) {
+    return classificationEnabled(snapshot) && classificationEnabled(state.status.receiver);
+  }
+  function classificationFormValue(form) {
+    const field = form?.elements?.classification_enabled;
+    return field ? field.checked === true : true;
   }
   function sourceLabel(source) {
     return (
@@ -761,6 +779,14 @@
           : "Warte auf IQ-Daten";
     renderCapturePerformance(rx);
     renderLiveComparison(state.spectrum);
+    if (!classificationEnabled(rx)) {
+      $("#rx-detail").append(" · Klassifikation aus");
+      renderClassificationDisabled();
+      renderReceptionAnalysis({ ...(state.spectrum || {}), classification_enabled: false });
+      renderDetections(state.spectrum?.detections, null, [], { ...(state.spectrum || {}), classification_enabled: false });
+      drawSpectrum();
+      drawWaterfall();
+    }
     const active = status.active_model;
     $("#active-model-label").textContent =
       active?.name ||
@@ -920,6 +946,7 @@
       max_bytes: Number(f.get("max_mib")) * 1048576,
       max_channels: Number(f.get("max_channels")),
       analysis_max_channels: Number(f.get("analysis_max_channels")),
+      classification_enabled: classificationFormValue(form),
       queue_capacity_bytes: Number(f.get("queue_mib")) * 1048576,
       spectrum_refresh_hz: Number(f.get("spectrum_refresh_hz")),
       detection_interval_seconds: Number(f.get("detection_interval_ms")) / 1000,
@@ -1144,6 +1171,7 @@
     };
   }
   function associatedDetectionIndex(detections, classification) {
+    if (classification?.enabled === false || classification?.status === "disabled") return -1;
     const label = String(classification?.label || "")
       .trim()
       .toLocaleLowerCase("de");
@@ -1308,6 +1336,7 @@
     return ordered;
   }
   function matchedSignalClassifications(detections, observations, snapshot) {
+    if (!classificationEnabled(snapshot)) return new Map();
     const now = Date.parse(
       snapshot?.analysis_timestamp || snapshot?.timestamp || "",
     );
@@ -1378,6 +1407,7 @@
     observations = null,
     snapshot = null,
   ) {
+    if (!classificationEnabled(snapshot)) return arr(detections).map((d) => ({ ...d, detected_modulation: "unbekannt", modulation_evaluated: false, modulation_status: "disabled", classification_disabled: true }));
     if (Array.isArray(observations)) {
       const matched = matchedSignalClassifications(
         detections,
@@ -1407,6 +1437,7 @@
     }));
   }
   function detectionModulationLabel(detection) {
+    if (detection.classification_disabled || !currentClassificationEnabled()) return "Detektion";
     const label = text(detection.detected_modulation, "unbekannt");
     return ["candidate", "model_candidate", "hypothesis"].includes(
       detection.modulation_status,
@@ -1415,6 +1446,7 @@
       : label;
   }
   function detectionTone(detection) {
+    if (detection.classification_disabled || !currentClassificationEnabled()) return "unknown";
     const label = String(detection.detected_modulation || "").toUpperCase();
     return label === "AM"
       ? "am"
@@ -2125,7 +2157,9 @@
                 }),
                 el("span", {
                   class: "detection-class-note",
-                  text: d.modulation_evaluated
+                  text: d.classification_disabled || !currentClassificationEnabled()
+                    ? "Klassifikation deaktiviert · Detektion und Aufnahme bleiben verfügbar"
+                    : d.modulation_evaluated
                     ? `${d.modulation_status ? analysisStatus(d.modulation_status) : "Ausgewertet"} für diesen Kanal · keine Emitterbestätigung`
                     : "Modulation dieses Kanals noch nicht ausgewertet",
                 }),
@@ -2160,7 +2194,8 @@
       snapshot,
     );
     renderReceptionAnalysis(snapshot);
-    if (Array.isArray(snapshot.signal_classifications))
+    if (!currentClassificationEnabled(snapshot)) renderClassificationDisabled();
+    else if (Array.isArray(snapshot.signal_classifications))
       renderReceptionDecision(snapshot);
     else if (snapshot.classification)
       renderClassification(snapshot.classification);
@@ -2218,6 +2253,12 @@
     const ids = arr(selection.model_ids);
     $("#live-comparison-count").textContent = `${ids.length} / 3 Modelle`;
     $("#live-comparison-stop").disabled = ids.length === 0;
+    if (!currentClassificationEnabled(snapshot)) {
+      $("#live-comparison-status").textContent = "Klassifikation im Empfänger deaktiviert. Ausgewählte Vergleichsmodelle pausieren.";
+      $("#live-comparison-hardware").textContent = "Keine Modellinferenz oder Live-Vergleiche für diese Empfangskonfiguration. Detektion und Aufnahme bleiben verfügbar.";
+      holder.replaceChildren(empty("Klassifikation deaktiviert · keine aktuellen Modellwerte"));
+      return;
+    }
     const samples = arr(snapshot?.classification_comparison);
     const byId = new Map(samples.map((item) => [item.model_id, item]));
     const selected = new Map(
@@ -2354,10 +2395,11 @@
       );
   }
   const MAX_BATCH_RECORDINGS = 1000;
+  const MAX_SELECTED_RECORDINGS = 10000;
   function recordingSelectionWithAdditions(
     current,
     additions,
-    maximum = MAX_BATCH_RECORDINGS,
+    maximum = MAX_SELECTED_RECORDINGS,
   ) {
     const selected = new Set([...current, ...additions]);
     return selected.size <= maximum ? selected : null;
@@ -2370,7 +2412,7 @@
     if (!selected) {
       showError(
         new Error(
-          `Eine gemeinsame Bestätigung ist auf ${MAX_BATCH_RECORDINGS} Aufnahmen begrenzt. Die Auswahl wurde nicht erweitert; bitte weniger Aufnahmen auswählen.`,
+          `Eine Auswahl ist auf ${MAX_SELECTED_RECORDINGS} Aufnahmen begrenzt. Die Auswahl wurde nicht erweitert; bitte weniger Aufnahmen auswählen.`,
         ),
       );
       updateRecordingSelection();
@@ -2391,14 +2433,21 @@
       selectedVisible > 0 && selectedVisible < visible.length;
     $("#recording-select-all").disabled = visible.length === 0;
     $("#recording-selection-count").textContent =
-      `${state.selectedRecordings.size} / ${MAX_BATCH_RECORDINGS} ausgewählt`;
+      `${state.selectedRecordings.size} / ${MAX_SELECTED_RECORDINGS} ausgewählt`;
     $("#recording-batch-open").disabled =
       state.selectedRecordings.size === 0 ||
       state.selectedRecordings.size > MAX_BATCH_RECORDINGS;
+    $("#recording-selection-help").textContent =
+      state.selectedRecordings.size > MAX_BATCH_RECORDINGS
+        ? `Auswahl löschen ist möglich. Labels können gemeinsam für höchstens ${MAX_BATCH_RECORDINGS} Aufnahmen bestätigt werden; dafür eine kleinere Auswahl treffen.`
+        : `Bis ${MAX_SELECTED_RECORDINGS} Aufnahmen auswählen und mit Vorschau löschen. Labels gemeinsam für höchstens ${MAX_BATCH_RECORDINGS} Aufnahmen bestätigen.`;
+    $("#recording-delete-selected").disabled =
+      state.selectedRecordings.size === 0;
     $$("#recordings-table input[data-recording-select]").forEach((input) => {
       input.checked = state.selectedRecordings.has(input.value);
       input.disabled =
-        !input.checked && state.selectedRecordings.size >= MAX_BATCH_RECORDINGS;
+        !input.checked &&
+        state.selectedRecordings.size >= MAX_SELECTED_RECORDINGS;
     });
   }
   function suggestionLabel(recording) {
@@ -2692,10 +2741,14 @@
     toast(`${result.count ?? updated.length} Aufnahmen bestätigt.`);
   }
   const CLEANUP_DURATION_SECONDS = 0.5;
-  function cleanupDeletionPlan(preview) {
+  function recordingDeletionPlan(
+    preview,
+    maximumDuration,
+    requestedIds = null,
+  ) {
     if (
       !preview ||
-      preview.max_duration_seconds !== CLEANUP_DURATION_SECONDS ||
+      preview.max_duration_seconds !== maximumDuration ||
       !Array.isArray(preview.recordings)
     )
       throw new Error(
@@ -2716,19 +2769,22 @@
       );
     const ids = [],
       fingerprints = Object.create(null),
-      seen = new Set();
+      seen = new Set(),
+      requested = requestedIds === null ? null : new Set(requestedIds);
     for (const row of preview.recordings) {
       if (
         typeof row.id !== "string" ||
         !row.id ||
         seen.has(row.id) ||
-        typeof row.duration_seconds !== "number" ||
-        !Number.isFinite(row.duration_seconds) ||
-        row.duration_seconds < 0 ||
-        row.duration_seconds >= CLEANUP_DURATION_SECONDS
+        (requested && !requested.has(row.id)) ||
+        (maximumDuration !== null &&
+          (typeof row.duration_seconds !== "number" ||
+            !Number.isFinite(row.duration_seconds) ||
+            row.duration_seconds < 0 ||
+            row.duration_seconds >= maximumDuration))
       )
         throw new Error(
-          "Die Vorschau enthält keine eindeutig kurze, gültige Aufnahme; es wurde keine Löschung freigegeben.",
+          "Die Vorschau enthält keine eindeutig ausgewählte, gültige Aufnahme; es wurde keine Löschung freigegeben.",
         );
       const fingerprint = expected[row.id];
       if (
@@ -2745,9 +2801,24 @@
     }
     return Object.freeze({
       recording_ids: Object.freeze(ids),
-      max_duration_seconds: CLEANUP_DURATION_SECONDS,
+      max_duration_seconds: maximumDuration,
       expected_files: Object.freeze(fingerprints),
     });
+  }
+  function cleanupDeletionPlan(preview) {
+    return recordingDeletionPlan(preview, CLEANUP_DURATION_SECONDS);
+  }
+  function selectedDeletionPlan(preview, selectedIds) {
+    if (
+      !Array.isArray(selectedIds) ||
+      selectedIds.length > MAX_SELECTED_RECORDINGS ||
+      selectedIds.some((id) => typeof id !== "string" || !id) ||
+      new Set(selectedIds).size !== selectedIds.length
+    )
+      throw new Error(
+        "Die bestätigte Auswahl ist ungültig oder zu groß; bitte eine neue Vorschau öffnen.",
+      );
+    return recordingDeletionPlan(preview, null, selectedIds);
   }
   function updateCleanupControls() {
     const count = state.cleanupPlan?.recording_ids.length || 0;
@@ -2770,11 +2841,18 @@
     $("#recording-cleanup-blocked").hidden = true;
     $("#recording-cleanup-skipped-details").hidden = true;
     $(".dialog-error", $("#recording-cleanup-dialog"))?.remove();
+    $(".dialog-review-notice", $("#recording-cleanup-dialog"))?.remove();
     updateCleanupControls();
     try {
-      const preview = await api(
-        `/api/recordings/cleanup-preview?max_duration_seconds=${CLEANUP_DURATION_SECONDS}`,
-      );
+      const preview =
+        state.cleanupMode === "selection"
+          ? await api("/api/recordings/delete-preview", {
+              method: "POST",
+              body: { recording_ids: state.cleanupSelection },
+            })
+          : await api(
+              `/api/recordings/cleanup-preview?max_duration_seconds=${CLEANUP_DURATION_SECONDS}`,
+            );
       if (
         sequence !== state.cleanupSequence ||
         !$("#recording-cleanup-dialog").open
@@ -2788,7 +2866,7 @@
         (row) => Number(row.experiment_count) > 0,
       ).length;
       $("#recording-cleanup-summary").textContent =
-        `${num(rows.length, 0)} geschlossene Aufnahmen unter 0,5 s · ${bytes(preview.total_bytes)} einschließlich Metadaten. ${verified} bestätigte Labels werden mitgelöscht${referenced ? `; ${referenced} Aufnahmen werden von früheren Experimenten referenziert` : ""}.`;
+        `${num(rows.length, 0)} ${state.cleanupMode === "selection" ? "ausgewählte, löschbare" : "geschlossene Aufnahmen unter 0,5 s"}${state.cleanupMode === "selection" ? " Aufnahmen" : ""} · ${bytes(preview.total_bytes)} einschließlich Metadaten. ${verified} bestätigte Labels werden mitgelöscht${referenced ? `; ${referenced} Aufnahmen werden von früheren Experimenten referenziert` : ""}.`;
       $("#recording-cleanup-preview").replaceChildren(
         ...rows.map((row) =>
           el("tr", {}, [
@@ -2828,7 +2906,10 @@
         ),
       );
       try {
-        state.cleanupPlan = cleanupDeletionPlan(preview);
+        state.cleanupPlan =
+          state.cleanupMode === "selection"
+            ? selectedDeletionPlan(preview, state.cleanupSelection)
+            : cleanupDeletionPlan(preview);
       } catch (error) {
         state.cleanupPlan = null;
         $("#recording-cleanup-blocked").hidden = false;
@@ -2836,7 +2917,9 @@
       }
       if (!rows.length && !preview.blocked_reason)
         $("#recording-cleanup-summary").textContent =
-          "Keine löschbaren geschlossenen Aufnahmen unter 0,5 Sekunden gefunden.";
+          state.cleanupMode === "selection"
+            ? "Keine löschbaren Aufnahmen in dieser Auswahl. Geschützte Einträge sind unten aufgeführt."
+            : "Keine löschbaren geschlossenen Aufnahmen unter 0,5 Sekunden gefunden.";
       updateCleanupControls();
     } catch (error) {
       if (
@@ -2851,8 +2934,20 @@
       updateCleanupControls();
     }
   }
-  async function openCleanupDialog() {
+  async function openCleanupDialog(mode = "short") {
     if (state.cleanupBusy) return;
+    state.cleanupMode = mode;
+    state.cleanupSelection =
+      mode === "selection" ? Object.freeze([...state.selectedRecordings]) : [];
+    if (mode === "selection" && !state.cleanupSelection.length) return;
+    $("#recording-cleanup-title").textContent =
+      mode === "selection"
+        ? "Ausgewählte Aufnahmen löschen"
+        : "Kurzaufnahmen unter 0,5 s löschen";
+    $("#recording-cleanup-description").textContent =
+      mode === "selection"
+        ? "Prüfe diese konkrete Auswahl. Gelöscht werden die unten aufgeführten IQ-Dateien, Metadaten und Labels. Historische Experimente behalten Berichte und Modelle, verlieren aber diese Datengrundlage. Geschützte oder laufende Aufnahmen werden übersprungen."
+        : "Geschlossene Aufnahmen mit einer Dauer von strikt weniger als 0,5 Sekunden werden vorgeschlagen. IQ-Dateien, Metadaten und Labels werden gelöscht; Berichte und Modelle historischer Experimente bleiben erhalten.";
     await openDialog("recording-cleanup-dialog");
     await loadCleanupPreview();
   }
@@ -2862,11 +2957,17 @@
     if (!plan || !plan.recording_ids.length) return;
     state.cleanupBusy = true;
     updateCleanupControls();
+    let refreshError = null;
     try {
-      const result = await api("/api/recordings/delete-batch", {
-        method: "POST",
-        body: plan,
-      });
+      const result = await api(
+        state.cleanupMode === "selection"
+          ? "/api/recordings/delete"
+          : "/api/recordings/delete-batch",
+        {
+          method: "POST",
+          body: plan,
+        },
+      );
       const deleted = new Set(arr(result.deleted));
       deleted.forEach((id) => state.selectedRecordings.delete(id));
       $$("#experiment-recordings input").forEach((input) => {
@@ -2880,7 +2981,16 @@
       notice.hidden = false;
       notice.className = `notice${result.cleanup_warning ? " error" : ""}`;
       notice.textContent = `${num(result.count ?? deleted.size, 0)} Aufnahmen gelöscht · ${bytes(result.bytes_deleted)} freigegeben.${skipped.length ? ` ${skipped.length} übersprungen: ${skipped.map((row) => `${text(row.id)}: ${text(row.reason)}`).join("; ")}` : ""}${result.cleanup_warning ? ` Hinweis: ${result.cleanup_warning}` : ""}`;
-      closeDialog($("#recording-cleanup-dialog"));
+      if (skipped.length) {
+        if (state.cleanupMode === "selection")
+          state.cleanupSelection = Object.freeze(
+            state.cleanupSelection.filter((id) => !deleted.has(id)),
+          );
+        refreshError = new Error(
+          `${num(deleted.size, 0)} Aufnahmen gelöscht; ${skipped.length} übersprungen. ${skipped.map((row) => `${text(row.id)}: ${text(row.reason)}`).join("; ")}`,
+        );
+        refreshError.isReviewNotice = true;
+      } else closeDialog($("#recording-cleanup-dialog"));
       try {
         await loadRecordings();
       } catch (error) {
@@ -2890,7 +3000,7 @@
         );
       }
       toast(
-        `${num(result.count ?? deleted.size, 0)} Kurzaufnahmen gelöscht${skipped.length ? `; ${skipped.length} übersprungen` : ""}.`,
+        `${num(result.count ?? deleted.size, 0)} Aufnahmen gelöscht${skipped.length ? `; ${skipped.length} übersprungen` : ""}.`,
       );
     } catch (error) {
       state.cleanupPlan = null;
@@ -2898,12 +3008,26 @@
       $("#recording-cleanup-blocked").textContent =
         "Das Löschergebnis wurde nicht bestätigt. Vor einer weiteren Bestätigung die Vorschau aktualisieren; die Anfrage wird nicht automatisch wiederholt.";
       showError(error);
+      refreshError = error;
       try {
         await loadRecordings();
       } catch (_ignored) {}
     } finally {
       state.cleanupBusy = false;
       updateCleanupControls();
+    }
+    if (refreshError && $("#recording-cleanup-dialog").open) {
+      await loadCleanupPreview();
+      const message = `${errorMessage(refreshError)} Vor einer weiteren Bestätigung eine aktuelle Vorschau und den Dateistand erneut prüfen. Es wurde keine Löschanfrage automatisch wiederholt.`;
+      if (refreshError.isReviewNotice)
+        $(".dialog-body", $("#recording-cleanup-dialog")).prepend(
+          el("div", {
+            class: "notice amber dialog-review-notice",
+            role: "status",
+            text: message,
+          }),
+        );
+      else showError(new Error(message));
     }
   }
   async function loadEmitters() {
@@ -3629,6 +3753,220 @@
       "Beste Hyperparameter ins manuelle Setup übernommen. Topologieauswahl bleibt erhalten; es wurde kein Experiment gestartet.",
     );
   }
+  const DEFAULT_GITHUB_PUBLICATION = {
+    enabled: false,
+    repository: "schildtaero/SignalClassifier",
+    branch: "experiment-results",
+  };
+  function normalizeGithubPublication(value) {
+    if (value === undefined) return { ...DEFAULT_GITHUB_PUBLICATION };
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).some(
+        (key) => !["enabled", "repository", "branch"].includes(key),
+      )
+    )
+      throw new Error(
+        "GitHub-Veröffentlichung: nur Aktivierung, Repository und Branch sind zulässig. Zugangsdaten gehören ausschließlich in die Backend-Umgebung.",
+      );
+    if (value.enabled !== undefined && typeof value.enabled !== "boolean")
+      throw new Error("Die GitHub-Aktivierung muss true oder false sein.");
+    const repository =
+      value.repository ?? DEFAULT_GITHUB_PUBLICATION.repository;
+    const branch = value.branch ?? DEFAULT_GITHUB_PUBLICATION.branch;
+    if (
+      typeof repository !== "string" ||
+      repository.length > 140 ||
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(
+        repository,
+      )
+    )
+      throw new Error(
+        "GitHub-Repository als Eigentümer/Repository angeben, ohne URL oder Zugangsdaten.",
+      );
+    if (
+      typeof branch !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(branch) ||
+      ["main", "master"].includes(branch.toLowerCase()) ||
+      branch.endsWith("/") ||
+      branch.endsWith(".") ||
+      branch.includes("..") ||
+      branch.includes("//") ||
+      branch
+        .split("/")
+        .some(
+          (part) =>
+            part.startsWith(".") || part.toLowerCase().endsWith(".lock"),
+        )
+    )
+      throw new Error(
+        "Ungültiger GitHub-Branch. Bis 100 Zeichen aus Buchstaben, Ziffern, Punkt, Unterstrich, Bindestrich und / verwenden; main und master sind ausgeschlossen.",
+      );
+    return { enabled: value.enabled === true, repository, branch };
+  }
+  function updateGithubPublicationControls() {
+    const enabled = $("#experiment-github-enabled").checked;
+    $("#experiment-github-repository").disabled = !enabled;
+    $("#experiment-github-branch").disabled = !enabled;
+    const status = state.publicationStatus;
+    $("#experiment-github-status").textContent = !status
+      ? "Backend-Zugang noch nicht geprüft. Das lokale Paper-Paket bleibt unabhängig davon verfügbar."
+      : status.configured
+        ? "GitHub-Token ist in der Backend-Umgebung gesetzt; Berechtigung wird beim Upload geprüft. Im Browser werden keine Tokens gespeichert."
+        : "Kein GitHub-Zugang in der Backend-Umgebung eingerichtet. Das Experiment kann laufen; ein aktivierter Upload bleibt nach Einrichtung wiederholbar. Das lokale Paper-Paket steht unabhängig davon bereit.";
+  }
+  function populateGithubPublicationForm(value) {
+    const config = normalizeGithubPublication(value);
+    $("#experiment-github-enabled").checked = config.enabled;
+    $("#experiment-github-repository").value = config.repository;
+    $("#experiment-github-branch").value = config.branch;
+    updateGithubPublicationControls();
+  }
+  async function loadPublicationStatus() {
+    try {
+      state.publicationStatus = await api("/api/publication/status");
+    } catch (_error) {
+      state.publicationStatus = null;
+    }
+    updateGithubPublicationControls();
+  }
+  function githubPublicationURL(value) {
+    if (typeof value !== "string") return null;
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" &&
+        url.hostname === "github.com" &&
+        !url.username &&
+        !url.password
+        ? url.href
+        : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+  function publicationStateLabel(status) {
+    return (
+      {
+        queued: "Zum Upload vorgemerkt",
+        publishing: "Wird veröffentlicht",
+        published: "Veröffentlicht",
+        failed: "Veröffentlichung fehlgeschlagen",
+        interrupted: "Veröffentlichung unterbrochen",
+        disabled: "Nicht aktiviert",
+      }[status] || text(status, "Nicht aktiviert")
+    );
+  }
+  function renderExperimentPublication(experiment) {
+    const panel = $("#experiment-publication");
+    const id = experiment.id || state.selectedExperiment;
+    const config = experiment.config?.github_publication || {};
+    const publication = experiment.publication || {
+      status: config.enabled ? "queued" : "disabled",
+    };
+    const terminal = [
+      "completed",
+      "finished",
+      "done",
+      "failed",
+      "error",
+      "cancelled",
+      "interrupted",
+    ].includes(experiment.status);
+    const key = JSON.stringify({ id, publication, config, terminal });
+    panel.hidden = !id;
+    if (!id || panel.dataset.publicationKey === key) return;
+    if ($("details[open]", panel)?.contains(document.activeElement)) return;
+    panel.dataset.publicationKey = key;
+    const url = githubPublicationURL(publication.url);
+    const actions = [];
+    if (terminal)
+      actions.push(
+        download(
+          `/api/experiments/${encodeURIComponent(id)}/paper-bundle`,
+          "Paper-Daten lokal herunterladen",
+        ),
+      );
+    if (url)
+      actions.push(
+        el("a", {
+          href: url,
+          target: "_blank",
+          rel: "noopener noreferrer",
+          class: "button button-quiet",
+          text: "Ergebnisse auf GitHub öffnen",
+        }),
+      );
+    if (
+      terminal &&
+      config.enabled === true &&
+      !["queued", "publishing", "published"].includes(publication.status)
+    ) {
+      const retry = button("Veröffentlichung wiederholen", () =>
+        action(async () => {
+          retry.disabled = true;
+          try {
+            await api(`/api/experiments/${encodeURIComponent(id)}/publish`, {
+              method: "POST",
+              body: {},
+            });
+            await loadExperiment(id);
+          } finally {
+            retry.disabled = false;
+          }
+        }),
+      );
+      actions.push(retry);
+    }
+    replaceContent(
+      panel,
+      el("h3", { text: "Paper-Daten & GitHub-Veröffentlichung" }),
+      pill(
+        publicationStateLabel(publication.status),
+        publication.status === "published"
+          ? "green"
+          : ["failed", "interrupted"].includes(publication.status)
+            ? "amber"
+            : "",
+      ),
+      config.enabled
+        ? el("p", {
+            text: `Ziel: ${text(publication.repository || config.repository)} · Branch ${text(publication.branch || config.branch)}. Veröffentlicht werden strukturierte Ergebnisdaten, bei abgebrochenen Läufen die verfügbaren Teilresultate.`,
+          })
+        : el("p", {
+            text: "Für diesen Lauf wurde keine automatische GitHub-Veröffentlichung aktiviert.",
+          }),
+      publication.error
+        ? el("p", { class: "notice error", text: publication.error })
+        : null,
+      publication.finished_at
+        ? el("small", {
+            text: `Letzter Abschluss: ${date(publication.finished_at)}`,
+          })
+        : null,
+      el("div", { class: "button-group" }, actions),
+      arr(publication.files).length
+        ? el("details", {}, [
+            el("summary", {
+              text: `${publication.files.length} Dateien im Veröffentlichungspaket`,
+            }),
+            el(
+              "ul",
+              {},
+              publication.files.map((file) =>
+                el("li", {
+                  text:
+                    typeof file === "string"
+                      ? file
+                      : text(file.name || file.path),
+                }),
+              ),
+            ),
+          ])
+        : null,
+    );
+  }
   function experimentConfig({
     allowEmptyTopologies = false,
     includeDisabledOptimization = false,
@@ -3688,6 +4026,11 @@
     };
     config.optimization = optimization;
     config.execution = executionConfigFromForm(form);
+    config.github_publication = normalizeGithubPublication({
+      enabled: $("#experiment-github-enabled").checked,
+      repository: $("#experiment-github-repository").value,
+      branch: $("#experiment-github-branch").value,
+    });
     if (
       config.optimization.enabled &&
       config.evaluation_mode === "training_only"
@@ -5015,6 +5358,7 @@
   }
   function renderExperimentResult(experiment) {
     updateExperimentBundleExport(experiment);
+    renderExperimentPublication(experiment);
     const fullReport = experiment.report || experiment.result || experiment;
     const comparison = arr(fullReport.comparison);
     const experimentId = experiment.id || state.selectedExperiment;
@@ -5670,6 +6014,10 @@
       ["SOFTWARE", hw.python || hw.python_version || "Siehe Bericht"],
     ];
     $("#benchmark-result").replaceChildren(
+      el("p", { class: "secondary", text: "Feste CPU-Merkmalsberechnung, kein GPU-Test; kleiner ist schneller. Für vergleichbare Messungen Empfang und Experimente stoppen. Jeder Klick misst neu." }),
+      ...(data.measured_at ? [el("p", { class: "secondary", text: `Gemessen: ${date(data.measured_at)}` })] : []),
+      ...(data.observation_context?.receiver_running || data.observation_context?.experiment_running
+        ? [el("p", { class: "notice", text: "Bei dieser Messung war Empfang oder ein Experiment aktiv. Gleichzeitige Rechenlast kann den Referenzwert beeinflussen." })] : []),
       el(
         "div",
         { class: "benchmark-grid" },
@@ -6109,10 +6457,13 @@
   function renderAnalysisStats() {
     const stats = state.analysis?.stats || {},
       settings = state.analysis?.settings || {};
+    const pausedReason = stats.paused_reason || (!classificationEnabled(state.status.receiver) ? "Klassifikation im Empfänger deaktiviert" : "");
+    $("#analysis-paused-notice").hidden = !pausedReason;
+    $("#analysis-paused-notice").textContent = pausedReason ? `${pausedReason}. Die automatische Empfangsanalyse pausiert; gespeicherte Berichte bleiben einsehbar.` : "";
     const cards = [
       [
         "ANALYSE",
-        settings.enabled === true ? "Aktiviert" : "Deaktiviert",
+        pausedReason ? "Pausiert" : settings.enabled === true ? "Aktiviert" : "Deaktiviert",
         `${num(stats.cycles, 0)} Auswertungszyklen`,
       ],
       [
@@ -6224,6 +6575,14 @@
       ],
     );
   }
+  function renderClassificationDisabled() {
+    $("#classification-label").textContent = "Aus";
+    $("#classification-confidence").textContent = "Klassifikation deaktiviert · nur Detektion und Aufnahme, keine Modelle oder Live-Vergleiche";
+    $("#classification-time").textContent = "Aus";
+    $("#decision-steps").replaceChildren(empty("Die aktuelle Empfangskonfiguration klassifiziert keine Signale. Energiedetektion, Spektrum und die gewählte Aufnahmefunktion bleiben verfügbar."));
+    $("#features-grid").replaceChildren(empty("Keine aktuellen Klassifikationsmerkmale. Detektionswerte stehen bei den gefundenen Signalen."));
+    $("#model-explanation-details").hidden = true;
+  }
   function renderReceptionAnalysis(snapshot) {
     const holder = $("#reception-analysis-body");
     if (!holder) return;
@@ -6231,6 +6590,11 @@
       stats = snapshot.analysis_stats || {};
     $("#reception-analysis-status").textContent =
       `Empfangsfenster: ${num(channel.detected_channels, 0)} detektiert · ${num(channel.buffered_channels, 0)} gepuffert (Filterlimit ${num(channel.channel_limit, 0)}) · ${num(channel.unbuffered_detections_count, 0)} ohne IQ-Puffer. Nachgelagerte Analyse: ${num(stats.pending_signals, 0)} ausstehend. Mehr Filterkanäle benötigen zusätzliche CPU-Zeit; unbekannte oder ungepufferte Signale sind keine negativen Klassifikationsergebnisse.`;
+    if (!currentClassificationEnabled(snapshot)) {
+      $("#reception-analysis-status").textContent = `Klassifikation im Empfänger deaktiviert. ${num(arr(snapshot.detections).length, 0)} aktuelle Detektionen. Detektion und gewählte Aufnahme laufen unabhängig von Modellen und Live-Vergleichen weiter.`;
+      holder.replaceChildren(el("tr", {}, [el("td", { colSpan: 4 }, [empty("Nur Detektion und Aufnahme · keine kanalspezifischen Klassenergebnisse")])]));
+      return;
+    }
     if (holder.contains(document.activeElement)) return;
     const signals = [
       ...matchedSignalClassifications(
@@ -6254,6 +6618,7 @@
     );
   }
   function renderReceptionDecision(snapshot) {
+    if (!currentClassificationEnabled(snapshot)) { renderClassificationDisabled(); return; }
     if ($("#decision-steps").contains(document.activeElement)) return;
     const observations = [
       ...matchedSignalClassifications(
@@ -6642,6 +7007,7 @@
       overlap_fraction: Number($("#analysis-scan-overlap").value),
       repeat: $("#analysis-scan-repeat").checked,
       receiver_config: {
+        classification_enabled: classificationFormValue($("#analysis-scan-form")),
         mode: "monitor",
         gain_db: Number($("#analysis-scan-gain").value),
         uri: $("#analysis-scan-uri").value,
@@ -7125,6 +7491,7 @@
     if (c.device !== undefined && !["auto", "cpu", "cuda"].includes(c.device))
       throw new Error("Ungültiges Rechengerät.");
     const execution = normalizeExecutionConfig(c.execution);
+    const githubPublication = normalizeGithubPublication(c.github_publication);
     const optimization = normalizeOptimizationConfig(
       c.optimization,
       c.segment_length || arr(c.segment_lengths)[0] || 2048,
@@ -7240,6 +7607,7 @@
       config: c,
       optimization,
       execution,
+      githubPublication,
       topologyIds,
       recordingIds: [...new Set(ids)].filter((id) => available.has(id)),
       missingRecordingIds: [...new Set(ids)].filter((id) => !available.has(id)),
@@ -7299,6 +7667,7 @@
     form.elements.experiment_notes.value = c.experiment_notes || "";
     populateOptimizationForm(prepared.optimization);
     populateExecutionForm(prepared.execution);
+    populateGithubPublicationForm(prepared.githubPublication);
     setExperimentRecordingSelection(prepared.recordingIds);
     $("#experiment-recordings-field").hidden =
       form.elements.source.value !== "recordings";
@@ -7311,6 +7680,11 @@
   }
   function setupEvents() {
     setupAnalysisEvents();
+    updateGithubPublicationControls();
+    $("#experiment-github-enabled").addEventListener("change", () => {
+      updateGithubPublicationControls();
+      loadPublicationStatus();
+    });
     $("#optimization-enabled").addEventListener(
       "change",
       updateOptimizationControls,
@@ -7330,6 +7704,9 @@
 
     $("#recording-cleanup-open").addEventListener("click", () =>
       action(openCleanupDialog),
+    );
+    $("#recording-delete-selected").addEventListener("click", () =>
+      action(() => openCleanupDialog("selection")),
     );
     $("#recording-cleanup-refresh").addEventListener("click", () =>
       action(loadCleanupPreview),
@@ -7676,7 +8053,7 @@
         btn.disabled = true;
         btn.textContent = "Referenz wird gemessen …";
         try {
-          renderBenchmark(await api("/api/benchmark"));
+          renderBenchmark(await api("/api/benchmark?refresh=true"));
         } finally {
           btn.disabled = false;
           btn.textContent = "Referenz messen";

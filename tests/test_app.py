@@ -233,6 +233,50 @@ class AppTests(unittest.TestCase):
         self.assertTrue(all(entry["elapsed_ms"] > 0 for entry in observed))
         self.assertFalse(self.client.post("/api/live/compare", json={"model_ids": []}).json()["active"])
 
+    def test_detection_only_recording_never_runs_automatic_model_paths(self):
+        runtime = self.client_context.app.state.runtime
+        with patch.object(runtime.capture, "inference_segment", side_effect=AssertionError("no IQ copy")) as iq_copy, \
+             patch.object(runtime, "active_model_path", side_effect=AssertionError("no model resolution")) as model, \
+             patch.object(runtime, "compare_latest", side_effect=AssertionError("no live comparison")) as compare, \
+             patch("signalclassifier.app.ml.classify", side_effect=AssertionError("no classification")) as classify, \
+             patch("signalclassifier.analysis_runtime.decision.analyze_signal", side_effect=AssertionError("no background inference")) as decision:
+            start = self.client.post("/api/receiver/start", json={"source": "synthetic", "synthetic_modulation": "AM",
+                "sample_rate": 256000, "block_size": 4096, "mode": "energy", "threshold_db": 6,
+                "duration_seconds": .25, "classification_enabled": False})
+            self.assertEqual(start.status_code, 200, start.text)
+            deadline = time.monotonic() + 3
+            detections = []
+            while time.monotonic() < deadline:
+                spectrum = self.client.get("/api/spectrum").json()
+                self.assertFalse(spectrum["classification_enabled"])
+                self.assertEqual(spectrum["classification"]["status"], "disabled")
+                self.assertEqual(spectrum["classification_comparison"], [])
+                self.assertEqual(spectrum["signal_classifications"], [])
+                detections.extend(spectrum.get("detections", []))
+                if not self.client.get("/api/receiver/status").json()["busy"]:
+                    break
+                time.sleep(.02)
+            self.assertTrue(detections, "energy detection must remain active")
+            for operation in (iq_copy, model, compare, classify, decision):
+                operation.assert_not_called()
+            self.assertIn("deaktiviert", self.client.get("/api/analysis").json()["stats"]["paused_reason"])
+            recordings = self.client.get("/api/recordings").json()
+            self.assertTrue(recordings, "energy recording must still save channels")
+            self.assertTrue(all(row["samples"] > 0 for row in recordings))
+
+    def test_reference_button_can_refresh_cached_cpu_measurement(self):
+        with patch("signalclassifier.app.ml.benchmark_hardware", side_effect=[
+                {"reference_latency_ms": 1.359}, {"reference_latency_ms": .9}]) as measure:
+            first = self.client.get("/api/benchmark").json()
+            cached = self.client.get("/api/benchmark").json()
+            refreshed = self.client.get("/api/benchmark?refresh=true").json()
+        self.assertEqual(first["reference_latency_ms"], 1.359)
+        self.assertEqual(cached, first)
+        self.assertEqual(refreshed["reference_latency_ms"], .9)
+        self.assertEqual(measure.call_count, 2)
+        self.assertFalse(refreshed["observation_context"]["external_host_load_verified"])
+        self.assertIn("CPU", refreshed["measurement_scope"])
+
 
 if __name__ == "__main__":
     unittest.main()

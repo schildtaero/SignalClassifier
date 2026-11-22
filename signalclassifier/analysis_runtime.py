@@ -108,7 +108,28 @@ class SignalStore:
         self.lock = threading.RLock()
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("CREATE TABLE IF NOT EXISTS signals(id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS signals(id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, payload TEXT NOT NULL, session_id TEXT)")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(signals)")}
+            if "session_id" not in columns:
+                # DDL and the one-time payload backfill must commit together:
+                # otherwise a crash after ALTER could leave old rows invisible
+                # to session queries on the next application start.
+                conn.execute("BEGIN IMMEDIATE")
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(signals)")}
+                if "session_id" not in columns:
+                    conn.execute("ALTER TABLE signals ADD COLUMN session_id TEXT")
+                    cursor = conn.execute("SELECT id,payload FROM signals")
+                    while rows := cursor.fetchmany(32):
+                        updates = []
+                        for identifier, payload in rows:
+                            try:
+                                value = json.loads(payload)
+                                session = value.get("session_id") if isinstance(value, dict) else None
+                            except (ValueError, TypeError):
+                                session = None
+                            updates.append((session if isinstance(session, str) else None, identifier))
+                        conn.executemany("UPDATE signals SET session_id=? WHERE id=?", updates)
+            conn.execute("CREATE INDEX IF NOT EXISTS signals_session_updated_id ON signals(session_id,updated_at DESC,id)")
             conn.execute("CREATE TABLE IF NOT EXISTS observations(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, signal_id TEXT NOT NULL, payload TEXT NOT NULL)")
             conn.execute("CREATE INDEX IF NOT EXISTS observations_signal ON observations(signal_id,seq)")
             conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL)")
@@ -132,8 +153,9 @@ class SignalStore:
                 old = conn.execute("SELECT payload FROM observations WHERE id=?", (observation_id,)).fetchone()
                 if old:
                     return json.loads(old[0])
-            conn.execute("INSERT INTO signals VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload",
-                         (signal["id"], signal.get("analysis_at", signal["last_seen"]), encoded))
+            conn.execute("INSERT INTO signals(id,updated_at,payload,session_id) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload,session_id=excluded.session_id",
+                         (signal["id"], signal.get("analysis_at", signal["last_seen"]), encoded,
+                          signal.get("session_id") if isinstance(signal.get("session_id"), str) else None))
             if observation_id:
                 conn.execute("INSERT OR IGNORE INTO observations(id,signal_id,payload) VALUES(?,?,?)", (observation_id, signal["id"], encoded))
             removed = conn.execute("DELETE FROM observations WHERE seq NOT IN (SELECT seq FROM observations ORDER BY seq DESC LIMIT ?)", (max_history,)).rowcount
@@ -152,9 +174,11 @@ class SignalStore:
     def list(self, limit=100, session_id=None, compact=False):
         limit = max(1, min(2000, int(limit)))
         with self.lock, self.connect() as conn:
-            rows = conn.execute("SELECT payload FROM signals ORDER BY updated_at DESC,id LIMIT ?", (2000 if session_id else limit,)).fetchall()
+            if session_id is None:
+                rows = conn.execute("SELECT payload FROM signals ORDER BY updated_at DESC,id LIMIT ?", (limit,)).fetchall()
+            else:
+                rows = conn.execute("SELECT payload FROM signals WHERE session_id=? ORDER BY updated_at DESC,id LIMIT ?", (session_id, limit)).fetchall()
         values = [json.loads(row[0]) for row in rows]
-        values = [r for r in values if session_id is None or r.get("session_id") == session_id][:limit]
         if compact:
             for value in values:
                 value.pop("analysis_settings", None)
@@ -195,7 +219,7 @@ class AnalysisManager:
                 ("decision.py", Path(decision.__file__)), ("analysis_runtime.py", Path(__file__)))},
             "source_scope": "Backend source bytes at analysis worker startup; model artifacts are hashed separately."}
         self.stats = {"cycles": 0, "analyzed_observations": 0, "pending_signals": 0,
-                      "unbuffered_detections": 0, "last_cycle_ms": 0., "last_error": None}
+                      "unbuffered_detections": 0, "last_cycle_ms": 0., "last_error": None, "paused_reason": None}
         self.thread = None
         if start_worker:
             self.thread = threading.Thread(target=self._run, name="signal-analysis", daemon=True)
@@ -204,6 +228,9 @@ class AnalysisManager:
     def get_settings(self):
         with self.lock:
             return json.loads(json.dumps(self.settings))
+
+    def classification_enabled(self):
+        return self.capture.status().get("config", {}).get("classification_enabled", True) is not False
 
     def set_settings(self, value):
         # Resolve all identifiers before persisting: API clients cannot supply paths.
@@ -342,6 +369,13 @@ class AnalysisManager:
         # A scan end callback and normal polling must not classify the same IQ twice.
         with self.cycle_lock:
             settings = self.get_settings()
+            if not self.classification_enabled():
+                with self.lock:
+                    self.stats.update(paused_reason="Klassifikation im Empfänger deaktiviert", pending_signals=0,
+                                      last_cycle_ms=0., last_error=None)
+                return
+            with self.lock:
+                self.stats["paused_reason"] = None
             if not settings["enabled"] or self.stop_event.is_set():
                 return
             started = time.perf_counter()
@@ -427,7 +461,7 @@ class AnalysisManager:
         """
         with self.cycle_lock:
             for _ in range(16):
-                if not self.get_settings()["enabled"] or self.stop_event.is_set():
+                if not self.get_settings()["enabled"] or self.stop_event.is_set() or not self.classification_enabled():
                     return
                 self.process_snapshots()
                 if not self.stats["pending_signals"]:
@@ -460,10 +494,13 @@ class AnalysisManager:
     def snapshot(self):
         with self.lock:
             stats = {**self.stats, **self.signals.stats()}
+        stats["paused_reason"] = None if self.classification_enabled() else "Klassifikation im Empfänger deaktiviert"
         return {"settings": self.get_settings(), "coverage": self.coverage(), "stats": stats,
                 "signals": self.signals.list(100, compact=True)}
 
     def overlay(self, session_id):
+        if not self.classification_enabled():
+            return []
         result = []
         for item in self.signals.list(100, session_id):
             if item["status"] == "not_run_budget":

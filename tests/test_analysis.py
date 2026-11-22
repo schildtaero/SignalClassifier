@@ -88,6 +88,24 @@ class AnalysisRuntimeTests(unittest.TestCase):
             self.assertEqual(manager.signals.stats()["observation_count"], 3)
             self.assertTrue(all(s["status"] == "unknown" for s in manager.signals.list()))
 
+    def test_receiver_switch_skips_all_automatic_analysis_and_scan_flush(self):
+        with tempfile.TemporaryDirectory() as d:
+            capture = FakeCapture([entry()])
+            manager = self.manager(d, capture)
+            disabled = {**capture.status(), "config": {"classification_enabled": False}}
+            with mock.patch.object(capture, "status", return_value=disabled), \
+                 mock.patch.object(capture, "snapshot", side_effect=AssertionError("no snapshot copy")), \
+                 mock.patch.object(capture, "analysis_snapshots", side_effect=AssertionError("no IQ copies")), \
+                 mock.patch("signalclassifier.analysis_runtime.decision.analyze_signal", side_effect=AssertionError("no inference")):
+                manager.process_snapshots()
+                manager.finish_window()
+                self.assertEqual(manager.overlay("session"), [])
+                self.assertIn("deaktiviert", manager.stats["paused_reason"])
+            self.assertEqual(manager.signals.stats()["observation_count"], 0)
+            manager.process_snapshots()
+            self.assertEqual(manager.signals.stats()["observation_count"], 1)
+            self.assertIsNone(manager.stats["paused_reason"])
+
     def test_coverage_does_not_invent_unknown_receiver_limits_and_caps_analog_width(self):
         with tempfile.TemporaryDirectory() as d:
             capture = FakeCapture([])

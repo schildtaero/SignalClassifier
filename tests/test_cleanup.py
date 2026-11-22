@@ -1,4 +1,4 @@
-"""Reviewed short-recording deletion, threshold boundaries and failure recovery."""
+"""Reviewed selected/short deletion, protection, identity checks and rollback."""
 from __future__ import annotations
 
 import json
@@ -46,6 +46,152 @@ class RecordingCleanupTests(unittest.TestCase):
         return self.client.post("/api/recordings/delete-batch", json={
             "recording_ids": ids if ids is not None else [row["id"] for row in preview["recordings"]],
             "max_duration_seconds": .5, "expected_files": preview["expected_files"]})
+
+    def selected_preview(self, ids):
+        response = self.client.post("/api/recordings/delete-preview", json={"recording_ids": ids})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def delete_selected(self, preview, ids=None):
+        return self.client.post("/api/recordings/delete", json={
+            "recording_ids": ids if ids is not None else [row["id"] for row in preview["recordings"]],
+            "max_duration_seconds": None, "expected_files": preview["expected_files"]})
+
+    def test_selected_any_duration_preview_deletes_only_reviewed_ids_and_warns_on_references(self):
+        boundary = self.recording("boundary", 4000)
+        long = self.recording("long", 24000)
+        unrelated = self.recording("unrelated", 800)
+        self.client.post("/api/recordings/long/label", json={"label": "AM", "verified": True})
+        self.runtime.store.put("experiment", "completed", {"status": "completed", "config": {"recording_ids": ["long"]},
+                                                           "report": {"historical": "kept"}})
+        preview = self.selected_preview(["boundary", "long", "long", "missing"])
+        self.assertIsNone(preview["max_duration_seconds"])
+        self.assertIsNone(preview["blocked_reason"])
+        self.assertEqual([row["id"] for row in preview["recordings"]], ["boundary", "long"])
+        self.assertEqual(preview["count"], 2)
+        self.assertEqual(preview["recordings"][1]["duration_seconds"], 3)
+        self.assertEqual(preview["recordings"][1]["experiment_count"], 1)
+        self.assertTrue(preview["recordings"][1]["verified"])
+        self.assertTrue(preview["warnings"])
+        self.assertEqual(preview["skipped"][0]["id"], "missing")
+        self.assertTrue(long.exists(), "manual preview must not mutate data")
+        self.assertEqual(set(preview["expected_files"]), {"boundary", "long"})
+        late = self.recording("created-after-preview", 16000)
+        response = self.delete_selected(preview)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["deleted"], ["boundary", "long"])
+        self.assertEqual(response.json()["bytes_deleted"], preview["total_bytes"])
+        for path in (boundary, long):
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_suffix(".sigmf-data").exists())
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(late.exists())
+        self.assertEqual(self.client.get("/api/labels").json(), [])
+        self.assertEqual(self.runtime.store.get("experiment", "completed")["report"], {"historical": "kept"})
+
+    def test_selected_duration_limit_must_be_explicitly_disabled_and_review_is_required(self):
+        path = self.recording("long", 8000)
+        preview = self.selected_preview(["long"])
+        # Omitting the limit keeps the historical strict <0.5-second rule on
+        # both commit route names; only explicit JSON null removes that rule.
+        for route in ("/api/recordings/delete", "/api/recordings/delete-batch"):
+            response = self.client.post(route, json={"recording_ids": ["long"], "expected_files": preview["expected_files"]})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["count"], 0)
+            self.assertTrue(path.exists())
+            self.assertEqual(self.client.post(route, json={"recording_ids": ["long"], "max_duration_seconds": None}).status_code, 422)
+        response = self.client.post("/api/recordings/delete", json={"recording_ids": ["long"],
+                                    "max_duration_seconds": 1, "expected_files": preview["expected_files"]})
+        self.assertEqual(response.status_code, 422)
+
+    def test_selected_changed_or_unreviewed_files_are_skipped_and_unknown_ids_abort(self):
+        kept = self.recording("unchanged-long", 8000)
+        changed = self.recording("changed-long", 8000)
+        unreviewed = self.recording("unreviewed-long", 8000)
+        preview = self.selected_preview(["unchanged-long", "changed-long"])
+        response = self.delete_selected(preview, ["unchanged-long", "missing"])
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(kept.exists(), "an unknown commit ID must not partially delete")
+        doc = json.loads(changed.read_text())
+        doc["global"]["core:description"] = "changed after explicit review"
+        changed.write_text(json.dumps(doc))
+        response = self.delete_selected(preview, ["unchanged-long", "changed-long", "unreviewed-long"])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["deleted"], ["unchanged-long"])
+        self.assertEqual({row["id"] for row in response.json()["skipped"]}, {"changed-long", "unreviewed-long"})
+        self.assertFalse(kept.exists())
+        self.assertTrue(changed.exists())
+        self.assertTrue(unreviewed.exists())
+
+    def test_selected_running_experiment_protection_is_rechecked_after_preview(self):
+        path = self.recording("protected-long", 16000)
+        preview = self.selected_preview(["protected-long"])
+        for status in ("queued", "running", "cancelling"):
+            with self.subTest(status=status):
+                self.runtime.store.put("experiment", "active", {"status": status,
+                                       "config": {"recordings": [{"id": "protected-long"}]}})
+                checked = self.selected_preview(["protected-long"])
+                self.assertEqual(checked["recordings"], [])
+                self.assertIn("Experiment", checked["skipped"][0]["reason"])
+                response = self.delete_selected(preview)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["count"], 0)
+                self.assertIn("Experiment", response.json()["skipped"][0]["reason"])
+                self.assertTrue(path.exists())
+
+    def test_selected_receiver_and_scan_between_tiles_block_deletion(self):
+        path = self.recording("long", 8000)
+        preview = self.selected_preview(["long"])
+        for busy, scanning in ((True, False), (False, True)):
+            with self.subTest(busy=busy, scanning=scanning), \
+                 patch.object(self.runtime.capture, "status", return_value={"busy": busy}), \
+                 patch.object(self.runtime.scanner, "status", return_value={"running": scanning}):
+                self.assertIsNotNone(self.selected_preview(["long"])["blocked_reason"])
+                self.assertEqual(self.delete_selected(preview).status_code, 409)
+                self.assertTrue(path.exists())
+
+    def test_selected_missing_invalid_or_symlinked_pairs_are_never_deleted(self):
+        valid = self.recording("valid-long", 8000)
+        invalid = self.recording("invalid-long", 8000)
+        invalid.with_suffix(".sigmf-data").unlink()
+        linked = self.recording("linked-long", 8000)
+        outside = Path(self.temp.name) / "outside.sigmf-data"
+        outside.write_bytes(linked.with_suffix(".sigmf-data").read_bytes())
+        linked.with_suffix(".sigmf-data").unlink()
+        linked.with_suffix(".sigmf-data").symlink_to(outside)
+        preview = self.selected_preview(["valid-long", "missing", "invalid-long", "linked-long"])
+        self.assertEqual([row["id"] for row in preview["recordings"]], ["valid-long"])
+        self.assertEqual({row["id"] for row in preview["skipped"]}, {"missing", "invalid-long", "linked-long"})
+        response = self.delete_selected(preview, ["valid-long", "invalid-long", "linked-long"])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["deleted"], ["valid-long"])
+        self.assertFalse(valid.exists())
+        self.assertTrue(invalid.exists())
+        self.assertTrue(linked.is_file())
+        self.assertTrue(linked.with_suffix(".sigmf-data").is_symlink())
+        self.assertTrue(outside.exists())
+        self.assertEqual(outside.stat().st_size, 8000 * 8)
+
+    def test_selected_database_failure_restores_long_pairs_and_labels(self):
+        path = self.recording("long", 8000)
+        self.client.post("/api/recordings/long/label", json={"label": "FM", "verified": True})
+        originals = {file: file.read_bytes() for file in (path, path.with_suffix(".sigmf-data"))}
+        preview = self.selected_preview(["long"])
+        with patch.object(self.runtime.store, "delete_many", side_effect=sqlite3.OperationalError("database is locked")):
+            response = self.delete_selected(preview)
+        self.assertEqual(response.status_code, 503, response.text)
+        for file, contents in originals.items():
+            self.assertEqual(file.read_bytes(), contents)
+        self.assertEqual(len(self.client.get("/api/labels").json()), 1)
+        self.assertEqual(list((self.root / "recordings").glob(".delete-*")), [])
+
+    def test_selected_preview_rejects_client_paths_empty_or_oversized_selection(self):
+        path = self.recording("long", 8000)
+        for body in ({"recording_ids": []}, {"recording_ids": ["long"] * 10001},
+                     {"recording_ids": ["long"], "metadata_path": str(path)}):
+            self.assertEqual(self.client.post("/api/recordings/delete-preview", json=body).status_code, 422)
+        self.assertEqual(self.client.post("/api/recordings/delete-preview", json={"recording_ids": ["../outside"]}).status_code, 400)
+        self.assertTrue(path.exists())
 
     def test_strict_half_second_boundary_deletes_pairs_and_labels_only_after_review(self):
         short = self.recording("short", 3999)

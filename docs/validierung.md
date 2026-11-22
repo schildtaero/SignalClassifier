@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 21. November 2026, SignalClassifier 0.5.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 22. November 2026, SignalClassifier 0.5.2, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 225 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie und die Mehrsignalanalyse. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
+- 263 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,17 @@ Prüfstand: 21. November 2026, SignalClassifier 0.5.0, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.5.2
+
+- 15 Löschtests: ausgewählte Aufnahmen beliebiger Dauer, Pflichtvorschau mit Datei-Fingerprints, unveränderte Grenze unter 0,5 Sekunden, Schutz aktiver Experimente sowie von Empfang/Replay/Scan, veränderte Dateien, fehlende Kennungen und Rückabwicklung bei Datei-/Datenbankfehlern. Beendete Experimentreferenzen werden kenntlich gemacht; historische Berichte bleiben bestehen.
+- 14 Veröffentlichungstests: rekursive typisierte Projektion mit verschachtelten Privatdaten-Markern, erhaltene manuelle Kandidaten und HPO-Versuche, Architektur aus eingefrorener Konfiguration, getrennte Validierung/Testwerte, Ressourcenreihen, Benchmarkidentität, konsistente Gruppenpseudonyme, deterministische Dateien, Manifestprüfwerte und Grenzen. Gemockter GitHub-Transport prüft eigenen Branch, atomaren Commit, Idempotenz, Konfliktretries, Redirectsperre und geheime Fehlerwerte. Kein echter GitHub-Upload ausgeführt.
+- Fünf Laufzeit-/API-Tests: standardmäßig ausgeschalteter Upload, lokales Paper-ZIP ohne Zugangsdaten, Uploadfehler bei erfolgreichem Training, explizite Wiederholung ohne doppelte Jobs, Teilresultate und unterbrochene Veröffentlichung nach Neustart.
+- Vier zusätzliche Empfangstests prüfen den strikt booleschen Klassifikationsschalter, keine Analysefilter/Ringe bei weiterlaufender Detektion und Breitbandaufnahme, selektives Schreiben beim Replay sowie einen simulierten Soapy-Überlauf auch ohne Klassifikation. Manager- und End-to-End-API-Tests belegen, dass Hintergrundanalyse, Scan-Abschluss, IQ-Inferenzkopie, Modellauflösung und Livevergleich keine automatischen Modellpfade ausführen, während Energieaufnahmen gespeichert werden.
+- Vier Sitzungsindex-Tests prüfen verlustfreie Migration bestehender Signaldatenbanken und Filterung vor dem Einlesen der JSON-Berichte. Die Liveansicht lädt keine fremden Sitzungen mehr vollständig. Automatische primäre Liveklassifikation berechnet keine zusätzliche Modellattribution; die optionale Erklärung bleibt in der Analyse verfügbar.
+- Referenz-API-Test prüft Cachekompatibilität und explizite Neumessung. Der Button verwendet `refresh=true`; Messzeit und Kontext bleiben sichtbar. Die CPU-Referenz ist keine isolierte GPU- oder Hardwareabnahme.
+- Gesamtsuite: **263 Tests bestanden in 42,4 Sekunden** mit freigegebenem Netzwerkzugriff für lokale API-/Loopbacktests. JavaScript-Logik/-Syntax, Shell-Syntax und `git diff --check` bestanden. Chromium prüfte Auswahllöschung, Dateimismatch ohne automatischen zweiten Löschversuch, lokalen Paper-Download und gemockte Uploadwiederholung bei 1440 und 390 Pixeln ohne Seitenüberlauf oder Browserfehler. Nur synthetische Testaufnahmen wurden gelöscht; keine realen IQ-Daten veröffentlicht.
+- Abschließende Chromium-Prüfung von 0.5.2: synthetischer Energieempfang mit ausgeschalteter Klassifikation, weiterhin sichtbarer Detektion und gespeicherten Kanälen; Desktop 1440/1440 und Mobil 390/390 Pixel ohne Seitenüberlauf oder Browserfehler. Der Referenzbutton löste jeweils tatsächlich `refresh=true` mit neuer Messzeit aus. Diese Funktionsprüfung liefert keine Aussage zum physischen Soapy-/USB-Durchsatz.
 
 ## Ergänzungen in 0.5.0
 

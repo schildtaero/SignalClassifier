@@ -31,10 +31,21 @@ const source = original.replace(
   normalizeExecutionConfig, telemetrySummary, phaseTimingRows, phaseTime, resourceMetricSummary,
   analysisDecision, analysisStatus, analysisConclusionRows, analysisStageOrder,
   matchedSignalClassifications, analysisExpertSelection, analysisSettingsPayload, analysisCoverageSummary,
-  analysisPredictionExplanation, presentChildren, replaceContent, analysisLabel, analysisScoreKind
+  analysisPredictionExplanation, presentChildren, replaceContent, analysisLabel, analysisScoreKind,
+  selectedDeletionPlan, normalizeGithubPublication, githubPublicationURL, publicationStateLabel,
+  classificationEnabled, currentClassificationEnabled, classificationFormValue, detectionTone, detectionModulationLabel
 };`,
 );
-const sandbox = { Intl, console, Set, Map, Date, window: {}, document: {} };
+const sandbox = {
+  Intl,
+  console,
+  Set,
+  Map,
+  Date,
+  URL,
+  window: {},
+  document: {},
+};
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: sourcePath });
 const f = sandbox.helpers;
@@ -130,6 +141,21 @@ const prediction = {
   sample_rate: 50_000,
 };
 assert.equal(f.associatedDetectionIndex(detections, prediction), 1);
+assert.equal(f.classificationFormValue({ elements: {} }), true, "Missing option preserves the enabled default");
+assert.equal(f.classificationFormValue({ elements: { classification_enabled: { checked: true } } }), true);
+assert.equal(f.classificationFormValue({ elements: { classification_enabled: { checked: false } } }), false, "Receiver and scan payloads preserve an explicit false");
+assert.equal(f.classificationEnabled({}), true);
+assert.equal(f.classificationEnabled({ classification_enabled: false }), false);
+assert.equal(f.classificationEnabled({ receiver: { config: { classification_enabled: false } } }), false);
+assert.equal(f.classificationEnabled({ classification: { status: "disabled", label: "FM" } }), false);
+assert.equal(f.associatedDetectionIndex(detections, { ...prediction, status: "disabled" }), -1);
+assert.equal(f.associatedDetectionIndex(detections, { ...prediction, enabled: false }), -1);
+const stoppedClassificationState = f.state.status;
+f.state.status = { receiver: { config: { classification_enabled: false }, running: false } };
+assert.equal(f.currentClassificationEnabled({ classification_enabled: true }), false, "Retained disabled receiver state also suppresses stale cached results");
+assert.equal(f.detectionTone({ detected_modulation: "FM" }), "unknown", "Waterfall history cannot retain class colors while classification is switched off");
+assert.equal(f.detectionModulationLabel({ detected_modulation: "FM" }), "Detektion");
+f.state.status = stoppedClassificationState;
 const classified = f.classifiedDetections(detections, prediction);
 assert.deepEqual(
   Array.from(classified, (value) => value.detected_modulation),
@@ -390,14 +416,18 @@ assert.equal(
   "Preview does not mutate the existing selection",
 );
 assert.equal(
-  f.recordingSelectionWithAdditions(fullSelection, ["too-many"]),
+  f.recordingSelectionWithAdditions(fullSelection, ["label-limit"], 1000),
   null,
+);
+assert.equal(
+  f.recordingSelectionWithAdditions(fullSelection, ["deletion-selection"]).size,
+  1001,
 );
 assert.equal(fullSelection.size, 1000);
 assert.equal(
   f.recordingSelectionWithAdditions(
     new Set(),
-    Array.from({ length: 1001 }, (_, i) => String(i)),
+    Array.from({ length: 10001 }, (_, i) => String(i)),
   ),
   null,
 );
@@ -584,6 +614,139 @@ assert.equal(
     expected_files: {},
   }).recording_ids.length,
   0,
+);
+const manualPreview = {
+  max_duration_seconds: null,
+  recordings: [
+    {
+      id: "long",
+      duration_seconds: 30,
+      fingerprint: "long-v1",
+      label: "AM",
+      verified: true,
+    },
+    { id: "chosen-short", duration_seconds: 0.2, fingerprint: "short-v1" },
+  ],
+  count: 2,
+  expected_files: { long: "long-v1", "chosen-short": "short-v1" },
+  blocked_reason: null,
+};
+const manualPlan = f.selectedDeletionPlan(manualPreview, [
+  "long",
+  "chosen-short",
+  "protected",
+]);
+assert.equal(
+  manualPlan.max_duration_seconds,
+  null,
+  "Manual selection is not restricted to short clips",
+);
+assert.deepEqual(
+  Array.from(manualPlan.recording_ids),
+  ["long", "chosen-short"],
+  "Only previewed, selected candidate IDs are approved",
+);
+assert.equal(manualPlan.expected_files.long, "long-v1");
+assert.ok(Object.isFrozen(manualPlan.recording_ids));
+assert.throws(
+  () => f.selectedDeletionPlan(manualPreview, ["chosen-short"]),
+  /Vorschau/,
+);
+assert.throws(
+  () =>
+    f.selectedDeletionPlan(
+      { ...manualPreview, expected_files: { long: "changed" } },
+      ["long", "chosen-short"],
+    ),
+  /Dateiabgleich/,
+);
+assert.throws(
+  () =>
+    f.selectedDeletionPlan(
+      { ...manualPreview, blocked_reason: "Empfang läuft" },
+      ["long", "chosen-short"],
+    ),
+  /Empfang/,
+);
+assert.throws(
+  () =>
+    f.selectedDeletionPlan({ ...manualPreview, max_duration_seconds: 0.5 }, [
+      "long",
+      "chosen-short",
+    ]),
+  /ungültig/,
+);
+assert.throws(
+  () => f.selectedDeletionPlan(manualPreview, ["long", "long"]),
+  /Auswahl/,
+);
+assert.throws(
+  () =>
+    f.selectedDeletionPlan(
+      manualPreview,
+      Array.from({ length: 10001 }, (_, i) => String(i)),
+    ),
+  /Auswahl/,
+);
+
+const publicationOff = f.normalizeGithubPublication();
+assert.equal(publicationOff.enabled, false);
+assert.equal(publicationOff.repository, "schildtaero/SignalClassifier");
+assert.equal(publicationOff.branch, "experiment-results");
+const publicationOn = f.normalizeGithubPublication({
+  enabled: true,
+  repository: "research/radio-results",
+  branch: "paper/experiment-1",
+});
+assert.equal(publicationOn.enabled, true);
+assert.equal(publicationOn.branch, "paper/experiment-1");
+for (const invalid of [
+  { enabled: "true" },
+  { token: "must-never-export" },
+  { repository: "https://github.com/user/repo" },
+  { repository: "user/repo/extra" },
+  { repository: "owner_name/repo" },
+  { branch: "../main" },
+  { branch: "main" },
+  { branch: "MASTER" },
+  { branch: "x".repeat(101) },
+  { branch: "main lock" },
+  { branch: "branch.lock" },
+])
+  assert.throws(() => f.normalizeGithubPublication(invalid));
+assert.equal(
+  f.githubPublicationURL(
+    "https://github.com/research/radio-results/tree/paper",
+  ),
+  "https://github.com/research/radio-results/tree/paper",
+);
+for (const url of [
+  "javascript:alert(1)",
+  "https://github.com.evil.invalid/repo",
+  "https://user:secret@github.com/repo",
+  "http://github.com/repo",
+])
+  assert.equal(f.githubPublicationURL(url), null);
+assert.equal(
+  f.publicationStateLabel("failed"),
+  "Veröffentlichung fehlgeschlagen",
+);
+const publicationDraft = f.prepareExperimentDraft(
+  { ...draft, github_publication: publicationOn },
+  catalog,
+  ["available-a"],
+  false,
+);
+assert.equal(publicationDraft.githubPublication.enabled, true);
+assert.equal(
+  publicationDraft.githubPublication.repository,
+  "research/radio-results",
+);
+assert.equal(
+  f.prepareExperimentDraft(draft, catalog, ["available-a"], false)
+    .githubPublication.enabled,
+  false,
+  "Old drafts must not inherit a previous opt-in",
 );
 
 // Automatic optimization uses independent validation and a bounded portable search config.
@@ -1176,6 +1339,11 @@ const multi = f.classifiedDetections(
   decisions,
   multiSnapshot,
 );
+const disabledSnapshot = { ...multiSnapshot, classification_enabled: false };
+assert.equal(f.matchedSignalClassifications(detections, decisions, disabledSnapshot).size, 0);
+const disabledDetections = f.classifiedDetections(detections, prediction, decisions, disabledSnapshot);
+assert.equal(disabledDetections.length, detections.length, "Detection remains available without classification");
+assert.ok(disabledDetections.every((d) => !d.modulation_evaluated && d.classification_disabled && d.detected_modulation === "unbekannt"));
 assert.deepEqual(
   Array.from(multi, (v) => v.detected_modulation),
   ["AM", "FM", "Unbekannt"],
@@ -1389,6 +1557,9 @@ for (const id of [
   "analysis-signals-body",
   "analysis-detail",
   "analysis-explain-models",
+  "rx-classification-enabled",
+  "analysis-scan-classification-enabled",
+  "analysis-paused-notice",
   "rx-analysis-max-channels",
   "analysis-scan-max-channels",
 ]) {

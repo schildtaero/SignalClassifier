@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import __version__, decision, experiment_log, labels, ml
+from . import __version__, decision, experiment_log, labels, ml, publication
 from .analysis_runtime import AnalysisManager
 from .db import Store, utcnow
 from .drones import Bridge, DroneStore, capabilities, example_payload
@@ -104,8 +104,13 @@ class BatchLabelInput(BaseModel):
 class DeleteRecordingsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     recording_ids: list[str] = Field(min_length=1, max_length=10000)
-    max_duration_seconds: float = Field(default=0.5, gt=0, le=0.5, allow_inf_nan=False)
+    max_duration_seconds: float | None = Field(default=0.5, gt=0, le=0.5, allow_inf_nan=False)
     expected_files: dict[str, str] = Field(min_length=1, max_length=10000)
+
+
+class DeleteRecordingsPreviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recording_ids: list[str] = Field(min_length=1, max_length=10000)
 
 
 class LiveComparisonInput(BaseModel):
@@ -137,6 +142,8 @@ class Runtime:
         self.drones = DroneStore(data_dir / "drones.sqlite3")
         self.bridge = Bridge(self.drones)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="experiment")
+        self.publication_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="paper-publication")
+        self.closing = False
         self.lock = threading.RLock()
         self.cancel_events: dict[str, threading.Event] = {}
         self.active_experiment = None
@@ -148,6 +155,10 @@ class Runtime:
         self.resource_summaries = {}
         # A previous process cannot still execute these jobs.
         for run in self.store.all("experiment"):
+            if (run.get("publication") or {}).get("status") in ("queued", "publishing"):
+                run["publication"] = {**run["publication"], "status": "interrupted",
+                    "error": "Anwendung während des Uploads beendet; GitHub-Stand prüfen und bei Bedarf erneut veröffentlichen."}
+                self.store.put("experiment", run["id"], run)
             if run.get("status") in ("running", "queued", "cancelling"):
                 run.update(status="interrupted", error="Anwendung während des Experiments beendet.", finished_at=utcnow())
                 self.store.put("experiment", run["id"], run)
@@ -314,13 +325,22 @@ class Runtime:
             states.append((path.name, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
         return hashlib.sha256(json.dumps(states).encode()).hexdigest()
 
-    def cleanup_preview(self, max_duration_seconds: float = 0.5) -> dict:
-        if not math.isfinite(max_duration_seconds) or not 0 < max_duration_seconds <= 0.5:
+    def cleanup_preview(self, max_duration_seconds: float | None = 0.5,
+                        recording_ids: list[str] | None = None) -> dict:
+        if max_duration_seconds is not None and (not math.isfinite(max_duration_seconds) or not 0 < max_duration_seconds <= 0.5):
             raise ValueError("Bereinigungsgrenze muss größer als 0 und höchstens 0,5 Sekunden sein")
+        if max_duration_seconds is None and recording_ids is None:
+            raise ValueError("Ohne Dauergrenze müssen Aufnahmen ausdrücklich ausgewählt werden")
+        if recording_ids is not None:
+            if not isinstance(recording_ids, list) or not 1 <= len(recording_ids) <= 10000:
+                raise ValueError("Zwischen 1 und 10000 Aufnahmen auswählen")
+            recording_ids = list(dict.fromkeys(clean_id(identifier) for identifier in recording_ids))
         with self.lock:
             status = self.capture.status()
             blocked = ("Zuerst Empfang beziehungsweise Replay stoppen; währenddessen werden keine Aufnahmen gelöscht."
                        if status.get("busy") else None)
+            if self.scanner.status().get("running"):
+                blocked = "Zuerst den Scan stoppen; während eines Scans werden keine Aufnahmen gelöscht."
             protected, references = set(), {}
             for experiment in self.store.all("experiment"):
                 config = experiment.get("config") or {}
@@ -332,13 +352,19 @@ class Runtime:
                     protected.update(identifiers)
             annotations = {row["id"]: row for row in self.store.all("label")}
             selected, skipped = [], []
-            for recording in self.capture.list_recordings():
+            catalogue = self.capture.list_recordings()
+            if recording_ids is not None:
+                by_id = {recording["id"]: recording for recording in catalogue}
+                skipped.extend({"id": identifier, "reason": "Aufnahme nicht gefunden; Vorschau erneut öffnen"}
+                               for identifier in recording_ids if identifier not in by_id)
+                catalogue = [by_id[identifier] for identifier in recording_ids if identifier in by_id]
+            for recording in catalogue:
                 identifier = recording["id"]
                 duration = recording.get("duration_seconds")
                 if recording.get("error") or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
                     skipped.append({"id": identifier, "reason": "Dauer unbekannt oder SigMF-Dateipaar ungültig"})
                     continue
-                if duration >= max_duration_seconds:
+                if max_duration_seconds is not None and duration >= max_duration_seconds:
                     continue
                 if identifier in protected:
                     skipped.append({"id": identifier, "reason": "Aufnahme wird von einem laufenden oder vorgemerkten Experiment verwendet"})
@@ -358,17 +384,22 @@ class Runtime:
                                  "experiment_count": references.get(identifier, 0), "fingerprint": fingerprint})
             if len(selected) > 10000:
                 blocked = "Mehr als 10000 kurze Aufnahmen gefunden; Bibliothek für eine Bereinigung in kleinere Teile aufteilen."
+            referenced = sum(row["experiment_count"] > 0 for row in selected)
             return {"max_duration_seconds": max_duration_seconds, "recordings": selected, "count": len(selected),
                     "total_bytes": sum(row["bytes"] for row in selected), "skipped": skipped, "blocked_reason": blocked,
-                    "expected_files": {row["id"]: row["fingerprint"] for row in selected}}
+                    "expected_files": {row["id"]: row["fingerprint"] for row in selected},
+                    "warnings": ([f"{referenced} ausgewählte Aufnahmen werden von bereits beendeten Experimenten referenziert. "
+                                  "Gespeicherte Berichte bleiben erhalten; die IQ-Daten stehen danach für erneute Auswertungen nicht mehr zur Verfügung."]
+                                 if referenced else [])}
 
     def delete_recordings(self, payload: DeleteRecordingsInput) -> dict:
-        """Remove only reviewed, unchanged short pairs; stage before DB commit."""
+        """Remove explicit reviewed, unchanged pairs; stage before DB commit."""
         with self.lock:
-            preview = self.cleanup_preview(payload.max_duration_seconds)
+            identifiers = list(dict.fromkeys(payload.recording_ids))
+            preview = self.cleanup_preview(payload.max_duration_seconds,
+                                           identifiers if payload.max_duration_seconds is None else None)
             if preview["blocked_reason"]:
                 raise HTTPException(409, preview["blocked_reason"])
-            identifiers = list(dict.fromkeys(payload.recording_ids))
             catalogue = {recording["id"]: recording for recording in self.capture.list_recordings()}
             for identifier in identifiers:
                 clean_id(identifier)
@@ -380,7 +411,9 @@ class Runtime:
             for identifier in identifiers:
                 row = candidates.get(identifier)
                 if row is None:
-                    skipped.append({"id": identifier, "reason": reasons.get(identifier, "Aufnahme ist nicht kürzer als die gewählte Grenze")})
+                    skipped.append({"id": identifier, "reason": reasons.get(identifier,
+                        "Aufnahme ist nicht kürzer als die gewählte Grenze" if payload.max_duration_seconds is not None
+                        else "Aufnahme ist nicht für die ausgewählte Löschung freigegeben")})
                 elif payload.expected_files.get(identifier) != row["fingerprint"]:
                     skipped.append({"id": identifier, "reason": "Dateien wurden seit der Vorschau geändert; bitte erneut prüfen"})
                 else:
@@ -444,6 +477,8 @@ class Runtime:
                     "message": "Live-Stichproben derselben aktuellen IQ-Daten; ohne Referenzlabel keine Live-Genauigkeit."}
 
     def compare_latest(self, iq, sample_rate, center_frequency, snapshot, primary=None):
+        if not self.analysis.classification_enabled():
+            return []
         with self.lock:
             selected = list(self.live_model_ids)
         active = self.store.get("active_model", "main") or {}
@@ -544,6 +579,67 @@ class Runtime:
                 reports.append({"path": path.relative_to(folder).as_posix(), "error": str(exc)})
         return reports
 
+    def paper_package(self, identifier: str) -> dict[str, bytes]:
+        """Project only frozen scientific structure/results, never the private ZIP."""
+        with self.lock:
+            value = self.store.get("experiment", clean_id(identifier))
+            if value is None:
+                raise HTTPException(404, "Experiment nicht gefunden")
+            if value.get("status") in ("queued", "running", "cancelling"):
+                raise HTTPException(409, "Paper-Daten sind nach dem Ende des Experiments verfügbar")
+            folder = self.data_dir / "experiments" / identifier
+            inventory_path = folder / "dataset-inventory.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8")) if inventory_path.is_file() else []
+            value["partial_reports"] = self.partial_reports(identifier)
+            events = experiment_log.read_events(folder / "events.jsonl")
+        return publication.make_publication_package(value, dataset_inventory=inventory, events=events)
+
+    def queue_publication(self, identifier: str) -> dict:
+        with self.lock:
+            value = self.store.get("experiment", clean_id(identifier))
+            if value is None:
+                raise HTTPException(404, "Experiment nicht gefunden")
+            if value.get("status") in ("queued", "running", "cancelling"):
+                raise HTTPException(409, "Veröffentlichung ist erst nach dem Experiment möglich")
+            settings = publication.normalize_publication(value.get("config", {}).get("github_publication"))
+            if not settings["enabled"]:
+                raise HTTPException(400, "GitHub-Veröffentlichung wurde für dieses Experiment nicht aktiviert")
+            previous = value.get("publication") or {}
+            if previous.get("status") in ("publishing", "published") or (
+                    previous.get("status") == "queued" and previous.get("started_at")):
+                return previous
+            if self.closing:
+                raise HTTPException(409, "Anwendung wird beendet; Veröffentlichung später erneut starten")
+            state = {"status": "queued", "repository": settings["repository"], "branch": settings["branch"],
+                     "started_at": utcnow(), "error": None}
+            value["publication"] = state
+            self.store.put("experiment", identifier, value)
+            try:
+                self.publication_executor.submit(self.publish_experiment, identifier, settings)
+            except Exception as exc:
+                state.update(status="failed", error=publication.safe_error(exc), finished_at=utcnow())
+                value["publication"] = state
+                self.store.put("experiment", identifier, value)
+            return state
+
+    def publish_experiment(self, identifier: str, settings: dict):
+        try:
+            with self.lock:
+                value = self.store.get("experiment", identifier)
+                value["publication"].update(status="publishing")
+                self.store.put("experiment", identifier, value)
+            files = self.paper_package(identifier)
+            result = publication.publish_package(settings, identifier, files)
+            result = {**result, "status": "published", "error": None, "finished_at": utcnow()}
+        except Exception as exc:
+            # Raw exceptions, request headers and remote bodies can contain secrets.
+            result = {"status": "failed", "error": publication.safe_error(exc), "finished_at": utcnow()}
+            LOG.warning("Paper-Veröffentlichung fehlgeschlagen: %s (%s)", identifier, type(exc).__name__)
+        with self.lock:
+            value = self.store.get("experiment", identifier)
+            value["publication"].update(result)
+            self.store.put("experiment", identifier, value)
+
     def run(self, identifier: str, config: dict):
         event = self.cancel_events[identifier]
         def progress(value):
@@ -624,8 +720,17 @@ class Runtime:
         finally:
             with self.lock:
                 self.active_experiment = None
+            if config.get("github_publication", {}).get("enabled") and not self.closing:
+                try:
+                    self.queue_publication(identifier)
+                except Exception as exc:
+                    with self.lock:
+                        state = self.store.get("experiment", identifier)
+                        state["publication"] = {"status": "failed", "error": publication.safe_error(exc), "finished_at": utcnow()}
+                        self.store.put("experiment", identifier, state)
 
     def close(self):
+        self.closing = True
         for event in self.cancel_events.values():
             event.set()
         self.scanner.stop()
@@ -634,6 +739,7 @@ class Runtime:
         self.bridge.stop()
         self.telemetry.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.publication_executor.shutdown(wait=False, cancel_futures=True)
 
 
 async def copy_upload(upload: UploadFile, destination: Path, limit: int) -> int:
@@ -653,6 +759,7 @@ def validate_experiment(config: dict, rt: Runtime) -> dict:
     value = {"source": "synthetic", "topology_id": "feature-lda", "seed": 42, "samples_per_class": 80,
              "segment_length": 2048, "snr_db": [0, 10, 20], "jitter": [0.0], "epochs": 5,
              "learning_rate": 0.001, "batch_size": 32, "device": "auto", "use_priors": False, "evaluation_mode": "independent", **config}
+    value["github_publication"] = publication.normalize_publication(value.get("github_publication"))
     if not isinstance(value.get("experiment_notes", ""), str) or len(value.get("experiment_notes", "")) > 12000:
         raise ValueError("Versuchsbeschreibung muss Text mit höchstens 12000 Zeichen sein")
     if value["source"] not in ("synthetic", "recordings"):
@@ -780,13 +887,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         with runtime.lock:
             if runtime.scanner.status().get("running"):
                 raise ValueError("Ein Scan läuft; vor manueller Abstimmung zuerst den Scan stoppen")
-            if not runtime.capture.status().get("busy"):
+            if not runtime.capture.status().get("busy") and config.get("classification_enabled", True) is not False:
                 runtime.analysis.finish_window()
             config = dict(config)
             config.pop("recording_path", None)
             if config.get("source") == "recording":
                 config["recording_path"] = str(runtime.recording_path(runtime.recording(config.get("recording_id", ""))))
-            return finite_json(runtime.capture.start(config))
+            with runtime.analysis.cycle_lock:
+                return finite_json(runtime.capture.start(config))
 
     @app.post("/api/receiver/stop")
     def receiver_stop():
@@ -798,13 +906,24 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/spectrum")
     def spectrum():
         snapshot = runtime.capture.snapshot()
+        enabled = snapshot.get("receiver", {}).get("config", {}).get("classification_enabled", True) is not False
+        snapshot["classification_enabled"] = enabled
+        if not enabled:
+            snapshot.update(classification={"enabled": False, "status": "disabled", "label": "unbekannt",
+                "modulation": "unbekannt", "confidence": None, "confidence_kind": "classification_disabled",
+                "reason": "Klassifikation im Empfänger deaktiviert; nur Energiedetektion und Aufnahme.",
+                "stages": [], "predictions": []}, classification_comparison=[], signal_classifications=[])
+            snapshot["analysis_stats"] = finite_json({**runtime.analysis.stats, **runtime.analysis.signals.stats(),
+                "paused_reason": "Klassifikation im Empfänger deaktiviert"})
+            return finite_json(snapshot)
         iq, sample_rate, center_frequency = runtime.capture.inference_segment()
         if iq is not None and len(iq):
             settings = runtime.store.get("settings", "main")
             model_path = runtime.active_model_path()
             length = ml.load_model_metadata(model_path)["segment_length"] if model_path else 16384
             snapshot["classification"] = finite_json(ml.classify(iq[-length:], sample_rate,
-                center_frequency_hz=center_frequency, use_priors=settings.get("use_priors", False), model_path=model_path))
+                center_frequency_hz=center_frequency, use_priors=settings.get("use_priors", False), model_path=model_path,
+                attribution=False))
             snapshot["classification"].update(center_frequency_hz=center_frequency, sample_rate=sample_rate)
             channel = snapshot.get("classification_channel") or {}
             if channel.get("center_frequency_hz") == center_frequency and channel.get("sample_rate") == sample_rate:
@@ -958,8 +1077,13 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def cleanup_recordings_preview(max_duration_seconds: float = 0.5):
         return finite_json(runtime.cleanup_preview(max_duration_seconds))
 
+    @app.post("/api/recordings/delete-preview")
+    def selected_recordings_preview(payload: DeleteRecordingsPreviewInput):
+        return finite_json(runtime.cleanup_preview(None, payload.recording_ids))
+
+    @app.post("/api/recordings/delete")
     @app.post("/api/recordings/delete-batch")
-    def delete_short_recordings(payload: DeleteRecordingsInput):
+    def delete_selected_recordings(payload: DeleteRecordingsInput):
         return finite_json(runtime.delete_recordings(payload))
 
     @app.post("/api/recordings/import")
@@ -1068,6 +1192,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 return JSONResponse(value, headers={"Content-Disposition": f'attachment; filename="{identifier}.json"'})
         raise HTTPException(404, "Topologie nicht gefunden")
 
+    @app.get("/api/publication/status")
+    def publication_status():
+        return publication.credential_status()
+
     @app.get("/api/experiments")
     def experiments():
         return runtime.store.all("experiment")
@@ -1076,7 +1204,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def validate_dataset(payload: dict):
         try:
             config = validate_experiment(payload, runtime)
-            return finite_json(ml.dataset_readiness(config))
+            readiness = ml.dataset_readiness(config)
+            if config["github_publication"]["enabled"] and not publication.credential_status()["configured"]:
+                readiness.setdefault("warnings", []).append("GitHub-Upload aktiviert, aber kein Token in der Backend-Umgebung gesetzt. Das Experiment kann laufen; der Upload bleibt bis zur Einrichtung wiederholbar.")
+            return finite_json(readiness)
         except (ValueError, HTTPException, OSError) as exc:
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
             return {"ready": False, "evaluation_mode": payload.get("evaluation_mode", "independent"),
@@ -1094,6 +1225,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             identifier = uuid.uuid4().hex
             provenance = runtime.freeze_experiment_inputs(identifier, config)
             state = runtime.store.put("experiment", identifier, {"name": config.get("name") or "AM / FM", "status": "queued", "config": config, "progress": 0, "created_at": utcnow(),
+                "publication": {"status": "queued" if config["github_publication"]["enabled"] else "disabled",
+                                "repository": config["github_publication"]["repository"], "branch": config["github_publication"]["branch"]},
                 "provenance": provenance, "log_files": {"events": "events.jsonl", "configuration": "configuration.json", "inventory": "dataset-inventory.json", "provenance": "provenance.json"}})
             runtime.log_event(identifier, "queued", {"config": config, "provenance": provenance})
             runtime.cancel_events[identifier] = threading.Event()
@@ -1113,6 +1246,19 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def download_experiment(identifier: str):
         value = experiment(identifier)
         return JSONResponse(value, headers={"Content-Disposition": f'attachment; filename="experiment-{identifier}.json"'})
+
+    @app.get("/api/experiments/{identifier}/paper-bundle")
+    def download_paper_bundle(identifier: str):
+        files = runtime.paper_package(clean_id(identifier))
+        destination = directory / "exports" / f"{identifier}.{uuid.uuid4().hex}.paper.zip"
+        with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, data in sorted(files.items()):
+                archive.writestr(name, data)
+        return FileResponse(destination, filename=f"experiment-{identifier}-paper.zip", media_type="application/zip")
+
+    @app.post("/api/experiments/{identifier}/publish")
+    def publish_experiment(identifier: str):
+        return finite_json(runtime.queue_publication(clean_id(identifier)))
 
     @app.get("/api/experiments/{identifier}/report-bundle")
     def download_report_bundle(identifier: str):
@@ -1206,10 +1352,18 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return runtime.store.put("active_model", "main", {"model_id": identifier, "name": model.get("name"), "activated_at": utcnow()})
 
     @app.get("/api/benchmark")
-    def benchmark():
+    def benchmark(refresh: bool = False):
         with runtime.lock:
-            if runtime.benchmark is None:
-                runtime.benchmark = finite_json(ml.benchmark_hardware())
+            if runtime.benchmark is None or refresh:
+                receiver = runtime.capture.status()
+                context = {"receiver_running": bool(receiver.get("busy")),
+                           "classification_enabled": runtime.analysis.classification_enabled(),
+                           "experiment_running": any(e.get("status") in ("queued", "running", "cancelling")
+                                                     for e in runtime.store.all("experiment")),
+                           "external_host_load_verified": False}
+                runtime.benchmark = finite_json({**ml.benchmark_hardware(), "measured_at": utcnow(),
+                    "observation_context": context,
+                    "measurement_scope": "Fixed CPU feature extraction on 4096 synthetic samples; median of 12 calls after 3 warmups. Not a GPU benchmark or an isolated whole-host measurement."})
             return runtime.benchmark
 
     @app.get("/api/drones/capabilities")

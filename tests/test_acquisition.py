@@ -9,8 +9,9 @@ import numpy as np
 from scipy import signal
 import threading
 from datetime import datetime
+from types import SimpleNamespace
 
-from signalclassifier.receivers import CaptureManager, _CaptureFailure, _Channelizer, spectrum_and_detections, validate_config
+from signalclassifier.receivers import CaptureManager, _CaptureFailure, _Channelizer, _RSP1A, spectrum_and_detections, validate_config
 from signalclassifier.sigmf import SigMFWriter, read_metadata, read_recording, recording_info, write_recording
 
 
@@ -235,6 +236,8 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(integrity["stop_reason"], "queue_overflow")
         self.assertEqual(integrity["source_samples_processed"], len(iq))
         self.assertGreater(integrity["source_samples_read"], len(iq))
+        self.assertEqual(performance["stream_diagnostic"]["layer"], "application_input_queue")
+        self.assertIsNone(performance["stream_diagnostic"]["code"])
 
     def test_reported_hardware_overflow_survives_in_recording_integrity(self):
         source = self.FakeHardware(blocks=2, failure=_CaptureFailure("SDR overflow", reason="receiver_overflow",
@@ -462,6 +465,128 @@ class CaptureTests(unittest.TestCase):
             validate_config({"source": "pluto", "center_frequency_hz": 125e6})
         with self.assertRaises(ValueError):
             validate_config({"source": "synthetic", "threshold_db": float("nan")})
+
+    def test_classification_enabled_is_strict_bool_and_defaults_to_enabled(self):
+        self.assertTrue(validate_config({"source": "synthetic"})["classification_enabled"])
+        for value in (True, False):
+            self.assertIs(validate_config({"source": "synthetic", "classification_enabled": value})["classification_enabled"], value)
+        for value in (None, 0, 1, "false", "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "classification_enabled"):
+                validate_config({"source": "synthetic", "classification_enabled": value})
+
+    def test_capture_without_classification_keeps_spectrum_and_raw_recording_without_analysis_dsp(self):
+        rate = 200000
+        t = np.arange(3 * 4096) / rate
+        iq = (.7 * np.exp(-2j * np.pi * 50000 * t) + .3 * np.exp(2j * np.pi * 50000 * t)).astype(np.complex64)
+        # Seed old analysis state, then confirm that disabled restarts retain no
+        # old channels, probe or legacy inference window.
+        with patch("signalclassifier.receivers._Synthetic", return_value=self.ArraySource(iq[:4096], rate)):
+            self.manager.start({"source": "synthetic", "mode": "monitor", "sample_rate": rate,
+                                "block_size": 4096, "duration_seconds": 1})
+            self.finish()
+        self.assertTrue(self.manager.analysis_snapshots())
+        for mode in ("monitor", "wideband"):
+            with self.subTest(mode=mode), \
+                 patch("signalclassifier.receivers._Synthetic", return_value=self.ArraySource(iq, rate)), \
+                 patch("signalclassifier.receivers._Channelizer", side_effect=AssertionError("unexpected analysis filter")) as channelizer, \
+                 patch("signalclassifier.receivers.spectrum_and_detections", wraps=spectrum_and_detections) as spectrum:
+                started = self.manager.start({"source": "synthetic", "mode": mode, "sample_rate": rate,
+                                              "block_size": 4096, "duration_seconds": 1, "classification_enabled": False})
+                self.assertFalse(started["config"]["classification_enabled"])
+                self.finish()
+                self.assertIsNone(self.manager.status()["error"])
+                self.assertEqual(self.manager.status()["state"], "completed")
+                channelizer.assert_not_called()
+                self.assertTrue(spectrum.called)
+                snapshot = self.manager.snapshot()
+                self.assertTrue(snapshot["detections"])
+                self.assertTrue(snapshot["power_dbfs"])
+                self.assertFalse(snapshot["classification_enabled"])
+                self.assertIsNone(snapshot["classification_channel"])
+                self.assertTrue(snapshot["analysis_status"]["paused"])
+                self.assertEqual(snapshot["analysis_status"]["pause_reason"], "classification_disabled")
+                self.assertEqual(snapshot["analysis_status"]["buffer_bytes"], 0)
+                self.assertEqual(snapshot["analysis_status"]["extra_channelizers"], 0)
+                self.assertEqual(self.manager.latest_iq.nbytes, 0)
+                self.assertEqual(len(self.manager.inference_segment()[0]), 0)
+                self.assertEqual(self.manager.analysis_snapshots(), [])
+                self.assertIsNone(self.manager.analysis_probe_snapshot())
+        recordings = self.manager.list_recordings()
+        self.assertEqual(len(recordings), 1)
+        recorded, metadata = read_recording(recordings[0]["metadata_path"])
+        np.testing.assert_array_equal(recorded, iq)
+        self.assertFalse(metadata["global"]["sc:classification_enabled"])
+        # Re-enabling starts a fresh ring rather than inheriting disabled data.
+        with patch("signalclassifier.receivers._Synthetic", return_value=self.ArraySource(iq[:4096], rate)):
+            self.manager.start({"source": "synthetic", "mode": "monitor", "sample_rate": rate,
+                                "block_size": 4096, "duration_seconds": 1})
+            self.finish()
+        self.assertTrue(self.manager.analysis_snapshots())
+        self.assertEqual(len(self.manager.inference_segment()[0]), 512)
+
+    def test_energy_recording_without_classification_filters_only_recorded_channel_on_replay(self):
+        rate = 200000
+        t = np.arange(4 * 4096) / rate
+        iq = (.5 * np.exp(-2j * np.pi * 50000 * t) + .8 + .25 * np.exp(2j * np.pi * 50000 * t)).astype(np.complex64)
+        path = write_recording(Path(self.directory.name) / "capture-only-input", iq, rate, 433e6,
+                               extra={"signalclassifier:group_id": "original-capture-only"})
+        calls = []
+        original_process = _Channelizer.process
+
+        def counted(extractor, block):
+            calls.append(id(extractor))
+            return original_process(extractor, block)
+
+        with patch.object(_Channelizer, "process", counted):
+            self.manager.start({"source": "recording", "recording_path": str(path), "mode": "energy",
+                                "max_channels": 1, "analysis_max_channels": 16, "classification_enabled": False,
+                                "block_size": 4096, "duration_seconds": 1})
+            self.finish()
+        self.assertIsNone(self.manager.status()["error"])
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(set(calls)), 1)
+        self.assertGreaterEqual(len(self.manager.snapshot()["detections"]), 3)
+        recordings = self.manager.list_recordings()
+        self.assertEqual(len(recordings), 1)
+        self.assertGreater(recordings[0]["samples"], 0)
+        self.assertLess(recordings[0]["sample_rate"], rate)
+        self.assertEqual(recordings[0]["group_id"], "original-capture-only")
+        self.assertFalse(recordings[0]["metadata"]["global"]["sc:classification_enabled"])
+        self.assertEqual(self.manager.analysis_snapshots(), [])
+        self.assertIsNone(self.manager.analysis_probe_snapshot())
+        self.assertEqual(self.manager.latest_iq.nbytes, 0)
+
+    def test_soapy_minus_four_is_driver_overflow_even_with_classification_disabled(self):
+        receiver = _RSP1A.__new__(_RSP1A)
+        receiver.soapy = SimpleNamespace(SOAPY_SDR_TIMEOUT=-1, SOAPY_SDR_OVERFLOW=-4, SOAPY_SDR_CORRUPTION=-3)
+        receiver.device = SimpleNamespace(readStream=lambda *args, **kwargs: SimpleNamespace(ret=-4))
+        receiver.stream, receiver.timeouts, receiver.sample_rate = object(), 0, 100000.0
+        with self.assertRaises(_CaptureFailure) as failed:
+            receiver.read(4096)
+        error = failed.exception
+        self.assertEqual(error.reason, "receiver_overflow")
+        self.assertTrue(error.reported_gap)
+        self.assertTrue(error.overflow)
+        self.assertEqual(error.diagnostics["code"], -4)
+        self.assertEqual(error.diagnostics["layer"], "soapy_read_stream")
+        self.assertFalse(error.diagnostics["cause_confirmed"])
+        self.assertIsNone(error.diagnostics["missing_samples"])
+        source = self.FakeHardware(blocks=2, failure=error)
+        self.start_hardware(source, classification_enabled=False)
+        self.finish()
+        status = self.manager.status()
+        self.assertEqual(status["reason"], "receiver_overflow")
+        self.assertFalse(status["classification_enabled"])
+        self.assertEqual(status["performance"]["gaps"], 1)
+        diagnostic = status["performance"]["stream_diagnostic"]
+        self.assertEqual(diagnostic["layer"], "soapy_read_stream")
+        self.assertFalse(diagnostic["classification_enabled"])
+        self.assertEqual(diagnostic["policy"], "stop_at_admitted_prefix_no_silent_skip")
+        recording = self.manager.list_recordings()[0]
+        self.assertEqual(recording["samples"], 8192)
+        persisted = recording["metadata"]["global"]["sc:performance"]["stream_diagnostic"]
+        self.assertEqual(persisted["code"], -4)
+        self.assertEqual(self.manager.analysis_snapshots(), [])
 
     def test_inference_ring_accumulates_model_windows_and_resets_discontinuous_contexts(self):
         manager = self.manager

@@ -453,6 +453,21 @@
                       placeholder="Automatisch (RSP1A)"
                       autocomplete="off"
                   /></label>
+                  <div class="capture-classification-control">
+                    <label class="checkbox">
+                      <input
+                        type="checkbox"
+                        id="rx-classification-enabled"
+                        name="classification_enabled"
+                        aria-describedby="rx-classification-help"
+                        checked
+                      />Signale klassifizieren
+                    </label>
+                    <p class="field-help" id="rx-classification-help">
+                      Gilt beim Empfangsstart. Deaktiviert: nur Detektion und
+                      gewählte Aufnahme, ohne Modellaufrufe und Live-Vergleiche.
+                    </p>
+                  </div>
                   <div class="form-pair">
                     <label
                       >Mittenfrequenz <em>MHz</em
@@ -888,6 +903,12 @@
                 <small>Noch kein Messwert</small>
               </div>
             </div>
+            <div
+              class="notice analysis-paused-notice"
+              id="analysis-paused-notice"
+              role="status"
+              hidden
+            ></div>
           </div>
 
           <div class="analysis-workspace">
@@ -1134,6 +1155,25 @@
                       gespeichert; Plan und Start verwenden die aktuellen
                       Scanparameter und den oben eingestellten Frequenzbereich.
                     </p>
+                    <div class="capture-classification-control">
+                      <label class="checkbox">
+                        <input
+                          type="checkbox"
+                          id="analysis-scan-classification-enabled"
+                          name="classification_enabled"
+                          aria-describedby="analysis-scan-classification-help"
+                          checked
+                        />Signale klassifizieren
+                      </label>
+                      <p
+                        class="field-help"
+                        id="analysis-scan-classification-help"
+                      >
+                        Gilt beim Scanstart. Deaktiviert wird nur detektiert;
+                        Modellaufrufe und Live-Vergleiche bleiben aus. Das
+                        Umschalten startet keinen Scan.
+                      </p>
+                    </div>
                     <div class="analysis-scan-fields">
                       <label
                         >Hardwarequelle<select
@@ -1426,15 +1466,25 @@
                 Auswahl aufheben
               </button>
               <span id="recording-selection-count" class="secondary"
-                >0 / 1000 ausgewählt</span
+                >0 / 10000 ausgewählt</span
               >
               <button
                 type="button"
                 class="button button-primary"
                 id="recording-batch-open"
+                aria-describedby="recording-selection-help"
                 disabled
               >
                 Labels bestätigen
+              </button>
+              <button
+                type="button"
+                class="button button-quiet recording-delete-button"
+                id="recording-delete-selected"
+                aria-describedby="recording-selection-help"
+                disabled
+              >
+                <svg class="icon"><use href="#i-close" /></svg>Auswahl löschen
               </button>
             </div>
             <div
@@ -1443,6 +1493,14 @@
               role="status"
               hidden
             ></div>
+            <p
+              id="recording-selection-help"
+              class="field-help recording-selection-help"
+            >
+              Bis zu 10 000 Aufnahmen auswählen und gemeinsam löschen. Labels
+              lassen sich für höchstens 1 000 ausgewählte Aufnahmen je Vorgang
+              bestätigen. Vor dem Löschen wird die konkrete Auswahl geprüft.
+            </p>
             <div class="table-scroll">
               <table class="data-table">
                 <thead>
@@ -1452,8 +1510,9 @@
                         ><input
                           type="checkbox"
                           id="recording-select-all"
-                          title="Höchstens 1000 Aufnahmen je Bestätigung"
+                          title="Bis zu 10 000 sichtbare Aufnahmen auswählen"
                           aria-label="Alle sichtbaren Aufnahmen auswählen"
+                          aria-describedby="recording-selection-help"
                         /><span class="sr-only">Auswahl</span></label
                       >
                     </th>
@@ -2134,6 +2193,83 @@
                       /></label>
                     </div>
                   </details>
+                  <section
+                    class="experiment-publication-settings"
+                    aria-labelledby="experiment-github-heading"
+                  >
+                    <div class="experiment-publication-heading">
+                      <span class="panel-kicker"
+                        >OPTIONALE ERGEBNISPUBLIKATION</span
+                      >
+                      <h3 id="experiment-github-heading">
+                        Nach Laufende auf GitHub
+                      </h3>
+                    </div>
+                    <label class="checkbox">
+                      <input
+                        type="checkbox"
+                        id="experiment-github-enabled"
+                        name="github_publication_enabled"
+                        aria-describedby="experiment-github-help experiment-github-status"
+                      />Nach Abschluss Paper-Daten auf GitHub veröffentlichen
+                    </label>
+                    <p class="field-help" id="experiment-github-help">
+                      Optional nach Ende dieses Experiments veröffentlichen.
+                      Enthalten sind ausschließlich aufbereitete Paper-Daten und
+                      Resultate. IQ-Aufnahmen, Modellgewichte und lokale
+                      Dateipfade werden nicht veröffentlicht. Bei aktivierter
+                      Veröffentlichung werden auch verfügbare Teilresultate
+                      fehlgeschlagener oder abgebrochener Läufe veröffentlicht.
+                    </p>
+                    <div class="experiment-publication-fields">
+                      <label>
+                        Eigentümer / Repository
+                        <input
+                          type="text"
+                          id="experiment-github-repository"
+                          name="github_publication_repository"
+                          value="schildtaero/SignalClassifier"
+                          placeholder="Eigentümer/Repository"
+                          autocomplete="off"
+                          autocapitalize="none"
+                          spellcheck="false"
+                          maxlength="140"
+                          required
+                          disabled
+                        />
+                      </label>
+                      <label>
+                        Zielbranch
+                        <input
+                          type="text"
+                          id="experiment-github-branch"
+                          name="github_publication_branch"
+                          value="experiment-results"
+                          autocomplete="off"
+                          autocapitalize="none"
+                          spellcheck="false"
+                          maxlength="100"
+                          required
+                          disabled
+                        />
+                      </label>
+                    </div>
+                    <p
+                      id="experiment-github-status"
+                      class="experiment-publication-status"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      Publikationsstatus noch nicht geladen. Die
+                      Veröffentlichung ist zunächst deaktiviert.
+                    </p>
+                    <p class="field-help">
+                      Zugangsdaten kommen ausschließlich aus der
+                      Backend-Umgebung. Der Offline-Export der Paper-Daten
+                      bleibt ohne GitHub-Konfiguration für jeden beendeten Lauf
+                      verfügbar, auch nach Fehler oder Abbruch.
+                    </p>
+                  </section>
                   <label
                     >Versuchsbeschreibung / Messaufbau<textarea
                       name="experiment_notes"
@@ -2241,6 +2377,13 @@
                     Rechenzeit sowie Robustheit vergleichen.
                   </p>
                 </div>
+                <div
+                  id="experiment-publication"
+                  class="experiment-publication"
+                  role="region"
+                  aria-label="Publikation und Paper-Daten"
+                  hidden
+                ></div>
                 <div id="experiment-result-body" hidden></div>
               </article>
             </div>
@@ -2662,7 +2805,9 @@
         <div class="dialog-heading">
           <div>
             <span class="panel-kicker">GESCHLOSSENE KURZAUFNAHMEN</span>
-            <h2>Aufnahmen unter 0,5 Sekunden löschen</h2>
+            <h2 id="recording-cleanup-title">
+              Aufnahmen unter 0,5 Sekunden löschen
+            </h2>
           </div>
           <button
             type="button"
@@ -2674,7 +2819,7 @@
           </button>
         </div>
         <div class="dialog-body">
-          <p class="secondary">
+          <p class="secondary" id="recording-cleanup-description">
             Diese Vorschau umfasst ausschließlich geschlossene Aufnahmen mit
             einer Dauer strikt unter 0,5 Sekunden. Beim Bestätigen werden die
             aufgeführten IQ- und Metadatendateien sowie zugehörige Labels

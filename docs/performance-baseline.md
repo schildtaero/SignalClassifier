@@ -48,6 +48,12 @@ Im Task-Manager die Bezeichnung der angezeigten Engine prüfen: Ein **3D**-Diagr
 
 Unter WSL kann `nvidia-smi` unter `/usr/lib/wsl/lib/nvidia-smi` liegen. NVIDIA dokumentiert Einschränkungen bestimmter NVML-Abfragen, darunter Auslastungs- und Prozessinformationen. Fehlende Messwerte daher als nicht verfügbar behandeln. Maßgeblich für die Anwendung bleiben das tatsächlich gewählte Torch-Gerät sowie gemessene Phasen und Durchsatz. Siehe [CUDA on WSL User Guide](https://docs.nvidia.com/cuda/wsl-user-guide/index.html).
 
+## Lokaler CPU-Referenzlauf in der Oberfläche
+
+**Referenz messen** verwendet 4096 synthetische Samples, drei Aufwärmläufe und den Median aus zwölf Aufrufen der Merkmalsextraktion auf der CPU, dem Hauptprozessor (*Central Processing Unit*). Das ist kein GPU-Test; ein kleinerer Millisekundenwert ist schneller. Eine Workstation mit älterem Xeon kann bei dieser kleinen Aufgabe pro Kern langsamer sein als ein neuerer Laptopprozessor. Softwareversionen, Energiesparmodus, WSL-CPU-Zuteilung und gleichzeitige Last beeinflussen den Vergleich.
+
+Seit 0.5.2 erzwingt jeder Klick eine neue Messung mit `GET /api/benchmark?refresh=true`. Der bisherige Aufruf ohne `refresh` kann den letzten Wert derselben Anwendungssitzung weiterverwenden. Messzeit sowie laufender Empfang und laufende Experimente werden mit ausgegeben. Für einen Vergleich Empfang und Experimente auf beiden Rechnern stoppen und dieselbe Software verwenden. Die Experimentworker koordinieren ihre eigenen CPU-Rangmessungen; Live-Empfang, automatische Empfangsanalyse und andere Programme sind damit nicht vollständig isoliert. Der Referenzwert allein belegt weder einen Treiberfehler noch die Echtzeitfähigkeit eines Modells.
+
 ## Wiederholen
 
 ```bash

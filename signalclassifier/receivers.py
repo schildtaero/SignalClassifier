@@ -80,6 +80,8 @@ def validate_config(config: dict) -> dict:
                 raise ValueError(f"{key} muss 1 bis 128 Zeichen ohne Steuerzeichen enthalten.")
     if result.setdefault("mode", "monitor") not in {"monitor", "wideband", "energy"}:
         raise ValueError("Modus muss monitor, wideband oder energy sein.")
+    if type(result.setdefault("classification_enabled", True)) is not bool:
+        raise ValueError("classification_enabled muss true oder false sein.")
     result["sample_rate"] = _number(result, "sample_rate", 2_000_000, 8_000, 61_440_000)
     result["center_frequency_hz"] = _number(result, "center_frequency_hz", 100_000_000, 0, 6_000_000_000)
     result["gain_db"] = _number(result, "gain_db", 30, -20, 100)
@@ -325,9 +327,16 @@ class _RSP1A:
         if response.ret < 0:
             overflow = response.ret == getattr(self.soapy, "SOAPY_SDR_OVERFLOW", -4)
             corruption = response.ret == getattr(self.soapy, "SOAPY_SDR_CORRUPTION", -3)
-            raise _CaptureFailure(f"SoapySDR-Streamfehler {response.ret}; Empfang beendet, statt eine Datenlücke zu übergehen.",
+            detail = " (Empfänger-/Treiberüberlauf)" if overflow else ""
+            raise _CaptureFailure(f"SoapySDR-Streamfehler {response.ret}{detail}; Empfang beendet, statt eine Datenlücke zu übergehen. "
+                                  "Der Fehlercode allein belegt keine Ursache; CPU-Last, USB/WSL und Treiber prüfen.",
                                   reason="receiver_overflow" if overflow else "receiver_error",
-                                  reported_gap=overflow or corruption, overflow=overflow)
+                                  reported_gap=overflow or corruption, overflow=overflow,
+                                  diagnostics={"layer": "soapy_read_stream", "code": int(response.ret),
+                                               "kind": "receiver_overflow" if overflow else "sample_corruption" if corruption else "stream_error",
+                                               "sample_rate": self.sample_rate, "cause_confirmed": False,
+                                               "possible_causes": ["CPU-/Scheduling-Verzögerung", "USB-/WSL-Transport", "Geräte-/Treiberpuffer"],
+                                               "missing_samples": None, "policy": "stop_at_admitted_prefix_no_silent_skip"})
         if response.ret == 0:
             return None
         return result[:response.ret]
@@ -342,11 +351,12 @@ class _RSP1A:
 
 
 class _CaptureFailure(RuntimeError):
-    def __init__(self, message, *, reason="receiver_error", reported_gap=False, overflow=False):
+    def __init__(self, message, *, reason="receiver_error", reported_gap=False, overflow=False, diagnostics=None):
         super().__init__(message)
         self.reason = reason
         self.reported_gap = reported_gap
         self.overflow = overflow
+        self.diagnostics = diagnostics
 
 
 class _IQQueue(queue.Queue):
@@ -482,7 +492,7 @@ class CaptureManager:
                 "capture_error": None, "processed_blocks": 0, "read_blocks": 0,
                 "source_samples_read": 0, "source_samples_processed": 0,
                 "detection_interval_seconds": 0.0, "publication_hz": 8.0,
-                "reader_queue_enabled": False, "gap_free_verified": False}
+                "reader_queue_enabled": False, "gap_free_verified": False, "stream_diagnostic": None}
 
     def start(self, config: dict) -> dict:
         with self._lock:
@@ -570,6 +580,7 @@ class CaptureManager:
                     "busy": self._state in ("starting", "running") or any(
                         worker is not None and worker.is_alive() for worker in (self._thread, self._reader_thread)),
                     "source": self._config.get("source"), "mode": self._config.get("mode", "monitor"),
+                    "classification_enabled": self._config.get("classification_enabled", True),
                     "error": self._error, "reason": self._reason,
                     "config": {k: v for k, v in self._config.items() if k != "recording_path"},
                     "sample_rate": self._config.get("sample_rate"),
@@ -589,6 +600,7 @@ class CaptureManager:
     def snapshot(self) -> dict:
         with self._lock:
             return dict(self._snapshot, receiver=self.status(), analysis_status=self._analysis_status_locked(),
+                        classification_enabled=self._config.get("classification_enabled", True),
                         synthetic=self._data_provenance["declared_source_synthetic"],
                         declared_source_synthetic=self._data_provenance["declared_source_synthetic"],
                         data_provenance=copy.deepcopy(self._data_provenance))
@@ -596,11 +608,17 @@ class CaptureManager:
     def inference_segment(self) -> tuple[np.ndarray, float, float]:
         """Copy one consistent IQ/rate/frequency context for a classifier."""
         with self._lock:
+            if not self._config.get("classification_enabled", True):
+                return np.empty(0, np.complex64), self.latest_sample_rate, self.latest_center_frequency
             return self.latest_iq.copy(), self.latest_sample_rate, self.latest_center_frequency
 
     def _analysis_status_locked(self) -> dict:
         """Metadata only; IQ stays out of spectrum/status JSON responses."""
-        return {"detected_channels": self._analysis_detected_channels,
+        enabled = self._config.get("classification_enabled", True)
+        return {"classification_enabled": enabled, "paused": not enabled,
+                "state": "enabled" if enabled else "paused",
+                "pause_reason": None if enabled else "classification_disabled",
+                "detected_channels": self._analysis_detected_channels,
                 "buffered_channels": len(self._analysis_buffers),
                 "unbuffered_detections_count": max(0, self._analysis_detected_channels - len(self._analysis_buffers)),
                 "channel_limit": self._config.get("analysis_max_channels", 8), "detection_limit": 16, "max_samples": 65536,
@@ -611,7 +629,8 @@ class CaptureManager:
                 "ended_channels": copy.deepcopy(list(self._ended_analysis_channels)),
                 "ended_channels_capacity": self._ended_analysis_channels.maxlen,
                 "ended_channels_evicted": self._ended_analysis_channels_evicted,
-                "note": "Nur detektierte Kanäle im aktuellen Empfangsfenster; Kanal-IDs bezeichnen Filterkontexte, keine bestätigten Emitter. Beendete Kanäle behalten begrenzte Metadaten, keine IQ. Zusätzliche Kanalfilter kosten CPU-Zeit; physischer Durchsatz bleibt zu prüfen."}
+                "note": ("Klassifikation deaktiviert: Spektrum und Aufnahme bleiben aktiv; keine Analysefilter, IQ-Analyseringe oder Modellaufrufe im Capturepfad."
+                         if not enabled else "Nur detektierte Kanäle im aktuellen Empfangsfenster; Kanal-IDs bezeichnen Filterkontexte, keine bestätigten Emitter. Beendete Kanäle behalten begrenzte Metadaten, keine IQ. Zusätzliche Kanalfilter kosten CPU-Zeit; physischer Durchsatz bleibt zu prüfen.")}
 
     def analysis_snapshots(self, max_channels: int | None = None, max_samples: int = 65536) -> list[dict]:
         """Atomic independent copies of bounded, contiguous per-channel rings.
@@ -628,6 +647,8 @@ class CaptureManager:
         if isinstance(max_samples, bool) or not isinstance(max_samples, int) or not 1 <= max_samples <= 65536:
             raise ValueError("max_samples muss zwischen 1 und 65536 liegen.")
         with self._lock:
+            if not self._config.get("classification_enabled", True):
+                return []
             selected = self._analysis_buffers[:max_channels] if max_channels is not None else self._analysis_buffers
             result = []
             for entry in selected:
@@ -651,6 +672,8 @@ class CaptureManager:
         if isinstance(max_samples, bool) or not isinstance(max_samples, int) or not 1 <= max_samples <= 65536:
             raise ValueError("max_samples muss zwischen 1 und 65536 liegen.")
         with self._lock:
+            if not self._config.get("classification_enabled", True):
+                return None
             entry = self._analysis_probe
             if (entry is None or self._analysis_buffers or self._analysis_detected_channels
                     or entry["iq"] is not self.latest_iq
@@ -695,6 +718,7 @@ class CaptureManager:
         metadata = {"sc:source": self._config["source"], "sc:mode": self._config["mode"],
                     "sc:session_id": self._session_id, "signalclassifier:session_id": self._session_id,
                     "sc:requested_gain_db": self._config["gain_db"],
+                    "sc:classification_enabled": self._config["classification_enabled"],
                     "sc:gap_free_verified": False,
                     "sc:declared_source_synthetic": self._data_provenance["declared_source_synthetic"],
                     "sc:data_provenance": copy.deepcopy(self._data_provenance),
@@ -760,6 +784,12 @@ class CaptureManager:
             self._performance["capture_error"] = str(exc)
             self._performance["gaps"] += int(bool(getattr(exc, "reported_gap", False)))
             self._performance["overflows"] += int(bool(getattr(exc, "overflow", False)))
+            diagnostic = getattr(exc, "diagnostics", None)
+            if diagnostic is not None:
+                self._performance["stream_diagnostic"] = dict(copy.deepcopy(diagnostic),
+                    classification_enabled=self._config.get("classification_enabled", True),
+                    processing_rtf_mean=self._performance["processing_rtf_mean"],
+                    **(self._capture_queue.metrics() if self._capture_queue else {}))
 
     def _read_hardware(self, receiver):
         """Drain hardware independently of FFT/channelization/disk latency.
@@ -808,7 +838,11 @@ class CaptureManager:
                         self._capture_queue.put_nowait((iq, rate, center, position, received_at))
                     except queue.Full as exc:
                         raise _CaptureFailure("IQ-Eingangsqueue voll: Verarbeitung oder Datenträger ist langsamer als der Empfang. Aufnahme am letzten zusammenhängenden Präfix beendet; keine Blöcke werden still übersprungen.",
-                                              reason="queue_overflow", reported_gap=True, overflow=True) from exc
+                                              reason="queue_overflow", reported_gap=True, overflow=True,
+                                              diagnostics={"layer": "application_input_queue", "code": None,
+                                                           "kind": "queue_overflow", "cause_confirmed": False,
+                                                           "possible_causes": ["IQ-Verarbeitung", "Datenträger", "CPU-/Scheduling-Verzögerung"],
+                                                           "missing_samples": None, "policy": "stop_at_admitted_prefix_no_silent_skip"}) from exc
                     self._performance.update(self._capture_queue.metrics())
                 position += len(iq)
         except Exception as exc:
@@ -833,6 +867,7 @@ class CaptureManager:
         analysis_channels: list[dict] = []
         analysis_channel_counter = 0
         source_epoch = 0
+        classification_enabled = self._config["classification_enabled"]
         origin_group = (receiver.info["group_id"] if self._config["source"] == "recording" else
                         self._config.get("capture_group_id") or self._session_id)
         position = 0
@@ -984,7 +1019,8 @@ class CaptureManager:
                         complete = self._append_bounded(channel["writer"], output)
                         channel["source_stop"] = position + (len(iq) if complete else
                             min(len(iq), (channel["writer"].samples - before) * channel["extractor"].decimation))
-                        channel_outputs[channel["extractor"]] = output
+                        if classification_enabled:
+                            channel_outputs[channel["extractor"]] = output
                         if not complete:
                             quota_reached = True
                         if analyzed_now and position + len(iq) - channel["last_seen"] > sample_rate * 0.25:
@@ -993,7 +1029,7 @@ class CaptureManager:
                 # Keep separate bounded inference contexts for every admitted
                 # detection. Recording and inference share FIR output where
                 # possible; inference-only channels never create a writer.
-                if analyzed_now:
+                if analyzed_now and classification_enabled:
                     next_channels = []
                     matched = set()
                     used_extractors = set()
@@ -1090,7 +1126,10 @@ class CaptureManager:
                     channel["entry"] = entry
                     published_channels.append(entry)
                 strongest = analysis["detections"][0] if analysis["detections"] else None
-                if strongest and analysis_channels:
+                if not classification_enabled:
+                    display_channel = None
+                    latest_rate, latest_center = sample_rate, center
+                elif strongest and analysis_channels:
                     selected = analysis_channels[0]
                     display_channel = {"frequency": selected["frequency"], "bandwidth": selected["bandwidth"],
                                        "extractor": selected["extractor"]}
@@ -1100,14 +1139,15 @@ class CaptureManager:
                 else:
                     display_channel = None
                     latest_iq, latest_rate, latest_center = iq, sample_rate, center
-                context = (display_channel["extractor"] if display_channel else None, latest_rate, latest_center)
-                if context != inference_context:
-                    inference_iq = np.empty(0, np.complex64)
-                    inference_context = context
-                if len(latest_iq) >= 65536:
-                    inference_iq = latest_iq[-65536:].copy()
-                else:
-                    inference_iq = np.concatenate((inference_iq, latest_iq))[-65536:]
+                if classification_enabled:
+                    context = (display_channel["extractor"] if display_channel else None, latest_rate, latest_center)
+                    if context != inference_context:
+                        inference_iq = np.empty(0, np.complex64)
+                        inference_context = context
+                    if len(latest_iq) >= 65536:
+                        inference_iq = latest_iq[-65536:].copy()
+                    else:
+                        inference_iq = np.concatenate((inference_iq, latest_iq))[-65536:]
                 position += len(iq)
                 source_seconds += len(iq) / sample_rate
                 processing_seconds = time.perf_counter() - processing_start
@@ -1115,10 +1155,10 @@ class CaptureManager:
                     self._analysis_buffers = published_channels
                     self._analysis_detected_channels = analysis.get("detections_total", len(analysis["detections"]))
                     self._analysis_extra_channelizers = extra_channelizers
-                    self.latest_iq = inference_iq.copy()
+                    self.latest_iq = inference_iq.copy() if classification_enabled else inference_iq
                     self.latest_sample_rate, self.latest_center_frequency = latest_rate, latest_center
                     self._analysis_probe = None
-                    if not self._analysis_detected_channels and not analysis["detections"] and display_channel is None and len(self.latest_iq):
+                    if classification_enabled and not self._analysis_detected_channels and not analysis["detections"] and display_channel is None and len(self.latest_iq):
                         channel_id = f"{self._session_id}:s{source_epoch}:whole-window"
                         self._analysis_probe = {
                             "iq": self.latest_iq, "sample_rate": sample_rate, "center_frequency_hz": center,
@@ -1168,12 +1208,13 @@ class CaptureManager:
                             timestamp_source=("host_receive_end_utc" if analysis_block_sample_count == analysis["analysis_sample_count"]
                                               else "host_receive_end_minus_unanalyzed_tail"),
                             rf_timestamp_verified=False, classification=None,
-                            classification_channel={"center_frequency_hz": latest_center, "sample_rate": latest_rate,
+                            classification_channel=({"center_frequency_hz": latest_center, "sample_rate": latest_rate,
                                                     "bandwidth_hz": (2 * min(0.45 * latest_rate, 0.49 * sample_rate)
                                                                      if display_channel else sample_rate),
                                                     "selection_bandwidth_hz": display_channel["bandwidth"] if display_channel else sample_rate,
                                                     "samples_buffered": len(inference_iq),
-                                                    "selection": "strongest_energy_channel" if strongest else "whole_window"},
+                                                    "selection": "strongest_energy_channel" if strongest else "whole_window"}
+                                                    if classification_enabled else None),
                             active_channels=len(channels))
                         last_publish_rf = source_seconds
                     self._config["center_frequency_hz"] = center
