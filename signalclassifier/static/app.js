@@ -21,6 +21,11 @@
     liveComparisonSelection: { model_ids: [], models: [], active: false },
     liveSelectionLoaded: false,
     spectrum: null,
+    spectrumMetadata: null,
+    spectrumMetadataLoading: false,
+    spectrumMetadataRequestedAt: 0,
+    spectrumContextEpoch: 0,
+    stream: { socket: null, generation: 0, mode: "idle", healthy: false, failures: 0, lastSequence: null, lastMessageAt: 0, lastFFTAt: 0, lastFFTKey: null, actualFPS: 0, rateStartedAt: 0, rateFrames: 0, reconnectTimer: null, fallbackTimer: null, watchdog: null, raf: null, lastLabelsAt: 0 },
     waterfall: [],
     map: null,
     mapMarkers: null,
@@ -314,6 +319,7 @@
   async function changeView(view) {
     if (!titles[view]) return;
     state.view = view;
+    syncSpectrumTransport();
     $$(".view").forEach((v) => {
       v.hidden = v.id !== `view-${view}`;
     });
@@ -1525,6 +1531,7 @@
     const key = JSON.stringify([
       source,
       session,
+      snapshot.source_epoch ?? snapshot.receiver?.source_epoch ?? null,
       center,
       rate,
       minimum,
@@ -1571,10 +1578,43 @@
       previous.detections = frame.detections;
       return false;
     }
-    state.waterfall.push(frame);
-    state.waterfall.sort((a, b) => b.timeMs - a.timeMs);
-    state.waterfall.length = Math.min(240, state.waterfall.length);
+    if (!state.waterfall.length || frame.timeMs >= state.waterfall[0].timeMs) state.waterfall.unshift(frame);
+    else {
+      const index = state.waterfall.findIndex((row) => row.timeMs < frame.timeMs);
+      state.waterfall.splice(index < 0 ? state.waterfall.length : index, 0, frame);
+    }
+    state.waterfall.length = Math.min(12000, state.waterfall.length);
+    const cutoff = state.waterfall[0].timeMs - 600000;
+    while (state.waterfall.length && state.waterfall[state.waterfall.length - 1].timeMs < cutoff) state.waterfall.pop();
     return true;
+  }
+  function waterfallPixelRows(rows, geometry, cache = new Map()) {
+    const resolution = Math.max(1, geometry.windowMs / geometry.plotHeight), groups = new Map();
+    for (const row of rows) {
+      if (!observationCell(row, geometry)) continue;
+      const key = Math.floor(row.timeMs / resolution);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    const output = [];
+    for (const [bucket, members] of groups) {
+      const signature = members.map((row) => row.id).join("|");
+      let row = cache.get(bucket);
+      if (!row || row.signature !== signature) {
+        const first = members[0], power = new Array(first.power.length).fill(null);
+        for (const source of members) for (let i=0; i<power.length; i++) {
+          const value = source.power[i];
+          if (value !== null && Number.isFinite(value)) power[i] = power[i] === null ? value : Math.max(power[i], value);
+        }
+        row = { ...first, signature, power, aggregated_count: members.length,
+          duration: Math.max(...members.map((source) => source.duration + (first.timeMs - source.timeMs) / 1000)) };
+        cache.set(bucket, row);
+      }
+      row.detections = members[0].detections;
+      output.push(row);
+    }
+    for (const key of cache.keys()) if (!groups.has(key)) cache.delete(key);
+    return output;
   }
   function waterfallOptions() {
     let minimum = finiteNumber($("#waterfall-min").value) ?? -120,
@@ -1678,22 +1718,59 @@
     }
     return observations;
   }
+  const WATERFALL_LUT_SIZE = 1024;
+  const WATERFALL_LUT_CACHE = new Map();
+  const WATERFALL_SCALE_CACHE = new WeakMap();
+  function waterfallPaletteName(name) {
+    return Object.hasOwn(WATERFALL_PALETTES, name) ? name : "viridis";
+  }
+  function waterfallPaletteLUT(name) {
+    const palette = waterfallPaletteName(name);
+    if (WATERFALL_LUT_CACHE.has(palette))
+      return WATERFALL_LUT_CACHE.get(palette);
+    const colors = new Uint8ClampedArray(WATERFALL_LUT_SIZE * 4);
+    for (let i = 0; i < WATERFALL_LUT_SIZE; i++) {
+      const color = paletteRGB(palette, i / (WATERFALL_LUT_SIZE - 1)),
+        offset = i * 4;
+      colors[offset] = color[0];
+      colors[offset + 1] = color[1];
+      colors[offset + 2] = color[2];
+      colors[offset + 3] = 255;
+    }
+    WATERFALL_LUT_CACHE.set(palette, colors);
+    return colors;
+  }
+  function waterfallStripKey(options) {
+    return `${waterfallPaletteName(options.palette)}|${options.minimum}|${options.maximum}`;
+  }
+  function waterfallScaleKey(canvas, options, width, height) {
+    return `${waterfallStripKey(options)}|${width}x${height}|${canvas.width}x${canvas.height}`;
+  }
   function rowStrip(row, options) {
-    const key = `${options.palette}|${options.minimum}|${options.maximum}`;
+    const key = waterfallStripKey(options);
     if (row.strip && row.stripKey === key) return row.strip;
     const strip = document.createElement("canvas");
     strip.width = row.power.length;
     strip.height = 1;
     const ctx = strip.getContext("2d"),
-      pixels = ctx.createImageData(row.power.length, 1);
-    row.power.forEach((p, i) => {
-      if (p === null) return;
-      const color = paletteRGB(
-        options.palette,
-        (p - options.minimum) / (options.maximum - options.minimum),
-      );
-      pixels.data.set([...color, 255], i * 4);
-    });
+      pixels = ctx.createImageData(row.power.length, 1),
+      colors = waterfallPaletteLUT(options.palette),
+      range = options.maximum - options.minimum,
+      data = pixels.data;
+    for (let i = 0; i < row.power.length; i++) {
+      const p = row.power[i];
+      if (p === null) continue;
+      const value = (p - options.minimum) / range,
+        color = Math.round(
+          Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)) *
+            (WATERFALL_LUT_SIZE - 1),
+        ) * 4,
+        offset = i * 4;
+      data[offset] = colors[color];
+      data[offset + 1] = colors[color + 1];
+      data[offset + 2] = colors[color + 2];
+      data[offset + 3] = 255;
+    }
     ctx.putImageData(pixels, 0, 0);
     row.strip = strip;
     row.stripKey = key;
@@ -1702,13 +1779,19 @@
   function drawWaterfallScale(options) {
     const canvas = $("#waterfall-scale-canvas"),
       { ctx, width, height } = canvasSetup(canvas);
+    const key = waterfallScaleKey(canvas, options, width, height);
+    if (WATERFALL_SCALE_CACHE.get(canvas) === key) return;
+    const colors = waterfallPaletteLUT(options.palette);
     for (let x = 0; x < width; x++) {
-      const color = paletteRGB(options.palette, x / Math.max(1, width - 1));
-      ctx.fillStyle = `rgb(${color.join(",")})`;
+      const color = Math.round(
+        (x / Math.max(1, width - 1)) * (WATERFALL_LUT_SIZE - 1),
+      ) * 4;
+      ctx.fillStyle = `rgb(${colors[color]},${colors[color + 1]},${colors[color + 2]})`;
       ctx.fillRect(x, 0, 1, height);
     }
     $("#waterfall-scale-low").textContent = `${num(options.minimum, 0)} dBFS`;
     $("#waterfall-scale-high").textContent = `${num(options.maximum, 0)} dBFS`;
+    WATERFALL_SCALE_CACHE.set(canvas, key);
   }
   function drawWaterfall() {
     const canvas = $("#waterfall-canvas");
@@ -1716,9 +1799,12 @@
       return;
     const { ctx, width: w, height: h } = canvasSetup(canvas),
       options = waterfallOptions(),
-      rows = state.waterfall,
-      frame = rows[0],
-      geometry = waterfallGeometry(frame, rows, w, h, options);
+      rawRows = state.waterfall,
+      frame = rawRows[0],
+      geometry = waterfallGeometry(frame, rawRows, w, h, options);
+    const rasterKey = `${state.waterfallSourceKey}|${geometry.plotHeight}|${geometry.windowMs}`;
+    if (state.waterfallRasterKey !== rasterKey) { state.waterfallRasterKey = rasterKey; state.waterfallRasterCache = new Map(); }
+    const rows = waterfallPixelRows(rawRows, geometry, state.waterfallRasterCache);
     state.waterfallGeometry = geometry;
     ctx.fillStyle = css("--plot");
     ctx.fillRect(0, 0, w, h);
@@ -1729,7 +1815,7 @@
       (row) => geometry.latestTime - row.timeMs <= geometry.windowMs,
     );
     $("#waterfall-frame-count").textContent =
-      `${visible.length} / ${rows.length} Stichproben`;
+      `${rawRows.length} Stichproben · max. 12 000 / 600 s · ${visible.length} Zeitpixel`;
     drawWaterfallScale(options);
     ctx.save();
     ctx.beginPath();
@@ -2169,10 +2255,51 @@
         : [empty("Detektionen erscheinen während des Empfangs.")]),
     );
   }
-  async function loadSpectrum() {
-    const snapshot = await api("/api/spectrum");
-    state.spectrum = snapshot;
-    renderLiveComparison(snapshot);
+  function spectrumContext(snapshot) {
+    return {
+      session: snapshot?.receiver?.session_id || snapshot?.session_id || "",
+      source: snapshot?.source || snapshot?.receiver?.source || snapshot?.receiver?.config?.source || "",
+      epoch: snapshot?.source_epoch ?? snapshot?.receiver?.source_epoch ?? null,
+      rate: finiteNumber(snapshot?.sample_rate ?? snapshot?.receiver?.sample_rate),
+      center: finiteNumber(snapshot?.center_frequency_hz ?? snapshot?.receiver?.center_frequency_hz),
+      timestamp: Date.parse(snapshot?.analysis_timestamp || snapshot?.timestamp || ""),
+    };
+  }
+  function mergeSpectrumFrame(frame, metadata) {
+    if (!frame) return null;
+    const current = spectrumContext(frame), old = spectrumContext(metadata);
+    const compatible = !!current.session && current.session === old.session && current.source === old.source &&
+      current.epoch === old.epoch &&
+      current.rate !== null && current.rate === old.rate && current.center !== null && current.center === old.center &&
+      Number.isFinite(current.timestamp) && Number.isFinite(old.timestamp) && Math.abs(current.timestamp - old.timestamp) <= 2500;
+    const disabled = !classificationEnabled(frame);
+    return { ...frame,
+      classification: disabled ? (frame.classification || { status: "disabled", enabled: false, label: "unbekannt" }) : compatible ? metadata.classification : null,
+      classification_comparison: !disabled && compatible ? arr(metadata.classification_comparison) : [],
+      signal_classifications: !disabled && compatible ? arr(metadata.signal_classifications) : [],
+      analysis_stats: compatible ? metadata.analysis_stats : frame.analysis_stats,
+    };
+  }
+  function spectrumStreamMessage(value, previousSequence = null) {
+    if (!value || value.type !== "spectrum" || !Number.isSafeInteger(value.sequence) || value.sequence < 0 ||
+      (previousSequence !== null && value.sequence <= previousSequence) || !value.frame || typeof value.frame !== "object" || Array.isArray(value.frame)) return null;
+    const frequency = arr(value.frame.frequencies_hz || value.frame.frequencies), power = arr(value.frame.power_dbfs || value.frame.spectrum_dbfs || value.frame.spectrum);
+    if (frequency.length !== power.length || frequency.length > 2048) return null;
+    return value.frame;
+  }
+  function streamBackoff(failures) { return Math.min(10000, 1000 * 2 ** Math.max(0, Math.min(4, failures - 1))); }
+  function spectrumViewActive() { return state.view === "empfang" && !document.hidden; }
+  function updateStreamStatus() {
+    const stream = state.stream, now = Date.now(), running = receiverRunning();
+    const stale = running && stream.lastFFTAt > 0 && now - stream.lastFFTAt > 2500;
+    $("#spectrum-stream-status").textContent = !spectrumViewActive() ? "Anzeige pausiert" : stale ? "Veraltet · keine neue Spektrum-Stichprobe" :
+      stream.mode === "fallback" ? "REST-Ersatzverbindung" : stream.healthy ? running ? "Live-Stream verbunden" : "Stream verbunden · Empfänger gestoppt" :
+      stream.mode === "reconnecting" ? "Stream unterbrochen · Wiederverbindung" : "Stream wird verbunden";
+    $("#spectrum-stream-detail").textContent = `${num(stream.actualFPS, 1)} neue FFT-Stichproben/s · Ziel ${$("#spectrum-stream-fps").value}/s${stream.lastFFTAt ? ` · letzte neue FFT vor ${num((now-stream.lastFFTAt)/1000, 1)} s` : " · warte auf Spektrum"}. Klassifikationsmetadaten werden getrennt und höchstens alle 1,8 s angefordert.`;
+  }
+  function renderSpectrumLabels() {
+    if (!spectrumViewActive() || !state.spectrum) return;
+    const snapshot = state.spectrum;
     const { freq, power } = spectrumArrays();
     $("#spectrum-empty").hidden = power.length > 0;
     const center =
@@ -2184,9 +2311,6 @@
     $("#spectrum-bandwidth").textContent = freq.length
       ? `${num((freq[freq.length - 1] - freq[0]) / 1e6, 3)} MHz · ${power.length} Bins`
       : "Keine Daten";
-    if (power.length) addWaterfall(snapshot);
-    drawSpectrum();
-    drawWaterfall();
     renderDetections(
       snapshot.detections,
       snapshot.classification,
@@ -2199,6 +2323,119 @@
       renderReceptionDecision(snapshot);
     else if (snapshot.classification)
       renderClassification(snapshot.classification);
+    renderLiveComparison(snapshot);
+  }
+  function requestSpectrumPaint() {
+    if (!spectrumViewActive() || state.stream.raf !== null) return;
+    state.stream.raf = requestAnimationFrame(() => {
+      state.stream.raf = null;
+      if (!spectrumViewActive()) return;
+      drawSpectrum(); drawWaterfall();
+      if (Date.now() - state.stream.lastLabelsAt >= 500) { state.stream.lastLabelsAt = Date.now(); renderSpectrumLabels(); updateStreamStatus(); }
+    });
+  }
+  function ingestSpectrumFrame(frame) {
+    const context = spectrumContext(frame);
+    const contextKey = JSON.stringify([context.session, context.source, context.epoch, context.rate, context.center]);
+    if (contextKey !== state.stream.contextKey) {
+      state.stream.contextKey = contextKey; state.spectrumContextEpoch++; state.spectrumMetadata = null;
+    }
+    state.spectrum = mergeSpectrumFrame(frame, state.spectrumMetadata);
+    const fftKey = Number.isFinite(context.timestamp) && arr(frame.frequencies_hz || frame.frequencies).length > 1
+      ? JSON.stringify([context.session, context.source, context.rate, context.center, frame.spectrum_frame_id ?? context.timestamp]) : null;
+    if (fftKey && fftKey !== state.stream.lastFFTKey) {
+      state.stream.lastFFTKey = fftKey; state.stream.lastFFTAt = Date.now(); state.stream.rateFrames++;
+      addWaterfall(state.spectrum);
+    }
+    const elapsed = Date.now() - state.stream.rateStartedAt;
+    if (elapsed >= 1000) { state.stream.actualFPS = state.stream.rateFrames * 1000 / elapsed; state.stream.rateFrames = 0; state.stream.rateStartedAt = Date.now(); }
+    requestSpectrumPaint();
+  }
+  async function loadSpectrum() {
+    if (!spectrumViewActive() || state.spectrumMetadataLoading || Date.now() - state.spectrumMetadataRequestedAt < 1800) return;
+    state.spectrumMetadataRequestedAt = Date.now();
+    state.spectrumMetadataLoading = true;
+    const epoch = state.spectrumContextEpoch, generation = state.stream.generation;
+    try {
+      const snapshot = await api("/api/spectrum");
+      if (epoch !== state.spectrumContextEpoch || generation !== state.stream.generation || !spectrumViewActive()) return;
+      state.spectrumMetadata = snapshot;
+      // A late metadata response must never replace a newer FFT or retune.
+      if (state.spectrum) { state.spectrum = mergeSpectrumFrame(state.spectrum, snapshot); requestSpectrumPaint(); }
+      else if (spectrumViewActive()) ingestSpectrumFrame(snapshot);
+    } finally { state.spectrumMetadataLoading = false; }
+  }
+  function stopSpectrumTransport() {
+    const stream = state.stream; stream.generation++;
+    clearTimeout(stream.reconnectTimer); clearTimeout(stream.fallbackTimer); clearInterval(stream.watchdog);
+    if (stream.raf !== null) cancelAnimationFrame(stream.raf);
+    stream.reconnectTimer = stream.fallbackTimer = stream.watchdog = stream.raf = null;
+    stream.actualFPS = 0;
+    const socket = stream.socket; stream.socket = null; stream.healthy = false; stream.mode = "idle";
+    socket?.close(1000, "Ansicht pausiert");
+  }
+  function startSpectrumFallback() {
+    const stream = state.stream;
+    if (stream.fallbackTimer !== null || !spectrumViewActive()) return;
+    stream.mode = "fallback";
+    const generation = stream.generation;
+    const pollFrame = async () => {
+      if (!spectrumViewActive() || generation !== stream.generation || stream.healthy) return;
+      try {
+        const connectionEpoch = stream.connectionEpoch;
+        const message = await api("/api/spectrum/frame?bins=1024");
+        if (generation !== stream.generation || !spectrumViewActive() || stream.healthy) return;
+        const frame = connectionEpoch === stream.connectionEpoch ? spectrumStreamMessage(message, stream.lastSequence) : null;
+        if (frame) { stream.lastSequence = message.sequence; ingestSpectrumFrame(frame); }
+      } catch (_error) { updateStreamStatus(); }
+      if (generation === stream.generation && spectrumViewActive() && !stream.healthy) stream.fallbackTimer = setTimeout(pollFrame, 500);
+    };
+    stream.fallbackTimer = setTimeout(pollFrame, 0);
+  }
+  function connectSpectrumStream() {
+    const stream = state.stream;
+    if (!spectrumViewActive() || stream.socket) return;
+    if (typeof WebSocket === "undefined") { startSpectrumFallback(); return; }
+    const generation = stream.generation;
+    const connectionEpoch = (stream.connectionEpoch || 0) + 1;
+    stream.connectionEpoch = connectionEpoch;
+    stream.mode = stream.fallbackTimer !== null ? "fallback" : stream.failures ? "reconnecting" : "connecting";
+    const fps = [8,15,20].includes(Number($("#spectrum-stream-fps").value)) ? Number($("#spectrum-stream-fps").value) : 15;
+    let socket;
+    try { socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/spectrum/stream?max_fps=${fps}&bins=1024`); }
+    catch (_error) { stream.failures = 3; startSpectrumFallback(); return; }
+    stream.socket = socket; stream.lastSequence = null;
+    socket.addEventListener("open", () => {
+      if (generation !== stream.generation || connectionEpoch !== stream.connectionEpoch) return;
+      stream.healthy = true; stream.mode = "open"; stream.failures = 0; stream.lastMessageAt = Date.now();
+      stream.rateStartedAt = Date.now(); stream.rateFrames = 0;
+      clearTimeout(stream.fallbackTimer); stream.fallbackTimer = null; updateStreamStatus();
+    });
+    socket.addEventListener("message", (event) => {
+      if (generation !== stream.generation || connectionEpoch !== stream.connectionEpoch || !spectrumViewActive() || typeof event.data !== "string" || event.data.length > 1048576) return;
+      stream.lastMessageAt = Date.now();
+      try {
+        const message = JSON.parse(event.data), frame = spectrumStreamMessage(message, stream.lastSequence);
+        if (frame) { stream.lastSequence = message.sequence; ingestSpectrumFrame(frame); }
+      } catch (_error) { /* Ignore malformed data; the watchdog exposes missing valid FFTs. */ }
+    });
+    socket.addEventListener("close", () => {
+      if (generation !== stream.generation || connectionEpoch !== stream.connectionEpoch) return;
+      stream.socket = null; stream.healthy = false; stream.failures++;
+      stream.mode = stream.failures >= 3 ? "fallback" : "reconnecting";
+      if (stream.failures >= 3) startSpectrumFallback();
+      stream.reconnectTimer = setTimeout(() => { stream.reconnectTimer = null; connectSpectrumStream(); }, streamBackoff(stream.failures));
+      updateStreamStatus();
+    });
+    socket.addEventListener("error", () => { /* onclose owns the single reconnect timer. */ });
+  }
+  function syncSpectrumTransport() {
+    if (!spectrumViewActive()) { stopSpectrumTransport(); return; }
+    if (!state.stream.watchdog) state.stream.watchdog = setInterval(() => {
+      updateStreamStatus();
+      if (state.stream.healthy && Date.now() - state.stream.lastMessageAt > 6000) state.stream.socket?.close();
+    }, 1000);
+    if (!state.stream.socket && !state.stream.reconnectTimer) connectSpectrumStream();
   }
   async function loadLiveComparison() {
     const selection = await api("/api/live/compare");
@@ -3997,6 +4234,7 @@
         f.get("source") === "recordings"
           ? f.get("evaluation_mode")
           : "independent",
+      allow_same_session: f.get("source") === "recordings" && f.has("allow_same_session"),
       topology_id: topologyIds[0],
       topology_ids: topologyIds,
       samples_per_class: Number(f.get("samples_per_class")),
@@ -4098,12 +4336,13 @@
     state.datasetReadiness = data;
     const trainingOnly = data.evaluation_mode === "training_only";
     const classes = arr(data.classes);
+    const sameSession = data.split_policy === "recording_holdout_same_session_allowed";
     const body = el("div", { class: "readiness-body" }, [
       el("div", { class: "readiness-heading" }, [
         el("strong", {
           text: trainingOnly
             ? "Training ohne unabhängige Bewertung"
-            : "Datengrundlage für unabhängige Bewertung",
+            : sameSession ? "Bewertung mit getrennten Aufnahmen · gleiche Sitzung zugelassen" : "Datengrundlage für unabhängige Bewertung",
         }),
         pill(
           data.ready ? "Bereit" : "Weitere Daten nötig",
@@ -4117,7 +4356,7 @@
                 el(
                   "tr",
                   {},
-                  ["Klasse", "Aufnahmen", "Sitzungen", "Segmente"].map((t) =>
+                  ["Klasse", "Aufnahmen", sameSession ? "Ursprüngliche Aufnahmen" : "Sitzungen", "Segmente"].map((t) =>
                     el("th", { text: t }),
                   ),
                 ),
@@ -4166,7 +4405,9 @@
           })
         : el("p", {
             class: "field-help",
-            text: "Erforderliche Sitzungen je Klasse: Training, Validierung und Test. Aus einer Sitzung erzeugte Clips bleiben zusammen.",
+            text: sameSession
+              ? "Mindestens drei ursprüngliche Aufnahmen je Klasse: Training, Validierung und Test. Abgeleitete Clips bleiben zusammen. Die Bewertung belegt keine Übertragbarkeit auf eine andere Sitzung."
+              : "Erforderliche Sitzungen je Klasse: Training, Validierung und Test. Aus einer Sitzung erzeugte Clips bleiben zusammen.",
           }),
     ]);
     $("#dataset-readiness").replaceChildren(body);
@@ -5360,6 +5601,10 @@
     updateExperimentBundleExport(experiment);
     renderExperimentPublication(experiment);
     const fullReport = experiment.report || experiment.result || experiment;
+    $("#experiment-split-limitation").hidden = !(
+      (fullReport.config || experiment.config)?.allow_same_session === true &&
+      (fullReport.config || experiment.config)?.source === "recordings"
+    );
     const comparison = arr(fullReport.comparison);
     const experimentId = experiment.id || state.selectedExperiment;
     const rememberedIndex =
@@ -7530,6 +7775,8 @@
       throw new Error("Ungültiger Experimentname.");
     if (c.use_priors !== undefined && typeof c.use_priors !== "boolean")
       throw new Error("Vorwissen muss als boolescher Wert gespeichert sein.");
+    if (c.allow_same_session !== undefined && typeof c.allow_same_session !== "boolean")
+      throw new Error("Die Zustimmung zu Aufnahmen derselben Sitzung muss als boolescher Wert gespeichert sein.");
     const listBounds = {
       segment_lengths: [256, 65536, 4, true],
       snr_db: [-30, 80, 12, false],
@@ -7664,6 +7911,7 @@
         c.augmentation?.[key] ?? (key === "echo_delay_samples" ? 8 : 0),
       );
     form.elements.use_priors.checked = c.use_priors === true;
+    form.elements.allow_same_session.checked = c.allow_same_session === true;
     form.elements.experiment_notes.value = c.experiment_notes || "";
     populateOptimizationForm(prepared.optimization);
     populateExecutionForm(prepared.execution);
@@ -7680,6 +7928,11 @@
   }
   function setupEvents() {
     setupAnalysisEvents();
+    document.addEventListener("visibilitychange", () => {
+      syncSpectrumTransport();
+      if (spectrumViewActive()) { action(loadSpectrum); requestSpectrumPaint(); }
+    });
+    $("#spectrum-stream-fps").addEventListener("change", () => { stopSpectrumTransport(); syncSpectrumTransport(); });
     updateGithubPublicationControls();
     $("#experiment-github-enabled").addEventListener("change", () => {
       updateGithubPublicationControls();
@@ -8141,7 +8394,7 @@
     state.polling = true;
     try {
       await loadStatus();
-      if (state.view === "empfang" && (receiverRunning() || !state.spectrum)) {
+      if (spectrumViewActive() && (receiverRunning() || !state.spectrum)) {
         await loadSpectrum();
       }
       if (state.view === "drohnen") await loadDrones();
@@ -8197,6 +8450,7 @@
     drawWaterfall();
     setInterval(poll, 1800);
     setInterval(pollAnalysis, 1000);
+    window.addEventListener("pagehide", stopSpectrumTransport);
   }
   init().catch(showError);
 })();

@@ -17,7 +17,8 @@ def main():
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     import uvicorn
     from .app import create_app
-    uvicorn.run(create_app(args.data_dir), host=args.host, port=args.port, log_level=args.log_level)
+    uvicorn.run(create_app(args.data_dir), host=args.host, port=args.port, log_level=args.log_level,
+                ws_max_size=4096, ws_max_queue=1)
 
 
 if __name__ == "__main__":

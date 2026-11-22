@@ -618,6 +618,52 @@ html[data-theme="light"] .button-primary {
   gap: 22px;
   align-items: start;
 }
+.spectrum-stream-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  min-width: 0;
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.spectrum-stream-status {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.spectrum-stream-target {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+.spectrum-stream-target select {
+  width: auto;
+  min-width: 108px;
+  min-height: 34px;
+  padding: 6px 29px 6px 10px;
+  font: 0.75rem var(--mono);
+}
+.spectrum-stream-detail {
+  flex: 1 1 100%;
+  min-width: 0;
+  color: var(--faint);
+  font-size: 0.6875rem;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .spectrum-stream-controls {
+    padding: 10px 14px;
+  }
+  .spectrum-stream-target {
+    margin-left: 0;
+  }
+}
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

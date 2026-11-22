@@ -542,6 +542,8 @@ def _markdown(experiment, views, comparison, tables, inventory, events, charts, 
         lines.append("- **Synthetischer Softwareversuch:** Die Ergebnisse belegen keine reale HF-Leistung oder Übertragbarkeit auf andere Empfänger.")
     if training_only:
         lines.append("- **Nur trainiert / unvalidiert:** Genauigkeit, F1, Qualitätsscore und Qualitätsrangfolge sind unbekannt. Trainingsverlust ist keine Generalisierungsprüfung.")
+    if config.get("allow_same_session") is True and config.get("source") == "recordings":
+        lines.append("- **Gleiche Sitzung ausdrücklich zugelassen:** Training, Validierung und Test trennen ursprüngliche Aufnahmen einschließlich ihrer bekannten Ableitungen. Gemeinsame Sender-, Empfänger- und Kanalbedingungen können die Genauigkeit begünstigen; die Übertragbarkeit auf andere Aufnahmesitzungen ist nicht nachgewiesen. Die gewählte Gruppierung und Zustimmung stehen in Konfiguration und Modellberichten.")
     if status not in ("completed", "nicht angegeben"):
         lines.append("- **Unvollständiger Lauf:** Vorhandene Teilergebnisse und Fehler sind dokumentiert; daraus entsteht kein fingierter Gesamtgewinner.")
     if not any(row["evaluation_available"] for row in comparison):

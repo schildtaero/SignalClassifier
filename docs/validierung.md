@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 22. November 2026, SignalClassifier 0.5.3, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 22. November 2026, SignalClassifier 0.6.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 282 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
+- 323 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,19 @@ Prüfstand: 22. November 2026, SignalClassifier 0.5.3, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.6.0
+
+- Gesamtsuite: **323 Tests bestanden in 48,0 Sekunden**. JavaScript-Syntax und -Logik, Shell-Syntax, `setup.sh --check` und `git diff --check` bestanden. Die API-Tests liefen mit freigegebenem Netzwerkzugriff für lokale Testverbindungen.
+- Neun zusätzliche Acquisition-Tests: unveränderliche, begrenzte Displayprojektion außerhalb des Capture-Locks; Spitzenaggregation, ungültige Zahlen, Revisionen und echte Messzeitstempel; Start/Stop/Fehler und Rückkehr zur vorherigen Frequenz mit unterscheidbarer Quellenepoche; fortlaufende Anzeigezeitplanung sowie Herkunft über alte Replay-Ketten. Die vollständige Acquisition-Suite enthält 42 Tests. Bei 2 Millionen Samples pro Sekunde, 131.072 Samples je Block und Sollwert 15 entstehen im numerischen Regressionstest 31 Analysen über 2,097152 Sekunden Signaldauer, etwa 14,78 pro Sekunde. Dies ist eine Softwareprüfung der Zeitplanung, kein gemessener SDR-Durchsatz.
+- Zwölf Verteiler- und sechs API-Tests prüfen einen gemeinsamen JSON-Producer, keine Abrufe ohne Clients, keine privaten Framewarteschlangen, maximal vier Verbindungen, feste Paket-/Binbudgets, langsame Abnehmer, Fehlererholung und frische Erstframes nach Wiederverbindung. Fremde Browserursprünge und ungültige Parameter werden zurückgewiesen. Der schnelle Pfad ruft weder Modelle noch IQ-Kopien oder archivierte Berichte ab; ein echter synthetischer Monitor liefert mehrere WebSocket-Frames ohne REST-Spektrumpolling.
+- Zehn Split-Policy-Tests: Zustimmung als strikter boolescher Wert, unveränderter Standard mit getrennten Sitzungen, Aufnahmegruppen vor Segmentierung, globale Zuordnung über Klassen und Clipketten, Dateialiasse und vollständige Inhaltsduplikate. Ungeklärte Herkunft blockiert den gelockerten Split vor der Hashprüfung. Automatische Optimierung verwendet unveränderte Aufnahmegruppen und hält die Testauswertung bis zur Gewinnerwahl zurück. Herkunftszuordnung, gewählte Methode und Einschränkungen bleiben in Modellen und Berichten gespeichert.
+- Vier zusätzliche API-Tests: drei Klassen namens AX.25, LoRa und POCSAG mit jeweils drei getrennten Dateien aus einer gemeinsamen Sitzung; ohne Zustimmung abgewiesen, mit Zustimmung erfolgreich trainiert und ausgewertet. Dies sind generierte Testdaten unter diesen Klassenlabels, keine Protokollvalidierung. Die gesamte Kette bis zu Modellregistrierung, eingefrorener Konfiguration, privatem Berichtsbundle und öffentlicher Paper-Projektion bewahrt die Zustimmung und fehlende Sitzungsunabhängigkeit. Weitere Fälle prüfen nicht ausgewählte Vorfahren, ungültige Zustimmungstypen und den Ausschluss privater Freitexte aus der Veröffentlichung.
+- Chromium-Prüfung bei 1440 und 390 Pixeln: keine Seitenüberläufe oder JavaScriptfehler, wachsender Wasserfall, höchstens eine offene Verbindung, korrekte View-/Sichtbarkeits-/Bildratenwechsel und keine schnellen REST-Frameabrufe bei gesunder WebSocket-Verbindung. Ein synthetischer 2-MS/s-Monitor mit 4096er Blöcken lieferte in beiden Browsergrößen etwa 13,8 neue FFT-Stichproben pro Sekunde bei Sollwert 15. Die Beobachtung ist nicht auf WSL oder physische Empfänger übertragbar.
+- Abschließender Chromium-Lauf mit Standardblockgröße 131.072, synthetischem 2-MS/s-Monitor und deaktivierter Klassifikation: **114 neue Spektrumframes in 8,002 Sekunden**, etwa **14,25 pro Sekunde**; Wasserfall wächst, Stream verbunden, keine JavaScriptfehler. Die Gesamtsuite lief parallel; Rechnerlast war nicht isoliert. Dies prüft den vollständigen Software-Anzeigepfad einschließlich der korrigierten Blockzeitplanung.
+- Verbindungsabbrüche aktivieren den günstigen REST-Ersatzpfad; eine eingefrorene Spektralbeobachtung mit weiteren Heartbeats wird als veraltet gekennzeichnet und erzeugt keine zusätzlichen Wasserfallzeilen. Konfigurationsimport/-export bewahrt die Sitzungszustimmung ausdrücklich als `true` beziehungsweise `false`; ein solcher Import startet kein Training.
+
+Der schnelle Anzeigestrom und die Aufnahme haben unterschiedliche Verwerfungs- und Qualitätsbegriffe. Übersprungene Anzeigeframes sind keine behaupteten IQ-Lücken; flüssige Bilder belegen umgekehrt keinen lückenlosen Funkempfang. Details: [Live-Stream](live-stream.md) und [Methodik](quellen-und-methodik.md).
 
 ## Ergänzungen in 0.5.3
 

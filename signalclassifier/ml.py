@@ -259,6 +259,9 @@ def _torch_model(topology, num_classes=2):
 
 def _validate_config(config):
     c = dict(config)
+    c.setdefault("allow_same_session", False)
+    if type(c["allow_same_session"]) is not bool:
+        raise ValueError("allow_same_session muss true oder false sein.")
     c.setdefault("evaluation_mode", "independent")
     if c["evaluation_mode"] not in ("independent", "training_only"):
         raise ValueError("evaluation_mode muss independent oder training_only sein.")
@@ -348,7 +351,39 @@ def validate_experiment_config(config: dict) -> dict:
     return c
 
 
-def _recording_inventory(entry):
+def _recording_signature(path):
+    stat = Path(path).stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+@functools.lru_cache(maxsize=1024)
+def _recording_content_digest(path, signature):
+    """Opt-in streaming identity hash, never an IQ allocation or feature read."""
+    if _recording_signature(path) != signature:
+        raise ValueError("Aufnahme wurde während der Duplikatprüfung verändert; erneut prüfen.")
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1_048_576), b""):
+            digest.update(block)
+    if _recording_signature(path) != signature:
+        raise ValueError("Aufnahme wurde während der Duplikatprüfung verändert; erneut prüfen.")
+    return digest.hexdigest()
+
+
+def _split_metadata(config):
+    relaxed = config.get("source") == "recordings" and config.get("allow_same_session") is True
+    evaluated = config.get("evaluation_mode", "independent") != "training_only"
+    synthetic = config.get("source") == "synthetic"
+    return {"allow_same_session": config.get("allow_same_session", False),
+            "split_policy": "synthetic_origin_holdout" if synthetic else "recording_holdout_same_session_allowed" if relaxed else "session_holdout",
+            "validation_independence": {"split_unit": "original_recording" if relaxed else "session" if config.get("source") == "recordings" else "synthetic_origin",
+                                        "session_independence_required": evaluated and not relaxed and not synthetic,
+                                        "session_independent": None if not evaluated or synthetic else not relaxed,
+                                        "recording_disjoint": True if evaluated else None,
+                                        "exact_duplicate_check": "streaming_sha256" if relaxed else "session_metadata"}}
+
+
+def _recording_inventory(entry, *, allow_same_session=False):
     """Resolve and inspect one SigMF source without reading its numeric samples."""
     from .sigmf import recording_info
     path = entry.get("metadata_path") or entry.get("path")
@@ -359,9 +394,75 @@ def _recording_inventory(entry):
     with Path(info["data_path"]).open("rb"):
         pass
     group_id = str(entry.get("group_id") or info.get("group_id") or entry.get("id") or path)
-    return {**entry, "metadata_path": str(path), "group_id": group_id,
+    glob = info["metadata"]["global"]
+    resolution = glob.get("sc:origin_recording_resolution")
+    if allow_same_session and isinstance(resolution, dict) and resolution.get("resolved") is False:
+        raise ValueError("Ursprungsaufnahme ist ausdrücklich ungeklärt; fehlende Vorfahren ergänzen oder die strenge Sitzungsaufteilung beibehalten.")
+    parents = [str(glob[key]) for key in ("signalclassifier:parent_recording_id", "sc:parent_recording_id") if glob.get(key)]
+    recording_id = str(entry.get("recording_group_id") or glob.get("sc:origin_recording_id")
+                       or glob.get("signalclassifier:origin_recording_id") or next(iter(parents), None)
+                       or glob.get("sc:recording_id") or entry.get("id") or Path(path).stem)
+    result = {**entry, "metadata_path": str(path), "group_id": group_id, "session_group_id": group_id,
+            "recording_group_id": recording_id,
+            "recording_identifiers": tuple(str(x) for x in (entry.get("id"), info.get("id"), Path(path).stem,
+                                           glob.get("sc:recording_id")) if x),
+            "parent_recording_ids": tuple(parents),
             "sample_count": info["sample_count"], "sample_rate": info["sample_rate"],
-            "integrity": info["metadata"]["global"].get("sc:integrity")}
+            "integrity": glob.get("sc:integrity")}
+    if allow_same_session:
+        data = Path(info["data_path"]).resolve(strict=True)
+        signature = _recording_signature(data)
+        result.update(data_identity_path=str(data), data_identity_inode=signature[:2] if signature[1] else None,
+                      recording_sha256=_recording_content_digest(str(data), signature))
+        # Cached hashes still require a fresh post-lookup stat, so an active
+        # writer cannot reuse an otherwise valid old cache entry unnoticed.
+        if _recording_signature(data) != signature:
+            raise ValueError("Aufnahme wurde während der Duplikatprüfung verändert; erneut prüfen.")
+    return result
+
+
+def _effective_recording_groups(entries, allow_same_session=False):
+    """Merge every declared ancestor, alias and exact duplicate before splitting."""
+    result = [dict(entry) for entry in entries]
+    if not allow_same_session:
+        return result
+    parent = list(range(len(result)))
+    def origin_token(value):
+        text = str(value)
+        # Capture replay lineage uses an explicit recording namespace; older
+        # originals only carry the basename. Never normalize session tokens.
+        return text[len("recording:"):] if text.startswith("recording:") and len(text) > len("recording:") else text
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+    tokens = {}
+    for index, entry in enumerate(result):
+        identities = [("origin", origin_token(entry["recording_group_id"]))]
+        identities += [("origin", origin_token(name)) for name in entry.get("recording_identifiers", ())]
+        identities += [("origin", origin_token(name)) for name in entry.get("parent_recording_ids", ())]
+        identities += [(key, entry[key]) for key in ("recording_sha256", "data_identity_path", "data_identity_inode") if entry.get(key)]
+        for token in identities:
+            if token in tokens:
+                parent[find(index)] = find(tokens[token])
+            else:
+                tokens[token] = index
+    components = {}
+    for index, entry in enumerate(result):
+        components.setdefault(find(index), []).append(entry)
+    for component in components.values():
+        origins = sorted({origin_token(entry["recording_group_id"]) for entry in component})
+        identifier = "recording-" + hashlib.sha256("\n".join(origins).encode()).hexdigest()
+        for entry in component:
+            entry["group_id"] = identifier
+    return result
+
+
+def _config_recording_inventory(config, entries):
+    relaxed = config.get("allow_same_session", False)
+    values = [_recording_inventory(entry, allow_same_session=True) if relaxed else _recording_inventory(entry) for entry in entries]
+    return _effective_recording_groups(values, relaxed)
 
 
 def _assign_groups(membership, classes, seed, training_only=False):
@@ -384,7 +485,15 @@ def _assign_groups(membership, classes, seed, training_only=False):
 
 
 def dataset_readiness(config: dict) -> dict:
-    """Cheap dataset preflight. Counts metadata only; no complete IQ loads or training."""
+    """Metadata preflight; opt-in recording holdout also streams identity hashes.
+
+    No numeric IQ dataset or model is loaded. The strict default never reads
+    sample bytes here; relaxed session policy hashes bytes without using them
+    as training/validation/test features.
+    """
+    if type(config.get("allow_same_session", False)) is not bool:
+        return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
+                "errors": ["allow_same_session muss true oder false sein."], "warnings": [], "group_count": 0}
     if isinstance(config.get("optimization"), dict) and config["optimization"].get("enabled") is True:
         return _optimization_readiness(config)
     mode = config.get("evaluation_mode", "independent")
@@ -395,6 +504,8 @@ def dataset_readiness(config: dict) -> dict:
         errors.append("Auswertungsmodus muss independent oder training_only sein.")
         return result
     source = config.get("source", "recordings" if config.get("recordings") else "synthetic")
+    relaxed = source == "recordings" and config.get("allow_same_session", False)
+    result.update(_split_metadata({**config, "source": source}))
     lengths = config.get("segment_lengths", [config.get("segment_length", 4096)])
     if not isinstance(lengths, list) or not lengths or any(type(x) is not int or not 256 <= x <= 65536 for x in lengths):
         errors.append("Segmentlängen müssen ganze Zahlen zwischen 256 und 65536 sein.")
@@ -429,6 +540,26 @@ def dataset_readiness(config: dict) -> dict:
     if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_RECORDINGS:
         errors.append(f"1–{MAX_RECORDINGS} Aufnahmen auswählen.")
         return result
+    if relaxed:
+        warnings.extend(["Gleiche Sitzung erlaubt: Training, Validierung und Test trennen ursprüngliche Aufnahmen und deklarierte Ableitungen, nicht notwendigerweise unabhängige Aufnahmesitzungen.",
+                         "Duplikatprüfung liest IQ-Dateien für SHA-256 bei einem Cachemiss; der begrenzte Stat-Cache gilt je Prozess. Große Dateien und neue Trainingsworker können die Vorprüfung verlängern.",
+                         "Extern erzeugte überlappende Ausschnitte ohne Ursprungsmetadaten sind nicht allgemein erkennbar; ihre Herkunft muss korrekt angegeben werden."])
+    inspected, inventory_errors = {}, {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not isinstance(entry.get("label"), str) or not entry.get("label") or len(entry["label"]) > 120 or entry.get("verified") is False:
+            continue
+        try:
+            inspected[index] = _recording_inventory(entry, allow_same_session=True) if relaxed else _recording_inventory(entry)
+        except (OSError, ValueError, UnicodeError) as exc:
+            inventory_errors[index] = exc
+    effective = _effective_recording_groups(list(inspected.values()), relaxed)
+    inspected = dict(zip(inspected, effective))
+    result["recording_group_memberships"] = [
+        {"recording_id": str(info.get("id") or Path(info["metadata_path"]).stem),
+         "session_group_id": str(info.get("session_group_id", info["group_id"])),
+         "recording_group_id": str(info.get("recording_group_id") or info.get("id") or info["group_id"]),
+         "effective_group_id": info["group_id"]}
+        for info in effective]
     stats, membership = {}, {}
     group_segment_counts = {candidate_length: {} for candidate_length in set(lengths)}
     samples_cap = config.get("samples_per_class", 64)
@@ -442,10 +573,12 @@ def dataset_readiness(config: dict) -> dict:
         if not isinstance(label, str) or not label or len(label) > 120 or entry.get("verified") is False:
             errors.append(f"Aufnahme {index + 1}: bestätigtes Klassenlabel fehlt.")
             continue
-        state = stats.setdefault(label, {"recordings": 0, "groups": set(), "segments": 0, "usable_segments": 0})
+        state = stats.setdefault(label, {"recordings": 0, "groups": set(), "session_groups": set(), "segments": 0, "usable_segments": 0})
         state["recordings"] += 1
         try:
-            info = _recording_inventory(entry)
+            if index in inventory_errors:
+                raise inventory_errors[index]
+            info = inspected[index]
             integrity = info.get("integrity")
             if isinstance(integrity, dict):
                 gap_count = integrity.get("reported_gaps", 0)
@@ -463,6 +596,7 @@ def dataset_readiness(config: dict) -> dict:
                 errors.append(f"{label}, Aufnahme {index + 1}: {count} Samples sind kürzer als das gewählte Segment ({length} Samples). Kürzeres Segment wählen oder länger aufnehmen.")
                 continue
             state["groups"].add(info["group_id"])
+            state["session_groups"].add(info.get("session_group_id", info["group_id"]))
             membership.setdefault(info["group_id"], set()).add(label)
             for candidate_length, per_group in group_segment_counts.items():
                 used_samples = min(count, 4_194_304, candidate_length * samples_cap)
@@ -478,11 +612,14 @@ def dataset_readiness(config: dict) -> dict:
         count = len(state["groups"])
         ready = count >= required and state["segments"] > 0
         result["classes"].append({"label": label, "recordings": state["recordings"], "groups": count,
+                                  "session_groups": len(state["session_groups"]),
                                   "segments": state["segments"], "usable_segments": state["usable_segments"], "required_groups": required, "ready": ready})
         if not ready:
-            remedy = "Weitere getrennte Aufnahmesitzungen ergänzen oder ausdrücklich „Nur trainieren“ ohne Genauigkeitsbewertung wählen." if mode == "independent" else "Mindestens eine lesbare, ausreichend lange Aufnahme dieser Klasse ergänzen."
+            remedy = ("Weitere getrennte ursprüngliche Aufnahmen ergänzen; Clips/Kopien derselben Aufnahme zählen gemeinsam." if relaxed else
+                      "Weitere getrennte Aufnahmesitzungen ergänzen oder ausdrücklich „Nur trainieren“ ohne Genauigkeitsbewertung wählen.") if mode == "independent" else "Mindestens eine lesbare, ausreichend lange Aufnahme dieser Klasse ergänzen."
             errors.append(f"{label}: {state['recordings']} Aufnahmen, {count} unabhängige Aufnahmegruppen, {state['segments']} vollständige Segmente. Für {'Training, Validierung und Test' if mode == 'independent' else 'das Training'} sind {required} Aufnahmegruppen je Klasse erforderlich. {remedy}")
     result["group_count"] = len(membership)
+    result["session_group_count"] = len(set().union(*(state["session_groups"] for state in stats.values()))) if stats else 0
     if retained_samples > 16_777_216:
         errors.append("Aufnahmedatensatz überschreitet das 128-MiB-IQ-Budget; weniger Aufnahmen oder Segmente wählen.")
     if not errors:
@@ -498,7 +635,7 @@ def dataset_readiness(config: dict) -> dict:
                         errors.append(f"{label}: {count} Segmente bei {candidate_length} Samples pro Segment; maximal {MAX_SEGMENTS_PER_SPLIT} je Split. Weniger Aufnahmen oder Segmente pro Datei auswählen oder eine größere Segmentlänge wählen.")
         except ValueError as exc:
             errors.append(str(exc))
-    if mode == "independent" and any(state["recordings"] > len(state["groups"]) for state in stats.values()):
+    if mode == "independent" and not relaxed and any(state["recordings"] > len(state["groups"]) for state in stats.values()):
         warnings.append("Mehrere Ausschnitte derselben Aufnahmesitzung zählen gemeinsam als eine unabhängige Gruppe.")
     result["ready"] = not errors
     return result
@@ -610,7 +747,7 @@ def _recording_groups(config, length, include_test=True, anchor_length=None, onl
     if len(items) > MAX_RECORDINGS:
         raise ValueError(f"Maximal {MAX_RECORDINGS} Aufnahmen pro Experiment; größere Datensätze in getrennten Experimenten prüfen.")
     classes = config["classes"]
-    eligible = [_recording_inventory(x) for x in items if x.get("label") in classes and x.get("verified") is not False]
+    eligible = _config_recording_inventory(config, [x for x in items if x.get("label") in classes and x.get("verified") is not False])
     training_only = config.get("evaluation_mode") == "training_only"
     membership = {}
     for entry in eligible:
@@ -646,6 +783,7 @@ def _recording_groups(config, length, include_test=True, anchor_length=None, onl
         rate = float(metadata.get("global", {}).get("core:sample_rate", metadata.get("sample_rate", config["sample_rate"])))
         for start in range(0, len(x) - anchor + 1, anchor):
             groups[split].append({"iq": x[start:start + length].copy(), "label": classes.index(label), "sample_rate": rate, "group_id": group_id,
+                                  "session_group_id": entry.get("session_group_id", group_id), "recording_group_id": entry.get("recording_group_id"),
                                   "sample_start": start, "source_window_samples": anchor})
     for split, entries in groups.items():
         if training_only and split != "train":
@@ -670,7 +808,7 @@ def _planned_split_groups(config):
                 seed = config["seed"] + 100_000 * CLASSES.index(label) + index * 127
                 groups[split].append(f"synthetic-{label}-{seed}")
         return {key: sorted(value) for key, value in groups.items()}
-    inventory = [_recording_inventory(entry) for entry in config["recordings"] if entry.get("verified") is not False]
+    inventory = _config_recording_inventory(config, [entry for entry in config["recordings"] if entry.get("verified") is not False])
     membership = {}
     for entry in inventory:
         membership.setdefault(entry["group_id"], set()).add(entry["label"])
@@ -681,6 +819,7 @@ def _planned_split_groups(config):
 
 def _data_usage(groups):
     return {split: {"segments": len(entries), "groups": len({entry["group_id"] for entry in entries}),
+                    "session_groups": len({entry.get("session_group_id", entry["group_id"]) for entry in entries}),
                     "signal_seconds": float(sum(len(entry["iq"]) / entry["sample_rate"] for entry in entries)),
                     "reference_window_seconds": float(sum(entry.get("source_window_samples", len(entry["iq"])) / entry["sample_rate"] for entry in entries)),
                     "sample_rates": sorted({float(entry["sample_rate"]) for entry in entries})}
@@ -1159,6 +1298,7 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
                     "source": c["source"], "weights_file": "weights.pt" if neural else "weights.npz", "device_trained": device,
                     "inference_device": "cpu",
                     "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
+                    **_split_metadata(c),
                     "test_evaluation_available": bool(_evaluate_test and not training_only),
                     "evaluation_scope": "training_only" if training_only else "validation_and_test" if _evaluate_test else "validation_only",
                     "validation_status": "unvalidated" if training_only else "evaluated",
@@ -1292,10 +1432,12 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
     safe_config["recording_groups"] = [str(x.get("group_id") or x.get("id") or "") for x in c.get("recordings", [])]
     report = {"schema_version": 1, "source": c["source"], "synthetic": c["source"] == "synthetic", "config": safe_config,
               "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
+              **_split_metadata(c),
               "test_evaluation_available": bool(_evaluate_test and not training_only),
               "evaluation_scope": "training_only" if training_only else "validation_and_test" if _evaluate_test else "validation_only",
               "final_test_evaluations": int(_evaluate_test and not training_only),
               "validation_status": "unvalidated" if training_only else "evaluated", "readiness": readiness,
+              "recording_group_memberships": readiness.get("recording_group_memberships", []),
               "topology": topology, "model_path": best["model_path"], "metrics": summary, "hardware": hardware, "benchmark": benchmark,
               "score": best["score"], "score_definition": score_definition(),
               "training_execution": best["training_execution"], "phase_timings": best["phase_timings"],
@@ -1320,6 +1462,11 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
                                  "Für eine unabhängige Auswertung getrennte Aufnahmesitzungen ergänzen und den Modus „Unabhängig auswerten“ wählen."] + readiness["warnings"]
     elif not _evaluate_test:
         report["limitations"].insert(0, "Suchversuch: nur Training und Validierung. Testdaten wurden weder gelesen noch ausgewertet; Finaltestmetriken bleiben unbekannt.")
+    if c["source"] == "recordings" and c["allow_same_session"]:
+        report["limitations"].extend([
+            "Aufnahme-Holdout mit erlaubter gleicher Sitzung: Ursprungsaufnahmen, deklarierte Ableitungen und exakte Dateikopien bleiben in einem Split. Dies ist kein Nachweis unabhängiger Aufnahmesitzungen.",
+            "Die Vorprüfung liest vollständige Dateibytes für Duplikat-Hashes, auch bei später zurückgehaltenen Quellen; Test-Signalmerkmale und Testqualität bleiben bis zur endgültigen Modellwahl ungenutzt.",
+            "Extern erzeugte überlappende Ausschnitte ohne korrekte Ursprungsmetadaten sind nicht allgemein erkennbar."])
     _json(out / "report.json", report)
     _json(Path(best["model_path"]) / "report.json", report)
     emit(1., "complete", "Modell trainiert und gespeichert; unabhängige Auswertung steht aus" if training_only else "Experiment ausgewertet; Modell und Konfiguration gespeichert")
@@ -1436,7 +1583,8 @@ def _run_optimization(config, output_dir, progress=None):
     output.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     deadline = time.monotonic() + settings["timeout_seconds"] if settings["timeout_seconds"] else None
-    state = {**settings, "schema_version": 1, "status": "running", "seed": config["seed"], "topology_id": topology["id"],
+    state = {**settings, **_split_metadata(config), "schema_version": 1, "status": "running", "seed": config["seed"], "topology_id": topology["id"],
+             "recording_group_memberships": readiness.get("recording_group_memberships", []),
              "reference_window_samples": reference_length, "split_groups": split_groups,
              "excluded_segment_lengths": readiness["optimization"]["excluded_segment_lengths"],
              "planned_trials": len(plan), "trials": [], "best_trial": None, "best_config": None,

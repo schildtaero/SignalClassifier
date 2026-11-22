@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import io
 import json
 import logging
@@ -21,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -34,6 +35,7 @@ from .receivers import CaptureManager
 from .sigmf import read_recording
 from .telemetry import ResourceSummary, ResourceTelemetry
 from .surveillance import ScanController, build_scan_plan
+from .spectrum_stream import SpectrumHub
 
 LOG = logging.getLogger(__name__)
 IDENTIFIER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
@@ -173,6 +175,7 @@ class Runtime:
             lambda: (self.store.get("active_model", "main") or {}).get("model_id"),
             lambda frequency: labels.suggest(self.store, frequency))
         self.scanner = ScanController(self.capture, on_window=self.analysis.finish_window)
+        self.spectrum_stream = SpectrumHub(self.capture)
 
     def resource_sample(self, sample):
         with self.lock:
@@ -558,6 +561,8 @@ class Runtime:
             "inventory_sha256": experiment_log.canonical_sha256(finite_json(inventory)),
             "snapshot_hash_format": "SHA-256 of UTF-8 JSON, sorted keys, ensure_ascii=false, separators=(',', ':'), no NaN; independent of ZIP JSON whitespace.",
             "recording_count": len(inventory),
+            "same_session_consent": config.get("allow_same_session", False),
+            "partition_unit": "original_recording" if config.get("allow_same_session") else "origin_session",
             "references": [{"title": "SignalClassifier: Topologien und Bewertungsmethodik", "url": "https://github.com/schildtaero/SignalClassifier/blob/main/docs/topologien.md"},
                            {"title": "Condition Monitoring for Electric Aircraft Propulsion Systems", "url": "https://doi.org/10.25439/rmt.33772282",
                             "scope": "FB-LSTM/2D-CNN/5-CNN are documented RF adaptations, not exact reproductions of audio networks."}],
@@ -731,6 +736,7 @@ class Runtime:
 
     def close(self):
         self.closing = True
+        self.spectrum_stream.close()
         for event in self.cancel_events.values():
             event.set()
         self.scanner.stop()
@@ -759,6 +765,9 @@ def validate_experiment(config: dict, rt: Runtime) -> dict:
     value = {"source": "synthetic", "topology_id": "feature-lda", "seed": 42, "samples_per_class": 80,
              "segment_length": 2048, "snr_db": [0, 10, 20], "jitter": [0.0], "epochs": 5,
              "learning_rate": 0.001, "batch_size": 32, "device": "auto", "use_priors": False, "evaluation_mode": "independent", **config}
+    value.setdefault("allow_same_session", False)
+    if type(value["allow_same_session"]) is not bool:
+        raise ValueError("allow_same_session muss ein boolescher Wert sein")
     value["github_publication"] = publication.normalize_publication(value.get("github_publication"))
     if not isinstance(value.get("experiment_notes", ""), str) or len(value.get("experiment_notes", "")) > 12000:
         raise ValueError("Versuchsbeschreibung muss Text mit höchstens 12000 Zeichen sein")
@@ -806,6 +815,28 @@ def validate_experiment(config: dict, rt: Runtime) -> dict:
             raise ValueError("Aufnahmekennungen müssen Zeichenketten sein")
         recordings = []
         catalogue = {recording["id"]: recording for recording in rt.recordings()}
+        roots = {}
+
+        def recording_root(identifier, ancestors=()):
+            if identifier in roots:
+                return roots[identifier]
+            if identifier in ancestors or len(ancestors) >= 64:
+                raise ValueError("Zyklische oder zu tiefe Herkunftskette einer Aufnahme")
+            item = catalogue.get(identifier, {})
+            glob = item.get("metadata", {}).get("global", {})
+            origin = glob.get("sc:origin_recording_id") or glob.get("signalclassifier:origin_recording_id")
+            parent = glob.get("sc:parent_recording_id") or glob.get("signalclassifier:parent_recording_id")
+            if origin:
+                reference = str(origin).removeprefix("recording:")
+                root = (recording_root(reference, (*ancestors, identifier))
+                        if str(origin).startswith("recording:") and reference != identifier and reference in catalogue else str(origin))
+            elif parent:
+                root = recording_root(str(parent), (*ancestors, identifier))
+            else:
+                root = "recording:" + str(glob.get("sc:recording_id") or identifier)
+            roots[identifier] = root
+            return root
+
         for identifier in dict.fromkeys(ids):
             clean_id(identifier)
             if identifier not in catalogue:
@@ -820,6 +851,8 @@ def validate_experiment(config: dict, rt: Runtime) -> dict:
             global_meta = meta.get("global", {})
             group = global_meta.get("signalclassifier:group_id") or global_meta.get("sc:origin_group_id") or global_meta.get("signalclassifier:session_id") or global_meta.get("sc:session_id") or global_meta.get("signalclassifier:parent_recording_id") or recording.get("group_id") or identifier
             recordings.append({"path": str(path), "metadata_path": str(path), "label": label, "group_id": str(group), "id": identifier, "verified": True})
+            if value["allow_same_session"]:
+                recordings[-1]["recording_group_id"] = recording_root(identifier)
         value["recordings"] = recordings
     return ml.validate_experiment_config(value)
 
@@ -876,7 +909,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "counts": {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r, annotations, with_suggestions=False).get("annotation")) for r in recordings),
                        "experiments": runtime.store.count("experiment"), "models": runtime.store.count("model")},
             "active_experiment": runtime.store.get("experiment", runtime.active_experiment) if runtime.active_experiment else None,
-            "active_model": runtime.store.get("active_model", "main")})
+            "active_model": runtime.store.get("active_model", "main"),
+            "spectrum_stream": runtime.spectrum_stream.stats()})
 
     @app.get("/api/receiver/status")
     def receiver_status():
@@ -932,6 +966,69 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         snapshot["signal_classifications"] = finite_json(runtime.analysis.overlay(snapshot.get("receiver", {}).get("session_id")))
         snapshot["analysis_stats"] = finite_json({**runtime.analysis.stats, **runtime.analysis.signals.stats()})
         return finite_json(snapshot)
+
+    @app.get("/api/spectrum/frame")
+    def spectrum_frame(bins: int = 1024):
+        if bins != 1024:
+            raise ValueError("Die Liveanzeige unterstützt 1024 Spektralbins")
+        frame = runtime.capture.display_snapshot(max_bins=bins)
+        return finite_json({"type": "spectrum", "sequence": frame["frame_id"], "frame": frame})
+
+    @app.get("/api/spectrum/stream/status")
+    def spectrum_stream_status():
+        return runtime.spectrum_stream.stats()
+
+    @app.websocket("/api/spectrum/stream")
+    async def spectrum_socket(socket: WebSocket):
+        # HTTP middleware does not see WebSocket handshakes. Browser streams
+        # must originate from this app; local CLI clients may omit Origin.
+        from urllib.parse import urlsplit
+        origin = socket.headers.get("origin")
+        if origin is not None:
+            try:
+                parsed = urlsplit(origin)
+                valid_origin = parsed.scheme in ("http", "https") and parsed.netloc.casefold() == socket.headers.get("host", "").casefold()
+            except ValueError:
+                valid_origin = False
+            if not valid_origin:
+                await socket.close(code=1008, reason="Fremder Browser-Ursprung nicht erlaubt")
+                return
+        try:
+            fps = float(socket.query_params.get("max_fps", "15"))
+            bins = int(socket.query_params.get("bins", "1024"))
+            if not math.isfinite(fps) or not 1 <= fps <= 30 or bins != 1024:
+                raise ValueError()
+        except (ValueError, TypeError):
+            await socket.close(code=1008, reason="max_fps: 1–30; bins: 1024 erforderlich")
+            return
+        try:
+            subscriber = runtime.spectrum_stream.subscribe()
+        except ValueError:
+            await socket.close(code=1013, reason="Maximal vier Liveanzeigen gleichzeitig")
+            return
+        try:
+            await socket.accept()
+            sequence = -1
+            while not runtime.closing and not runtime.spectrum_stream.closed:
+                # A bounded wait uses a pool thread, not the event loop or the
+                # receiver lock. Slow clients only receive the newest frame.
+                frame = await asyncio.to_thread(runtime.spectrum_stream.wait_frame, subscriber, sequence, 1.)
+                if frame is None:
+                    if runtime.spectrum_stream.closed:
+                        break
+                    await asyncio.wait_for(socket.send_json({"type": "heartbeat", "sequence": sequence}), timeout=2.)
+                    continue
+                sequence, encoded = frame
+                await asyncio.wait_for(socket.send_text(encoded), timeout=2.)
+                await asyncio.sleep(1. / fps)
+        except (WebSocketDisconnect, asyncio.TimeoutError, OSError):
+            pass
+        finally:
+            runtime.spectrum_stream.unsubscribe(subscriber)
+            try:
+                await socket.close()
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                pass
 
     @app.get("/api/analysis")
     def analysis_status():
@@ -1107,10 +1204,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 raise ValueError("Nur einkanalige IQ-Aufnahmen werden unterstützt")
             global_meta["core:dataset"] = data_path.name
             global_meta["signalclassifier:imported_at"] = utcnow()
-            if not (global_meta.get("signalclassifier:session_id") or global_meta.get("sc:session_id")):
+            has_session = global_meta.get("signalclassifier:session_id") or global_meta.get("sc:session_id")
+            origin_recording = global_meta.get("sc:origin_recording_id") or global_meta.get("signalclassifier:origin_recording_id")
+            parent_recording = global_meta.get("sc:parent_recording_id") or global_meta.get("signalclassifier:parent_recording_id")
+            declared_recording = global_meta.get("sc:recording_id")
+            if not has_session or not (origin_recording or parent_recording or declared_recording):
                 with data_path.open("rb") as source_file:
                     fingerprint = hashlib.file_digest(source_file, "sha256").hexdigest()
+            if not has_session:
                 global_meta["signalclassifier:session_id"] = "sha256-" + fingerprint
+            if not origin_recording and not parent_recording:
+                global_meta["sc:origin_recording_id"] = "recording:" + str(declared_recording or "sha256-" + fingerprint)
             # Validate bounded data against the reader before committing files.
             meta_path.write_text(json.dumps(doc, ensure_ascii=False, allow_nan=False), encoding="utf-8")
             read_recording(meta_path, count=1024)

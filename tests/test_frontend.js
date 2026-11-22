@@ -33,7 +33,8 @@ const source = original.replace(
   matchedSignalClassifications, analysisExpertSelection, analysisSettingsPayload, analysisCoverageSummary,
   analysisPredictionExplanation, presentChildren, replaceContent, analysisLabel, analysisScoreKind,
   selectedDeletionPlan, normalizeGithubPublication, githubPublicationURL, publicationStateLabel,
-  classificationEnabled, currentClassificationEnabled, classificationFormValue, detectionTone, detectionModulationLabel
+  classificationEnabled, currentClassificationEnabled, classificationFormValue, detectionTone, detectionModulationLabel,
+  spectrumContext, mergeSpectrumFrame, spectrumStreamMessage, streamBackoff, waterfallPixelRows
 };`,
 );
 const sandbox = {
@@ -49,6 +50,28 @@ const sandbox = {
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: sourcePath });
 const f = sandbox.helpers;
+const mergeFrame = { session_id: "s1", source_epoch: "s1:2", source: "synthetic", sample_rate: 256000, center_frequency_hz: 100e6, timestamp: "2026-11-22T10:00:02Z", frequencies_hz: [1,2], power_dbfs: [-50,-30] };
+const modelMetadata = { ...mergeFrame, timestamp: "2026-11-22T10:00:01Z", classification: { label: "AM" }, classification_comparison: [{model_id:"one"}], signal_classifications: [{channel_id:"one"}] };
+assert.equal(f.mergeSpectrumFrame(mergeFrame,modelMetadata).classification.label,"AM");
+for (const changed of [{ session_id:"other" },{source_epoch:"s1:1"},{center_frequency_hz:99e6},{sample_rate:1e6},{timestamp:"2026-11-22T09:59:58Z"}]) {
+ const merged=f.mergeSpectrumFrame(mergeFrame,{...modelMetadata,...changed});
+ assert.equal(merged.classification,null);assert.equal(merged.signal_classifications.length,0);
+ assert.equal(merged.timestamp,mergeFrame.timestamp,"Metadata never overwrites newer RF data");
+}
+const disabledMerge=f.mergeSpectrumFrame({...mergeFrame,classification_enabled:false},modelMetadata);
+assert.equal(disabledMerge.classification.status,"disabled");assert.equal(disabledMerge.classification_comparison.length,0);
+assert.equal(f.spectrumStreamMessage({type:"spectrum",sequence:2,frame:mergeFrame},1).timestamp,mergeFrame.timestamp);
+for(const bad of [{type:"spectrum",sequence:1,frame:mergeFrame},{type:"spectrum",sequence:NaN,frame:mergeFrame},{type:"heartbeat",sequence:3},{type:"spectrum",sequence:3,frame:{frequencies_hz:[1,2],power_dbfs:[1]}}]) assert.equal(f.spectrumStreamMessage(bad,1),null);
+assert.deepEqual([1,2,3,4,5,20].map(n=>f.streamBackoff(n)),[1000,2000,4000,8000,10000,10000]);
+
+const pixelGeometry={top:20,plotHeight:10,windowMs:10000,latestTime:100000};
+const pixelSources=[{id:"a",timeMs:99900,duration:.02,power:[-40,null],detections:[]},{id:"b",timeMs:99800,duration:.02,power:[-20,-60],detections:[]},{id:"c",timeMs:95000,duration:.02,power:[-50,-80],detections:[]}];
+const pixelCache=new Map(),pixels=f.waterfallPixelRows(pixelSources,pixelGeometry,pixelCache);
+assert.equal(pixels.length,2,"Unobserved timepixel groups stay absent, never interpolated");
+assert.equal(pixels[0].power[0],-20,"Timepixel uses peak maximum only for display");
+assert.equal(pixels[0].timeMs,99900,"Aggregated row keeps an actual observation timestamp");
+assert.equal(f.waterfallPixelRows(pixelSources,pixelGeometry,pixelCache)[0],pixels[0],"Unchanged timepixel raster is reused");
+assert.deepEqual(Array.from(pixelSources[0].power),[-40,null],"Grouping never changes raw observations");
 const labels = {
   waveform_family: [
     { id: "multicarrier", name: "Mehrträgerartig" },
@@ -278,6 +301,10 @@ assert.equal(
   1,
   "Retuning/rate changes reset incompatible waterfall history",
 );
+f.addWaterfall({ ...snapshot, session_id: "epoch-session", source_epoch: "epoch-session:0" });
+f.addWaterfall({ ...snapshot, session_id: "epoch-session", source_epoch: "epoch-session:1", timestamp: new Date(epoch + 1).toISOString() });
+assert.equal(f.state.waterfall.length, 1, "A new RF epoch resets the history even after an unobserved A→B→A frequency return");
+assert.notEqual(f.frameFromSnapshot({ ...snapshot, source_epoch: "epoch-session:0" }).key, f.frameFromSnapshot({ ...snapshot, source_epoch: "epoch-session:1" }).key);
 for (let i = 0; i < 250; i++)
   f.addWaterfall({
     ...snapshot,
@@ -285,9 +312,15 @@ for (let i = 0; i < 250; i++)
   });
 assert.equal(
   f.state.waterfall.length,
-  240,
-  "History is bounded on laptop memory",
+  250,
+  "History retains actual samples beyond the old 240-frame polling cap",
 );
+const rowTemplate = f.state.waterfall[0];
+f.state.waterfall = Array.from({length:12000},(_,i)=>({...rowTemplate,id:`stored-${i}`,timeMs:epoch+600000-i*40}));
+f.addWaterfall({...snapshot,timestamp:new Date(epoch+600001).toISOString()});
+assert.equal(f.state.waterfall.length,12000,"History is bounded independently of streaming rate");
+f.addWaterfall({...snapshot,timestamp:new Date(epoch+1200002).toISOString()});
+assert.equal(f.state.waterfall.length,1,"Samples older than600seconds are removed, not stretched across the gap");
 const frame = {
   ...f.state.waterfall[0],
   detections: [...detections, ...detections],
@@ -484,6 +517,11 @@ const prepared = f.prepareExperimentDraft(
   ["available-a"],
   false,
 );
+for (const consent of [true, false]) {
+  assert.equal(f.prepareExperimentDraft({ ...draft, allow_same_session: consent }, catalog, ["available-a"], false).config.allow_same_session, consent,
+    "Explicit same-session consent survives draft validation");
+}
+assert.throws(() => f.prepareExperimentDraft({ ...draft, allow_same_session: "true" }, catalog, ["available-a"], false), /boolescher/);
 assert.deepEqual(Array.from(prepared.recordingIds), ["available-a"]);
 assert.deepEqual(Array.from(prepared.missingRecordingIds), ["missing-b"]);
 assert.deepEqual(

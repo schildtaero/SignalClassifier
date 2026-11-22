@@ -197,7 +197,7 @@ class _Projection:
     def config(self, value):
         value = _obj(value)
         out = _numbers(value, _CONFIG_NUMBERS)
-        out.update(_bools(value, ("include_clean", "use_priors")))
+        out.update(_bools(value, ("include_clean", "use_priors", "allow_same_session")))
         out["source"] = _enum(value.get("source"), _SOURCES)
         out["evaluation_mode"] = _enum(value.get("evaluation_mode"), {"independent", "training_only"})
         out["device"] = _enum(value.get("device"), {"auto", "cpu", "cuda"})
@@ -209,6 +209,21 @@ class _Projection:
         execution = _obj(value.get("execution"))
         out["execution"] = {**_numbers(execution, _EXECUTION_NUMBERS), "mode": _enum(execution.get("mode"), {"auto", "serial", "parallel"})}
         return out
+
+    def split_policy(self, config):
+        config = _obj(config)
+        if config.get("evaluation_mode") == "training_only":
+            return {"split_policy": "training_only", "same_session_consent": config.get("allow_same_session") is True,
+                    "session_independent": None, "recording_disjoint_required": False, "limitation": "no_quality_evaluation"}
+        if config.get("source") == "synthetic":
+            return {"split_policy": "synthetic_origin_holdout", "same_session_consent": False,
+                    "session_independent": None, "recording_disjoint_required": True, "limitation": "synthetic_signals_only"}
+        same_session = config.get("allow_same_session") is True
+        return {"split_policy": "recording_holdout_same_session_allowed" if same_session else "session_holdout",
+                "same_session_consent": same_session,
+                "session_independent": not same_session,
+                "recording_disjoint_required": True,
+                "limitation": "shared_session_conditions_may_inflate_quality" if same_session else None}
 
     def quality(self, value, allowed=True):
         if not allowed:
@@ -252,6 +267,13 @@ class _Projection:
         value = _obj(value)
         return {key: [self.alias("group", x) for x in self.bounded(value.get(key), 1000, "split_groups")]
                 for key in ("train", "validation", "test")}
+
+    def group_memberships(self, value):
+        return [{"recording_alias": self.alias("recording", row.get("recording_id")),
+                 "session_group_alias": self.alias("group", row.get("session_group_id")),
+                 "recording_group_alias": self.alias("group", row.get("recording_group_id")),
+                 "effective_group_alias": self.alias("group", row.get("effective_group_id"))}
+                for item in self.bounded(value, 1000, "recording_group_memberships") if (row := _obj(item))]
 
     def usage(self, value):
         out = {}
@@ -334,7 +356,9 @@ class _Projection:
         return {"public_id": self.model_id(ident), "topology": {"public_id": self.model_id(ident), "family": _enum(topology.get("family"), _FAMILIES),
                     "input": _enum(topology.get("input"), {"features", "feature_sequence", "iq", "spectrogram"}),
                     "parameters": _numbers(topology.get("parameters"), {"width", "depth", "kernel", "heads", "dropout"})},
-                "config": self.config(config), "classes": self.classes(report.get("classes", config.get("classes"))),
+                "config": self.config(config), "validation_independence": self.split_policy(config),
+                "recording_group_memberships": self.group_memberships(report.get("recording_group_memberships")),
+                "classes": self.classes(report.get("classes", config.get("classes"))),
                 "evaluation_scope": _enum(report.get("evaluation_scope"), {"validation_only", "validation_and_test", "training_only"}),
                 **_bools(report, ("evaluation_available", "test_evaluation_available")),
                 "final_test_evaluations": _num(report.get("final_test_evaluations")),
@@ -473,7 +497,9 @@ def make_publication_package(experiment, dataset_inventory=None, events=None) ->
     views = _views(experiment); projection.omissions["models"] += max(0, len(views) - 64)
     data = {"schema_version": 1, "package_kind": "signalclassifier-paper-results", "run_alias": projection.alias("run", experiment.get("id")),
             "status": _enum(experiment.get("status"), _STATUS), "error_category": _error_category(experiment.get("error")),
-            "config": projection.config(config), "overall_comparison_available": bool(report.get("comparison")),
+            "config": projection.config(config), "validation_independence": projection.split_policy(config),
+            "recording_group_memberships": projection.group_memberships(report.get("recording_group_memberships")),
+            "overall_comparison_available": bool(report.get("comparison")),
             "models": [projection.model(row, config, optimization_only=partial) for row, partial in views[:64]],
             "software": _software(_obj(experiment.get("provenance")).get("software")),
             "hardware_at_queue": _hardware(_obj(experiment.get("provenance")).get("hardware_at_queue")),
@@ -494,6 +520,7 @@ def make_publication_package(experiment, dataset_inventory=None, events=None) ->
     for row in projection.bounded(dataset_inventory, 1000, "recordings"):
         row = _obj(row)
         inventory.append({"recording_alias": projection.alias("recording", row.get("id")), "group_alias": projection.alias("group", row.get("group_id")),
+                          "recording_group_alias": projection.alias("group", row.get("recording_group_id")),
                           "label": projection.label(row.get("label")), **_bools(row, ("verified", "synthetic")),
                           **_numbers(row, {"sample_rate", "center_frequency_hz", "sample_count", "duration_seconds", "data_bytes"}),
                           "declared_source": _enum(row.get("source"), _SOURCES),

@@ -290,6 +290,31 @@
                   />Wasserfall</label
                 >
               </div>
+              <div class="spectrum-stream-controls">
+                <span
+                  id="spectrum-stream-status"
+                  class="pill spectrum-stream-status"
+                  role="status"
+                  >Verbindung wird vorbereitet</span
+                >
+                <label class="spectrum-stream-target">
+                  Bildrate (Soll)
+                  <select
+                    id="spectrum-stream-fps"
+                    aria-label="Zielbildrate"
+                    aria-describedby="spectrum-stream-detail"
+                  >
+                    <option value="8">8 Bilder/s</option>
+                    <option value="15" selected>15 Bilder/s</option>
+                    <option value="20">20 Bilder/s</option>
+                  </select>
+                </label>
+                <p id="spectrum-stream-detail" class="spectrum-stream-detail">
+                  Verbindungsart, gemessene Stichprobenrate und verworfene
+                  Frames sind noch unbekannt. Die Sollrate erzeugt keine
+                  zusätzlichen RF-Messungen.
+                </p>
+              </div>
               <div class="plot-stage">
                 <canvas
                   id="spectrum-canvas"
@@ -408,8 +433,12 @@
                   >
                 </div>
                 <p class="waterfall-sampling-note" id="waterfall-sampling-note">
-                  Jede Messzeile ist eine empfangene Spektrum-Stichprobe. Freie
-                  Zeitbereiche bleiben leer. Gestrichelte Rahmen fassen
+                  Höchstens 600 Sekunden beziehungsweise 12.000 echte
+                  Spektrum-Stichproben bleiben gespeichert. Für die Anzeige
+                  werden Stichproben je Zeitpixel durch Farbmaxima gebündelt;
+                  Frequenzspalten verwenden lineare Leistungsmittel. Dies sind
+                  Anzeigewerte, keine zusätzlichen Messungen. Unbeobachtete
+                  Zeitpixel bleiben leer. Gestrichelte Rahmen fassen
                   beobachtete Stichproben zusammen; sie belegen keine
                   durchgehende Signaldauer. Zeitmarken beruhen auf der
                   Host-Empfangszeit und sind ohne bestätigten
@@ -609,7 +638,7 @@
                           min="1"
                           max="30"
                           step="1"
-                          value="8"
+                          value="15"
                           required
                       /></label>
                       <label
@@ -1793,13 +1822,28 @@
                         id="experiment-evaluation-mode"
                       >
                         <option value="independent">
-                          Unabhängig bewerten · 3 Sitzungen je Klasse
+                          Bewerten · Training / Validierung / Test
                         </option>
                         <option value="training_only">
                           Nur trainieren · ohne unabhängige Bewertung
                         </option>
                       </select></label
                     >
+                    <label class="checkbox">
+                      <input type="checkbox" name="allow_same_session" id="experiment-allow-same-session" />
+                      Ich akzeptiere Aufnahmen derselben Sitzung in Training,
+                      Validierung und Test.
+                    </label>
+                    <p class="field-help">
+                      Bei aktivierter Checkbox werden unterschiedliche ursprüngliche
+                      Aufnahmen aufgeteilt. Dieselbe Aufnahme und ihre abgeleiteten
+                      Ausschnitte bleiben zusammen. Gemeinsame Empfangsbedingungen
+                      können die Genauigkeit zu günstig erscheinen lassen; diese
+                      Einschränkung wird im Bericht gespeichert. Ausgeschaltet
+                      bleiben ganze Sitzungen getrennt. Die Vorprüfung prüft
+                      zusätzlich Dateiduplikate; bei großen Datensätzen kann
+                      dies dauern.
+                    </p>
                     <span class="field-label"
                       >Bestätigte Aufnahmen auswählen</span
                     >
@@ -1830,7 +1874,9 @@
                       Unabhängige Bewertung benötigt je Klasse mindestens drei
                       eigenständige Aufnahmesitzungen. Mehrere Clips derselben
                       Sitzung zählen gemeinsam. „Nur trainieren“ erlaubt eine
-                      Sitzung je Klasse und liefert keine Testgenauigkeit.
+                      Sitzung je Klasse und liefert keine Testgenauigkeit. Mit
+                      der Zustimmung oben genügen drei ursprüngliche Aufnahmen
+                      je Klasse, auch aus derselben Sitzung.
                     </p>
                   </div>
                   <div class="form-pair">
@@ -2384,6 +2430,12 @@
                   aria-label="Publikation und Paper-Daten"
                   hidden
                 ></div>
+                <p id="experiment-split-limitation" class="field-help" hidden>
+                  Bewertung mit getrennten Aufnahmen derselben Sitzung zugelassen:
+                  Gemeinsame Empfangsbedingungen können die gemessene Genauigkeit
+                  begünstigen. Die Übertragbarkeit auf neue Sitzungen ist damit
+                  nicht nachgewiesen.
+                </p>
                 <div id="experiment-result-body" hidden></div>
               </article>
             </div>

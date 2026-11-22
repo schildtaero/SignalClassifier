@@ -15,7 +15,7 @@ done
 python_cmd="${SIGNALCLASSIFIER_PYTHON:-python3}"
 if [[ "$mode" == check ]]; then
   if [[ -x .venv/bin/python ]]; then python_cmd=.venv/bin/python; fi
-  "$python_cmd" -c 'import sys; import numpy, scipy, fastapi, uvicorn, multipart; print("Python", sys.version.split()[0], "· Kernabhängigkeiten vorhanden")'
+  "$python_cmd" -c 'import sys; import numpy, scipy, fastapi, uvicorn, websockets, multipart, psutil; print("Python", sys.version.split()[0], "· Kernabhängigkeiten vorhanden")'
   exit
 fi
 if ! "$python_cmd" -c 'import sys; assert sys.version_info >= (3,11)' 2>/dev/null; then

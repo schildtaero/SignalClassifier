@@ -91,7 +91,7 @@ def validate_config(config: dict) -> dict:
     result["block_size"] = int(_number(result, "block_size", 131072, 4096, 1048576))
     result["minimum_channel_bandwidth_hz"] = _number(result, "minimum_channel_bandwidth_hz", 12500, 100, 20000000)
     result["merge_gap_hz"] = _number(result, "merge_gap_hz", 3000, 0, 1000000)
-    result["spectrum_refresh_hz"] = _number(result, "spectrum_refresh_hz", 8, 1, 30)
+    result["spectrum_refresh_hz"] = _number(result, "spectrum_refresh_hz", 15, 1, 30)
     result["detection_interval_seconds"] = _number(result, "detection_interval_seconds", 0, 0, 1)
     result["max_channels"] = int(_number(result, "max_channels", 8, 1, 8))
     analysis_limit = _number(result, "analysis_max_channels", 8, 1, 16)
@@ -211,11 +211,90 @@ class _Synthetic:
         pass
 
 
+def _resolve_replay_origin(path: Path, metadata: dict) -> tuple[str, dict]:
+    """Resolve old sibling-only parent chains before assigning a new origin.
+
+    A declared origin remains usable after its original file was removed.
+    A missing legacy parent retains that parent's identity with an explicit
+    unresolved marker; it never creates a new independent origin. Conflicting
+    aliases, cycles and excessive depth fail closed.
+    Only metadata is inspected, without loading any ancestor IQ samples.
+    """
+    def value(global_meta, keys):
+        values = [global_meta[key] for key in keys if key in global_meta and global_meta[key] is not None]
+        if not values:
+            return None
+        if any(not isinstance(item, str) or not 1 <= len(item) <= 256
+               or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in item) for item in values):
+            raise ValueError("Ungültige Herkunftskennung einer Replay-Aufnahme.")
+        if any(item != values[0] for item in values[1:]):
+            raise ValueError("Widersprüchliche Herkunftskennungen einer Replay-Aufnahme.")
+        return values[0]
+
+    def sibling_id(identifier):
+        if (not 1 <= len(identifier) <= 128 or not identifier[0].isascii() or not identifier[0].isalnum()
+                or ".." in identifier or any(not char.isascii() or not (char.isalnum() or char in "_.-") for char in identifier)):
+            raise ValueError("Ungültige Vorfahrenkennung einer Replay-Aufnahme; nur lokale Aufnahmekennungen sind zulässig.")
+        return identifier
+
+    folder = path.parent
+    current = path
+    visited = set()
+
+    def result(origin, method, unresolved=None):
+        resolution = {"resolved": unresolved is None, "method": method, "ancestor_hops": len(visited) - 1}
+        if unresolved is not None:
+            resolution.update(reason="missing_ancestor", unresolved_ancestor_id=unresolved)
+        return origin, resolution
+
+    for _ in range(65):
+        identifier = current.stem
+        if identifier in visited:
+            raise ValueError("Zyklische Herkunftskette einer Replay-Aufnahme.")
+        visited.add(identifier)
+        glob = metadata["global"]
+        origin = value(glob, ("sc:origin_recording_id", "signalclassifier:origin_recording_id"))
+        parent = value(glob, ("sc:parent_recording_id", "signalclassifier:parent_recording_id"))
+        if origin:
+            inherited = glob.get("sc:origin_recording_resolution")
+            inherited_incomplete = isinstance(inherited, dict) and inherited.get("resolved") is False
+            if not origin.startswith("recording:"):
+                return result(origin, "declared_origin", origin if inherited_incomplete else None)
+            reference = sibling_id(origin.removeprefix("recording:"))
+            candidate = folder / (reference + ".sigmf-meta")
+            # Earlier versions could declare an immediate ancestor as origin.
+            # Follow that alias when its file still exists, but retain a root
+            # declaration when the original is no longer in the local library.
+            if reference == identifier or not (candidate.exists() or candidate.is_symlink()):
+                return result(origin, "declared_origin", reference if inherited_incomplete else None)
+        elif parent:
+            reference = sibling_id(parent)
+            candidate = folder / (reference + ".sigmf-meta")
+            if not (candidate.exists() or candidate.is_symlink()):
+                return result("recording:" + reference, "legacy_parent_chain", reference)
+        else:
+            recording_id = value(glob, ("sc:recording_id",)) or identifier
+            return result("recording:" + sibling_id(recording_id), "sibling_metadata_chain")
+        if reference in visited:
+            raise ValueError("Zyklische Herkunftskette einer Replay-Aufnahme.")
+        if len(visited) > 64:
+            raise ValueError("Herkunftskette einer Replay-Aufnahme überschreitet 64 Vorfahrenschritte.")
+        try:
+            metadata = read_metadata(candidate)
+        except FileNotFoundError:
+            return result("recording:" + reference, "legacy_parent_chain", reference)
+        except (OSError, ValueError, TypeError) as exc:
+            raise ValueError(f"Vorfahre '{reference}' einer Replay-Aufnahme fehlt oder ist ungültig; Herkunft nicht auflösbar.") from exc
+        current = candidate
+    raise ValueError("Herkunftskette einer Replay-Aufnahme überschreitet 64 Vorfahrenschritte.")
+
+
 class _Replay:
     def __init__(self, config: dict):
         self.path = Path(config["recording_path"])
         self.metadata = read_metadata(self.path)
         self.info = recording_info(self.path)
+        self.info["origin_recording_id"], self.info["origin_recording_resolution"] = _resolve_replay_origin(self.path, self.metadata)
         self.sample_rate = self.info["sample_rate"]
         self.center_frequency = self.info["center_frequency_hz"]
         self.position = 0
@@ -480,6 +559,11 @@ class CaptureManager:
         self._analysis_extra_channelizers = 0
         self._ended_analysis_channels = deque(maxlen=32)
         self._ended_analysis_channels_evicted = 0
+        self._display_revision = -1
+        self._display_cache: dict[int, dict] = {}
+        self._display_snapshot_ref = self._snapshot
+        self._display_state: dict = {}
+        self._publish_display_locked()
 
     @staticmethod
     def _empty_performance():
@@ -491,7 +575,7 @@ class CaptureManager:
                 "overflows": 0, "gaps": 0, "actual_sample_rate": 0.0,
                 "capture_error": None, "processed_blocks": 0, "read_blocks": 0,
                 "source_samples_read": 0, "source_samples_processed": 0,
-                "detection_interval_seconds": 0.0, "publication_hz": 8.0,
+                "detection_interval_seconds": 0.0, "publication_hz": 15.0,
                 "reader_queue_enabled": False, "gap_free_verified": False, "stream_diagnostic": None}
 
     def start(self, config: dict) -> dict:
@@ -507,6 +591,7 @@ class CaptureManager:
             self._state = "starting"
             self._performance = self._empty_performance()
             self._started_at = None
+            self._session_id = ""
             self._analysis_buffers = []
             self._analysis_probe = None
             self._analysis_detected_channels = 0
@@ -516,13 +601,19 @@ class CaptureManager:
             self.latest_iq = np.empty(0, np.complex64)
             self.latest_sample_rate = 0.0
             self.latest_center_frequency = 0.0
+            self._samples = 0
+            self._bytes = 0
+            self._elapsed = 0.0
+            self._saved = []
             self._snapshot = {"frequencies_hz": [], "power_dbfs": [], "detections": [], "classification": None}
+            self._publish_display_locked()
             try:
                 factory = {"pluto": _Pluto, "rsp1a": _RSP1A, "recording": _Replay, "synthetic": _Synthetic}[config["source"]]
                 self._receiver = factory(config)
             except Exception as exc:
                 self._state = "error"
                 self._error = str(exc)
+                self._publish_display_locked()
                 raise RuntimeError(str(exc)) from exc
             self._data_provenance = _data_origin(config["source"],
                 self._receiver.info.get("metadata") if config["source"] == "recording" else None)
@@ -556,6 +647,7 @@ class CaptureManager:
             self._session_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:10]
             self._stop.clear()
             self._state = "running"
+            self._publish_display_locked()
             self._thread = threading.Thread(target=self._run, name="signalclassifier-capture", daemon=True)
             self._thread.start()
             return self.status()
@@ -567,12 +659,147 @@ class CaptureManager:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=6)
         with self._lock:
+            previous = (self._state, self._error)
             if thread is not None and thread.is_alive():
                 self._error = "Empfänger reagiert nicht auf Stop; Treiberverbindung prüfen. Kein weiterer Stream wird parallel gestartet."
                 self._state = "error"
             elif self._state == "running":
                 self._state = "stopped"
+            if previous != (self._state, self._error):
+                self._publish_display_locked()
             return self.status()
+
+    def _publish_display_locked(self, *, terminal=False):
+        """Freeze only small scalar context; projections/JSON never run here."""
+        self._display_revision += 1
+        self._display_snapshot_ref = self._snapshot
+        config_keys = ("source", "mode", "sample_rate", "center_frequency_hz", "gain_db", "threshold_db",
+                       "classification_enabled", "spectrum_refresh_hz", "block_size", "duration_seconds", "max_bytes",
+                       "max_channels", "analysis_max_channels", "minimum_channel_bandwidth_hz", "merge_gap_hz")
+        config = {key: self._config[key] for key in config_keys if key in self._config}
+        for key in ("sample_rate", "center_frequency_hz"):
+            if key in self._snapshot:
+                config[key] = self._snapshot[key]
+        busy = self._state in ("starting", "running") or any(
+            worker is not None and worker.is_alive() and not (terminal and worker is threading.current_thread())
+            for worker in (self._thread, self._reader_thread))
+        self._display_state = {"session_id": self._session_id, "source": self._config.get("source"),
+            "sample_rate": config.get("sample_rate"), "center_frequency_hz": config.get("center_frequency_hz"),
+            "synthetic": self._data_provenance["declared_source_synthetic"],
+            "classification_enabled": self._config.get("classification_enabled", True),
+            "data_provenance": {key: self._data_provenance.get(key) for key in
+                                ("transport_source", "origin_kind", "basis", "rf_origin_verified")},
+            "receiver": {"state": self._state, "running": self._state == "running", "busy": busy,
+                "source": self._config.get("source"), "mode": self._config.get("mode", "monitor"),
+                "session_id": self._session_id, "sample_rate": config.get("sample_rate"),
+                "center_frequency_hz": config.get("center_frequency_hz"), "config": config,
+                "classification_enabled": self._config.get("classification_enabled", True),
+                "synthetic": self._data_provenance["declared_source_synthetic"],
+                "error": str(self._error)[:1000] if self._error is not None else None, "reason": self._reason,
+                "started_at": self._started_at, "elapsed_seconds": self._elapsed, "samples": self._samples,
+                "bytes_written": self._bytes, "recordings_saved_count": len(self._saved),
+                "gap_free_verified": False, "hardware_verified": False,
+                "performance": {key: self._performance.get(key) for key in
+                    ("reader_ms", "processing_ms", "processing_rtf", "overflows", "gaps", "queue_high_water_blocks")}}}
+        self._display_cache.clear()
+
+    @staticmethod
+    def _project_display_frame(snapshot: dict, state: dict, max_bins: int) -> dict:
+        """Bounded peak projection of immutable published FFT data, outside locks."""
+        def number(value):
+            if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, bool):
+                return value.item() if isinstance(value, np.generic) and math.isfinite(value) else value if math.isfinite(value) else None
+            return None
+
+        def text(value, limit=200):
+            return value[:limit] if isinstance(value, str) else None
+
+        raw_frequencies = snapshot.get("frequencies_hz", ())
+        raw_power = snapshot.get("power_dbfs", ())
+        count = min(len(raw_frequencies), len(raw_power))
+        frequencies = np.asarray(raw_frequencies[:count], dtype=np.float64)
+        power = np.asarray(raw_power[:count], dtype=np.float64)
+        valid_frequencies, valid_power = np.isfinite(frequencies), np.isfinite(power)
+        output_count = min(count, max_bins)
+        if output_count:
+            edges = np.arange(output_count + 1, dtype=np.int64) * count // output_count
+            lows = np.minimum.reduceat(np.where(valid_frequencies, frequencies, np.inf), edges[:-1])
+            highs = np.maximum.reduceat(np.where(valid_frequencies, frequencies, -np.inf), edges[:-1])
+            peaks = np.maximum.reduceat(np.where(valid_power, power, -np.inf), edges[:-1])
+            projected_frequencies = tuple(float(low / 2 + high / 2) if math.isfinite(low) and math.isfinite(high) else None
+                                          for low, high in zip(lows, highs))
+            projected_power = tuple(float(value) if math.isfinite(value) else None for value in peaks)
+        else:
+            projected_frequencies, projected_power = (), ()
+        result = {key: number(snapshot.get(key)) for key in
+            ("noise_floor_dbfs", "threshold_db", "fft_size", "sample_index", "analysis_sample_count",
+             "analysis_sample_offset", "analysis_duration_seconds", "block_sample_count", "block_duration_seconds",
+             "active_channels", "detections_total", "detections_limit")}
+        result.update({key: text(snapshot.get(key)) for key in
+            ("timestamp", "analysis_timestamp", "block_received_at", "timestamp_source", "power_reference", "detection_note", "source_epoch")})
+        result.update(session_id=state["session_id"], source=state["source"],
+                      sample_rate=number(state["sample_rate"]), center_frequency_hz=number(state["center_frequency_hz"]),
+                      synthetic=state["synthetic"], declared_source_synthetic=state["synthetic"],
+                      classification_enabled=state["classification_enabled"], class_enabled=state["classification_enabled"],
+                      data_provenance=dict(state["data_provenance"]),
+                      rf_timestamp_verified=snapshot.get("rf_timestamp_verified") is True,
+                      frequencies_hz=projected_frequencies, power_dbfs=projected_power,
+                      original_bin_count=count, display_bin_count=output_count, bin_aggregation="peak_max_dbfs",
+                      display_invalid_bins=int(np.count_nonzero(~valid_frequencies | ~valid_power)),
+                      spectrum_frequency_min_hz=float(np.min(frequencies[valid_frequencies])) if valid_frequencies.any() else None,
+                      spectrum_frequency_max_hz=float(np.max(frequencies[valid_frequencies])) if valid_frequencies.any() else None)
+        result["spectrum_frame_id"] = (f"{state['session_id']}:{result['source_epoch']}:{result['center_frequency_hz']}:{result['sample_rate']}:"
+                                       f"{result['sample_index']}:{result['analysis_timestamp'] or result['timestamp']}" if count else None)
+        detection_numbers = ("frequency_hz", "center_frequency_hz", "frequency_min_hz", "frequency_max_hz",
+                             "bandwidth_hz", "peak_dbfs", "excess_db", "noise_floor_dbfs", "snr_db")
+        result["detections"] = tuple({**{key: number(item.get(key)) for key in detection_numbers},
+                                      "method": text(item.get("method"), 80)}
+                                     for item in snapshot.get("detections", ())[:16] if isinstance(item, dict))
+        channel = snapshot.get("classification_channel")
+        result["classification_channel"] = ({**{key: number(channel.get(key)) for key in
+            ("center_frequency_hz", "sample_rate", "bandwidth_hz", "selection_bandwidth_hz", "samples_buffered")},
+            "selection": text(channel.get("selection"), 80)} if isinstance(channel, dict) else None)
+        receiver = state["receiver"]
+        result["receiver"] = {key: value for key, value in receiver.items() if key not in ("config", "performance")}
+        result["receiver"]["config"] = {key: value if isinstance(value, (str, bool)) else number(value)
+                                          for key, value in receiver["config"].items()}
+        result["receiver"]["performance"] = {key: number(value) for key, value in receiver["performance"].items()}
+        for key in ("sample_rate", "center_frequency_hz", "elapsed_seconds", "samples", "bytes_written", "recordings_saved_count"):
+            result["receiver"][key] = number(result["receiver"].get(key))
+        return result
+
+    def display_snapshot(self, max_bins: int = 1024, since_frame_id: int | None = None) -> dict | None:
+        """Latest-only display data; never touches IQ, models, files or the DB.
+
+        frame_id is monotonic across capture restarts. spectrum_frame_id changes
+        only with the actual analyzed RF context/time, so status-only updates do
+        not imply another waterfall observation. FFT tuples are immutable and
+        shared with the bounded projection cache; small dictionaries are copied.
+        """
+        if isinstance(max_bins, bool) or not isinstance(max_bins, int) or not 1 <= max_bins <= 2048:
+            raise ValueError("max_bins muss zwischen 1 und 2048 liegen.")
+        if since_frame_id is not None and (isinstance(since_frame_id, bool) or not isinstance(since_frame_id, int) or since_frame_id < 0):
+            raise ValueError("since_frame_id muss eine nichtnegative Ganzzahl sein.")
+        with self._lock:
+            revision = self._display_revision
+            if since_frame_id == revision:
+                return None
+            cached = self._display_cache.get(max_bins)
+            snapshot, state = self._display_snapshot_ref, self._display_state
+        if cached is None:
+            cached = self._project_display_frame(snapshot, state, max_bins)
+            with self._lock:
+                if revision == self._display_revision:
+                    if len(self._display_cache) >= 2:
+                        self._display_cache.pop(next(iter(self._display_cache)))
+                    self._display_cache[max_bins] = cached
+        result = dict(cached, frame_id=revision, sequence=revision)
+        result["detections"] = [dict(item) for item in cached["detections"]]
+        result["classification_channel"] = dict(cached["classification_channel"]) if cached["classification_channel"] else None
+        result["data_provenance"] = dict(cached["data_provenance"])
+        receiver = cached["receiver"]
+        result["receiver"] = dict(receiver, config=dict(receiver["config"]), performance=dict(receiver["performance"]))
+        return result
 
     def status(self) -> dict:
         with self._lock:
@@ -727,6 +954,8 @@ class CaptureManager:
         if self._config["source"] == "recording":
             metadata["sc:parent_recording_id"] = Path(self._config["recording_path"]).stem
             metadata["signalclassifier:parent_recording_id"] = metadata["sc:parent_recording_id"]
+            metadata["sc:origin_recording_id"] = self._receiver.info["origin_recording_id"]
+            metadata["sc:origin_recording_resolution"] = dict(self._receiver.info["origin_recording_resolution"])
             origin_group = self._receiver.info["group_id"]
             metadata["sc:origin_group_id"] = origin_group
             metadata["signalclassifier:group_id"] = origin_group
@@ -737,6 +966,7 @@ class CaptureManager:
         if self._config.get("scan_id"):
             metadata["sc:scan_id"] = self._config["scan_id"]
         metadata.update(extras or {})
+        metadata.setdefault("sc:origin_recording_id", f"recording:{self._session_id}-{suffix}")
         return SigMFWriter(self.recordings_dir / f"{self._session_id}-{suffix}", rate, center, extra=metadata)
 
     def _finish_writer(self, writer: SigMFWriter, reason: str, source_stop: int | None = None):
@@ -790,6 +1020,7 @@ class CaptureManager:
                     classification_enabled=self._config.get("classification_enabled", True),
                     processing_rtf_mean=self._performance["processing_rtf_mean"],
                     **(self._capture_queue.metrics() if self._capture_queue else {}))
+            self._publish_display_locked()
 
     def _read_hardware(self, receiver):
         """Drain hardware independently of FFT/channelization/disk latency.
@@ -877,7 +1108,9 @@ class CaptureManager:
         last_center = receiver.center_frequency
         last_rate = receiver.sample_rate
         last_analysis_rf = -math.inf
-        last_publish_rf = -math.inf
+        next_analysis_rf = 0.0
+        next_publish_rf = 0.0
+        display_interval = 1 / self._config["spectrum_refresh_hz"]
         source_seconds = 0.0
         analysis = None
         analysis_position = 0
@@ -960,13 +1193,20 @@ class CaptureManager:
                     channels = []
                     display_channel = None
                     last_center, last_rate = center, sample_rate
-                interval = (self._config["detection_interval_seconds"] if self._config["mode"] == "energy"
-                            else 1 / self._config["spectrum_refresh_hz"])
-                analyzed_now = analysis is None or retuned or source_seconds - last_analysis_rf >= interval
+                energy_mode = self._config["mode"] == "energy"
+                interval = self._config["detection_interval_seconds"] if energy_mode else display_interval
+                analyzed_now = analysis is None or retuned or (source_seconds - last_analysis_rf >= interval
+                                                              if energy_mode else source_seconds >= next_analysis_rf)
                 if analyzed_now:
                     analysis = spectrum_and_detections(iq, sample_rate, center, self._config["threshold_db"],
                                                        merge_gap_hz=self._config["merge_gap_hz"])
                     last_analysis_rf = source_seconds
+                    if not energy_mode:
+                        # Keep a fixed RF-time cadence rather than resetting the
+                        # period to a late block. Skip missed ticks; never catch
+                        # up with several FFTs for the same input block.
+                        next_analysis_rf = (source_seconds + interval if retuned else next_analysis_rf
+                            + (math.floor(max(0.0, source_seconds - next_analysis_rf) / interval) + 1) * interval)
                     analysis_position = position
                     analysis_block_sample_count = len(iq)
                     analysis_received_at = received_at
@@ -1195,9 +1435,14 @@ class CaptureManager:
                                               "processing_rtf_mean": self._processing_seconds / self._rf_seconds,
                                               "source_samples_processed": position})
                     self._performance["processed_blocks"] += 1
-                    if source_seconds - last_publish_rf >= 1 / self._config["spectrum_refresh_hz"] or retuned:
+                    # Monitor/wideband publish the newly analyzed block on the
+                    # same cadence. Energy detection keeps its independent
+                    # configured interval; display ticks may reuse that FFT.
+                    publish_now = (source_seconds >= next_publish_rf or retuned) if energy_mode else analyzed_now
+                    if publish_now:
                         self._snapshot = dict(analysis, sample_rate=sample_rate, center_frequency_hz=center,
                             source=self._config["source"], mode=self._config["mode"],
+                            source_epoch=f"{self._session_id}:{source_epoch}",
                             synthetic=self._data_provenance["declared_source_synthetic"],
                             declared_source_synthetic=self._data_provenance["declared_source_synthetic"],
                             data_provenance=copy.deepcopy(self._data_provenance), sample_index=analysis_position,
@@ -1216,7 +1461,10 @@ class CaptureManager:
                                                     "selection": "strongest_energy_channel" if strongest else "whole_window"}
                                                     if classification_enabled else None),
                             active_channels=len(channels))
-                        last_publish_rf = source_seconds
+                        if energy_mode:
+                            next_publish_rf = (source_seconds + display_interval if retuned else next_publish_rf
+                                + (math.floor(max(0.0, source_seconds - next_publish_rf) / display_interval) + 1) * display_interval)
+                        self._publish_display_locked()
                     self._config["center_frequency_hz"] = center
                 if quota_reached:
                     reason = "storage_limit"
@@ -1265,3 +1513,4 @@ class CaptureManager:
                 self._elapsed = time.monotonic() - started
                 self._reason = reason
                 self._state = "error" if self._error else ("stopped" if reason == "user_stop" else "completed")
+                self._publish_display_locked(terminal=True)

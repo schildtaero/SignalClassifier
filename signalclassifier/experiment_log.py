@@ -75,7 +75,8 @@ def dataset_inventory(entries: list[dict], annotations: dict[str, dict]) -> list
         include_metadata = metadata_bytes + size <= MAX_INVENTORY_METADATA_BYTES
         metadata_bytes += size if include_metadata else 0
         rows.append({"id": identifier, "label": entry.get("label"), "verified": entry.get("verified") is True,
-                     "group_id": entry.get("group_id") or info["group_id"], "annotation": annotation,
+                     "group_id": entry.get("group_id") or info["group_id"],
+                     "recording_group_id": entry.get("recording_group_id"), "annotation": annotation,
                      "metadata_filename": path.name, "data_filename": data.name,
                      "source": info["source"], "mode": info["mode"], "synthetic": info["synthetic"],
                      "sample_rate": info["sample_rate"], "center_frequency_hz": info["center_frequency_hz"],

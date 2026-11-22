@@ -18,6 +18,9 @@ from an existing recording.
 | `sc:session_id` | string | One capture session, shared across its clips |
 | `sc:origin_group_id` | string | Original dataset group retained through replay/derivation |
 | `sc:parent_recording_id` | string | Immediate original recording identifier for a replay |
+| `sc:recording_id` | string | Stable identifier assigned when the recording is written, retained on import/export |
+| `sc:origin_recording_id` | string | Original recording identity retained through replay/derivation; separate from the session group |
+| `sc:origin_recording_resolution` | object | Whether a replay ancestor chain could be resolved (`resolved`), method and ancestor count; missing ancestors retain the best known identity with `resolved:false` |
 | `sc:requested_gain_db` | number | Requested manual gain; not a calibrated antenna power |
 | `sc:gap_free_verified` | boolean | Whether gap-free reception has been independently established; currently false |
 | `sc:digital_scale` | string | Digital amplitude convention |

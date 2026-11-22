@@ -209,6 +209,7 @@ class SigMFWriter:
                           "core:datetime": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}],
             "annotations": list(annotations or []),
         }
+        self.metadata["global"]["sc:recording_id"] = self.base_path.name
         for key, value in (extra or {}).items():
             if key.startswith("core:"):
                 # Prevent callers overwriting format/indexing invariants.
