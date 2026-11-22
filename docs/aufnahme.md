@@ -12,6 +12,25 @@ Im ausgeschalteten Zustand bleiben Spektrum, Energiedetektion und die gewählte 
 
 Zur Eingrenzung dieselbe Einstellung zunächst ohne Klassifikation wiederholen und Queuefüllung, Verarbeitungs- und Schreibzeiten vergleichen. Die Leserzeit enthält auch Warten auf neue Samples und ist keine reine CPU-Zeit. Unter Windows USB-Durchreichung und Treiber prüfen. Der Empfang stoppt weiterhin am zugelassenen Präfix, statt eine bekannte Datenlücke still zu übergehen; beschädigte Daten werden nicht durch Simulation ersetzt.
 
+### Empfangsformate unabhängig von der Anwendung vergleichen
+
+Ältere `SoapySDRUtil`-Versionen unterstützen `--format=CF32` nicht und können den Ratentest trotzdem mit dem nativen Format **CS16** starten: je eine vorzeichenbehaftete 16-Bit-Ganzzahl für I und Q. SignalClassifier verwendet **CF32**: je eine 32-Bit-Gleitkommazahl für I und Q. Das verdoppelt die Speicher-/Kopierdaten zwischen Treiber und Anwendung; daraus folgt nicht automatisch eine doppelte physische USB-Datenrate.
+
+Die Anwendung vollständig beenden und im Repository unter WSL beziehungsweise Linux ausführen:
+
+```bash
+git pull
+.venv/bin/python scripts/diagnose_rsp_stream.py --seconds 15
+```
+
+Der Test öffnet nacheinander CS16 und CF32 mit der Python-Umgebung der Anwendung. Vorgaben sind 2 MS/s, 100 MHz, Gain 30 dB und 131072 angeforderte komplexe Samples je Leseaufruf. Er führt weder Spektrumanalyse noch Klassifikation aus und speichert keine IQ-Dateien. Anders als bei einer Aufnahme zählt dieser reine Diagnosetest gemeldete Überläufe und setzt den Test fort. Er behauptet deshalb keine lückenlose Aufnahme. Je Format sind 15 Sekunden Messzeit vorgesehen; Initialisierung und nicht reagierende native Treiber können zusätzliche Zeit benötigen.
+
+Die JSON-Ausgabe nennt Samplezahl, Timeouts, leere Leseantworten, Überläufe, den Zeitpunkt des ersten Überlaufs sowie maximale Lesezeiten getrennt nach Erfolg und Fehler. `delivered_msps` ist der tatsächlich zurückgelieferte Sampleumfang geteilt durch die Messwandzeit einschließlich Anlauf und Pausen. Ein Wert unter der Sollrate allein beweist keinen Datenverlust. Negative Rückgabecodes und Überlaufzähler sind eigenständige Befunde.
+
+Ein sauberer CS16-Test allein gibt den CF32-/Pythonpfad noch nicht frei. Ein Fehler bereits im nackten CF32-Test lässt sich ohne Oberfläche und Signalverarbeitung reproduzieren; läuft dieser sauber, bleibt eine Regression in der Anwendung als Ursache offen. Der Test ändert keine Treiber, Dienste, USB-Zuordnung oder WSL-Version.
+
+WSL besitzt getrennte Versionsangaben: `wsl --version` nennt die installierte Paket-/Kernelversion, `wsl --list --verbose` dagegen die Ausführungsarchitektur der Distribution mit Version 1 oder 2. WSL-Paket 3.0.5 kann somit weiterhin eine WSL-2-Distribution ausführen. Microsoft nennt für [WSL 3.0.5](https://github.com/microsoft/WSL/releases/tag/3.0.5) den Kernel 6.18.58.1; ein solcher Versionswechsel kann Teil eines Timingvergleichs sein, beweist aber keine SDRplay-Regression. Der Windows-Updateverlauf allein erfasst die WSL-/Store- und usbipd-Versionen nicht vollständig. Für einen Vergleich unter PowerShell `wsl --version`, `wsl --list --verbose` und `usbipd --version` festhalten. [Microsofts Befehlsreferenz](https://learn.microsoft.com/en-us/windows/wsl/basic-commands).
+
 ## Quellen und Installation
 
 ### PlutoSDR
