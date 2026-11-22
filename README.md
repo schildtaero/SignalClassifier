@@ -1,4 +1,6 @@
-# SignalClassifier 0.5.2
+# SignalClassifier 0.5.3
+
+Version 0.5.3 zählt Experimente und Modelle für den regelmäßigen Systemstatus direkt in SQLite. Große archivierte Berichte werden dafür nicht mehr vollständig geladen und als JSON eingelesen. Das beseitigt eine unnötige Blockierungsquelle für den Empfangsthread; der tatsächliche SDR-Durchsatz muss am Gerät erneut geprüft werden.
 
 Lokales SDR-Labor für **Linux und Windows mit WSL2**: Breitband-IQ aufnehmen, belegte Kanäle selektiv speichern, Daten labeln und reproduzierbare Klassifikationsexperimente durchführen. Die deutsche Weboberfläche übernimmt die dunkle/cyanfarbene technische Gestaltung und den hellen Modus aus [KrakenDF](https://github.com/schildtaero/krakensdr), mit lokal ausgelieferten Assets.
 

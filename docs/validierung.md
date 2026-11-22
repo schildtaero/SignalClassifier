@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 22. November 2026, SignalClassifier 0.5.2, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 22. November 2026, SignalClassifier 0.5.3, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 263 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
+- 282 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,12 @@ Prüfstand: 22. November 2026, SignalClassifier 0.5.2, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.5.3
+
+- `/api/status` zählt archivierte Experimente und Modelle direkt per SQL, statt alle JSON-Berichte zu laden. Sechs Regressionstests prüfen Zählen ohne Decodierung, auch bei nicht lesbaren Payloads, aktuelle Zahlen nach Schreib-/Löschoperationen, sichere SQL-Parameter, unveränderte Aufnahme-/Labelzahlen und gezieltes Lesen des aktiven Experiments. Es gibt keine laufzeitabhängigen Testschwellen.
+- Lokaler Mechanismustest: fünf temporäre SQLite-Datensätze mit 113,33 MiB Berichtsdaten. Alter Zählpfad 2025,635 ms, längste Pause eines parallelen 1-ms-Beobachterthreads 276,245 ms; direkter SQL-Count 0,492 ms und 1,077 ms Beobachterpause. Dies zeigt eine mögliche Blockierung des Empfangsthreads durch JSON-Arbeit, misst aber weder den vollständigen Nutzer-Statuspfad noch einen physischen SDR. Details und Grenzen: [Aufnahmediagnose](aufnahme.md#statusabruf-und-große-archivierte-experimente).
+- Vollständige Suite einschließlich der 13 Stream-Diagnosetests: **282 Tests bestanden in 42,2 Sekunden**. JavaScript-Logik/-Syntax, Shell-Syntax und `git diff --check` bestanden. Die physische Wiederholungsmessung mit unveränderten WSL-/Empfängereinstellungen bleibt erforderlich.
 
 ## Ergänzungen in 0.5.2
 

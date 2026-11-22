@@ -56,6 +56,11 @@ class Store:
             rows = conn.execute("SELECT payload FROM records WHERE kind=? ORDER BY rowid DESC", (kind,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def count(self, kind: str) -> int:
+        """Count records without loading or decoding potentially large reports."""
+        with self.connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM records WHERE kind=?", (kind,)).fetchone()[0]
+
     def delete(self, kind: str, identifier: str):
         with self.lock, self.connect() as conn:
             conn.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, identifier))

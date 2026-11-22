@@ -874,7 +874,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return finite_json({"version": __version__, "receiver": runtime.capture.status(), "hardware": hardware_info(),
             "telemetry": runtime.telemetry.snapshot(),
             "counts": {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r, annotations, with_suggestions=False).get("annotation")) for r in recordings),
-                       "experiments": len(runtime.store.all("experiment")), "models": len(runtime.store.all("model"))},
+                       "experiments": runtime.store.count("experiment"), "models": runtime.store.count("model")},
             "active_experiment": runtime.store.get("experiment", runtime.active_experiment) if runtime.active_experiment else None,
             "active_model": runtime.store.get("active_model", "main")})
 
