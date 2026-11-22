@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 22. November 2026, SignalClassifier 0.6.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 22. November 2026, SignalClassifier 0.6.1, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 323 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
+- 341 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,13 @@ Prüfstand: 22. November 2026, SignalClassifier 0.6.0, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.6.1
+
+- Gesamtsuite: **341 Tests bestanden in 45,5 Sekunden**. JavaScript-Syntax und -Logik, Shell-Syntax einschließlich `configure_github.sh` sowie `git diff --check` bestanden.
+- 14 isolierte Zugangsdaten-Tests prüfen den Vorrang der drei Token-Umgebungsvariablen ohne Dateizugriff, die private lokale Datei, Eigentümer-/Modusprüfung, symbolische Links und nicht reguläre Dateien, Größen-/Zeichengrenzen, Dateizugriffsfehler und Austausch zwischen Vorprüfung und Öffnen. Statusantworten enthalten keine Tokenwerte, Dateipfade oder rohen Ausnahmeinhalte. Testumgebungen und Konfigurationspfade sind ausschließlich temporäre Fixtures.
+- Vier Helfertests führen `configure_github.sh` mit erfundenen Zugangsschlüsseln und temporären Benutzerordnern aus: verdeckte Standardeingabe ohne Geheimnis im Prozessargument, Dateimodus 0600 und Ordnermodus 0700, atomare Erneuerung, Erhalt der vorherigen Datei bei ungültiger Eingabe, Hilfe-/Argumentbehandlung und Standardpfad. Es wird kein Upload gestartet.
+- Zusätzlicher lokaler API-Smoke: Im selben laufenden Backend wechselt `/api/publication/status` nach Anlegen der privaten Testdatei von `configured:false` auf `configured:true`, Quelle `local_file`; weder Backendneustart noch Upload nötig. Kein echter GitHub-Zugang und keine persönlichen Token-Dateien wurden für diese Prüfung verwendet. Eine konfigurierte Quelle ist noch kein Nachweis gültiger GitHub-Berechtigungen.
 
 ## Ergänzungen in 0.6.0
 

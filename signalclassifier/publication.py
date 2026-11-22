@@ -14,7 +14,9 @@ import json
 import math
 import numbers
 import os
+from pathlib import Path
 import re
+import stat
 import time
 import urllib.error
 import urllib.parse
@@ -70,13 +72,53 @@ def safe_error(exc) -> str:
     return f"Paper-Veröffentlichung fehlgeschlagen ({code})."
 
 
+def _credentials():
+    token = next((os.environ[name].strip() for name in _TOKEN_ENV if os.environ.get(name, "").strip()), None)
+    if token:
+        return token, "environment", None
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    if not base.is_absolute():
+        return None, None, "token_file_unreadable"
+    path = base / "signalclassifier" / "github-token"
+
+    def protected(info):
+        return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+    try:
+        before = path.lstat()
+        if not protected(before):
+            return None, None, "token_file_permissions"
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as source:
+            opened = os.fstat(source.fileno())
+            if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                return None, None, "token_file_unreadable"
+            if not protected(opened):
+                return None, None, "token_file_permissions"
+            if opened.st_size > 8192:
+                return None, None, "token_file_too_large"
+            data = source.read(8193)
+        if len(data) > 8192:
+            return None, None, "token_file_too_large"
+        token = data.decode("ascii").strip()
+        if not token or any(not 33 <= ord(char) <= 126 for char in token):
+            return None, None, "token_file_invalid"
+        return token, "local_file", None
+    except FileNotFoundError:
+        return None, None, None
+    except UnicodeError:
+        return None, None, "token_file_invalid"
+    except OSError:
+        return None, None, "token_file_unreadable"
+
+
 def _token():
-    return next((os.environ[name].strip() for name in _TOKEN_ENV if os.environ.get(name, "").strip()), None)
+    return _credentials()[0]
 
 
 def credential_status() -> dict:
-    present = bool(_token())
-    return {"configured": present, "credential_source": "environment" if present else None,
+    token, source, error = _credentials()
+    return {"configured": bool(token), "credential_source": source, "credential_error": error,
             "default_repository": DEFAULT_REPOSITORY, "default_branch": DEFAULT_BRANCH}
 
 

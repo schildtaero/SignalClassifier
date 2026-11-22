@@ -1,4 +1,6 @@
-# SignalClassifier 0.6.0
+# SignalClassifier 0.6.1
+
+Version 0.6.1 ergänzt dauerhaften GitHub-Zugang über `./configure_github.sh`. Der Helfer speichert den Schlüssel verdeckt in einer privaten Benutzerdatei außerhalb des Repositorys; das Backend liest sie auch bei Windows-/WSL-Start automatisch. Vorhandene Token-Umgebungsvariablen haben Vorrang. Siehe [Einrichtung und Diagnose](docs/paper-veroeffentlichung.md#zugangsdaten-unter-linux-und-windows-mit-wsl).
 
 Version 0.6.0 überträgt Spektrum und Wasserfall über eine dauerhafte WebSocket-Verbindung. Die Anzeige übernimmt neue FFT-Stichproben mit einem Ziel von 15 Bildern pro Sekunde; Klassifikationsmetadaten bleiben separat getaktet. Ein gemeinsamer, begrenzter Anzeigepuffer hält langsame Browser vom Empfangspfad fern. Die SQL-Statuszähler aus 0.5.3 bleiben erhalten, damit große archivierte Berichte nicht für regelmäßige Statusabrufe eingelesen werden.
 

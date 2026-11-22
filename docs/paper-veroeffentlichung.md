@@ -67,19 +67,43 @@ Von der Projektion gezählte Auslassungen stehen in `experiment.json` unter `omi
 
 ## Zugangsdaten unter Linux und Windows mit WSL
 
-Das Backend, also der lokal laufende Anwendungsprozess, liest ein GitHub-Token ausschließlich aus einer dieser Umgebungsvariablen:
+Ein Token ist ein Zugangsschlüssel für GitHub. Auf GitHub einen **Fine-grained Personal Access Token**, einen auf ausgewählte Projekte begrenzten persönlichen Zugangsschlüssel, für das gewünschte Repository einrichten. Die Repositoryberechtigung **Contents: Read and write** ist erforderlich. Eine Organisationsfreigabe oder Branchschutzregel kann den Zugriff zusätzlich einschränken.
+
+### Einmalig dauerhaft einrichten
+
+Im Projektverzeichnis den Einrichtungshelfer starten:
+
+```bash
+./configure_github.sh
+```
+
+Der Helfer liest das Token verdeckt ein und speichert es in einer geschützten lokalen Datei außerhalb des Repositorys. Der Tokenwert wird weder als Befehlsargument benötigt noch ausgegeben. Er steht dadurch nicht im eingegebenen Shellbefehl oder dessen Befehlschronik. Keine Tokenwerte in Experimentnotizen, Projektdateien oder Chatnachrichten übernehmen.
+
+Der Konfigurationspfad lautet:
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/signalclassifier/github-token
+```
+
+Ohne gesetztes `XDG_CONFIG_HOME` ist das also `~/.config/signalclassifier/github-token`. `XDG_CONFIG_HOME` ist eine Umgebungsvariable für den persönlichen Konfigurationsordner; `HOME` bezeichnet das Benutzerverzeichnis. Die Datei enthält ausschließlich das Token, keinen Shellbefehl, kein `export`, keine Anführungszeichen und kein JSON. Sie wird als Text gelesen und **niemals als Programm ausgeführt**.
+
+Die Anwendung akzeptiert nur eine reguläre Datei, die kein symbolischer Link ist und dem ausführenden Benutzer gehört. Gruppen oder andere Benutzer dürfen keine Zugriffsrechte darauf haben. Der Helfer legt sie mit Modus `0600` an: Nur der Eigentümer darf lesen und schreiben. Die Datei darf höchstens 8192 Bytes enthalten. Äußerer Leerraum wird entfernt; im Token selbst sind ausschließlich ASCII-Zeichen ohne Leer- oder Steuerzeichen erlaubt. **ASCII** bedeutet *American Standard Code for Information Interchange*, die hierfür zugelassene einfache Zeichenkodierung.
+
+Für Windows mit **WSL**, *Windows Subsystem for Linux*, den Helfer in der Bash-Shell derselben Linux-Distribution und mit demselben Linux-Benutzer ausführen, den die Anwendung verwendet. Danach funktioniert die gespeicherte Datei unabhängig davon, ob der normale Start über `./start.sh`, Windows-`start.cmd` oder direkt mit `.venv/bin/python -m signalclassifier` erfolgt. Entscheidend sind derselbe Benutzer und Konfigurationspfad; ein Token im Windows-Benutzerordner wird nicht automatisch zu einer WSL-Konfiguration.
+
+Eine Erneuerung über den Helfer wird beim nächsten Zugangsdaten-/Uploadaufruf gelesen. **Nach einer Token-Dateiänderung ist kein Backendneustart nötig.** Einen fehlgeschlagenen Upload anschließend mit **Veröffentlichung wiederholen** neu anstoßen. Ein bereits laufender Upload verwendet seine beim Beginn gelesenen Zugangsdaten.
+
+### Vorrang der Umgebung und vorübergehende Einrichtung
+
+Das Backend, also der lokal laufende Anwendungsprozess, sucht zuerst nach der **ersten nichtleeren** Umgebungsvariablen in dieser Reihenfolge:
 
 - `SIGNALCLASSIFIER_GITHUB_TOKEN`
 - `GITHUB_TOKEN`
 - `GH_TOKEN`
 
-Ein Token ist ein Zugangsschlüssel. Es wird nicht in der Oberfläche eingegeben und gehört weder in das Repository noch in Experimentnotizen oder Konfigurationsdateien. Der Tokenstatus in der Oberfläche zeigt nur, ob eine Umgebungsvariable konfiguriert ist; er prüft damit noch keine gültige GitHub-Berechtigung.
+Erst wenn dort kein Token gesetzt ist, wird die lokale Token-Datei verwendet. Ein altes oder ungültiges, aber nichtleeres Umgebungstoken hat daher weiterhin Vorrang vor einer neu gespeicherten Datei. Die Konfigurationsdatei ist eine ausdrücklich vorgesehene lokale Zugangsdatenablage; sie gehört nicht in den Quellcode oder das Veröffentlichungspaket.
 
-Es wird die erste nichtleere Variable in der oben angegebenen Reihenfolge verwendet.
-
-Auf GitHub einen **Fine-grained Personal Access Token**, einen auf ausgewählte Projekte begrenzten persönlichen Zugangsschlüssel, für das gewünschte Repository einrichten. Die Repositoryberechtigung **Contents: Read and write** ist erforderlich. Eine Organisationsfreigabe oder Branchschutzregel kann den Zugriff zusätzlich einschränken. Kein Tokenwert wird für die Veröffentlichung in Dateien gespeichert.
-
-Unter **WSL**, *Windows Subsystem for Linux*, diese Schritte in einer Bash-Shell innerhalb der Linux-Umgebung ausführen. Das Token verdeckt einlesen und die Anwendung in derselben Shell starten:
+Die bisherige vorübergehende Einrichtung in derselben Bash-Shell bleibt möglich:
 
 ```bash
 read -rsp 'GitHub-Token: ' SIGNALCLASSIFIER_GITHUB_TOKEN
@@ -88,13 +112,21 @@ export SIGNALCLASSIFIER_GITHUB_TOKEN
 ./start.sh
 ```
 
-Bei dieser Eingabe steht der Tokenwert nicht im Shellbefehl und wird deshalb nicht als Teil dieses Befehls in der Shell-Historie abgelegt. Die Variable gilt für die gestartete Anwendung und deren Prozessumgebung. Eine bereits laufende Anwendung übernimmt keine nachträgliche Änderung aus einem anderen Terminal: Für neu gesetzte Zugangsdaten das Backend nach Ende laufender Arbeit in der vorbereiteten Shell neu starten.
+Auch hierbei steht der Tokenwert nicht im Shellbefehl. Die Variable gilt nur für die gestartete Anwendung und deren Prozessumgebung, nicht automatisch für einen späteren Start über ein anderes Terminal oder `start.cmd`. Eine bereits laufende Anwendung übernimmt keine nachträgliche Änderung der Shell-Umgebung. Für geänderte Umgebungstokens das Backend nach Ende laufender Arbeit in der vorbereiteten Shell neu starten; für die dauerhaft gespeicherte Token-Datei gilt diese Einschränkung nicht.
 
-Nach Beenden der Anwendung kann die Variable aus der aktuellen Shell entfernt werden:
+Soll wieder ausschließlich die lokale Datei verwendet werden, vor dem nächsten Anwendungsstart gegebenenfalls gesetzte Tokenvariablen aus der aktuellen Shell entfernen:
 
 ```bash
-unset SIGNALCLASSIFIER_GITHUB_TOKEN
+unset SIGNALCLASSIFIER_GITHUB_TOKEN GITHUB_TOKEN GH_TOKEN
 ```
+
+Dies entfernt keine Token-Datei und ändert nicht rückwirkend die Umgebung eines bereits gestarteten Prozesses.
+
+### Was die Zugangsanzeige prüft
+
+`GET /api/publication/status` liefert `configured`, `credential_source` und gegebenenfalls `credential_error`. Die Quelle lautet `environment`, `local_file` oder `null`. Fehler werden ausschließlich als feste Kategorien gemeldet; Tokenwerte und Dateiinhalte werden nicht zurückgegeben.
+
+Die Anzeige prüft die lokale Einrichtung, **nicht** GitHub-Berechtigungen, Gültigkeitsdauer oder Repositoryzugriff. `configured: true` bestätigt daher noch keinen erfolgreichen Upload. Bei einer abgelehnten oder nicht lesbaren lokalen Datei den Einrichtungshelfer erneut verwenden und den Status anschließend aktualisieren. Ein bereits freigegebener Experimentlauf kann danach ohne erneutes Training veröffentlicht werden.
 
 ## Zielbranch, Upload und Wiederholung
 
@@ -124,7 +156,7 @@ Die Oberfläche verwendet diese Endpunkte. `{id}` steht jeweils für eine vorhan
 
 | Methode und Pfad | Wirkung |
 | --- | --- |
-| `GET /api/publication/status` | Auskunft über konfigurierte Zugangsdaten ohne deren Wert. |
+| `GET /api/publication/status` | Lokaler Einrichtungsstatus mit Quelle `environment`/`local_file`/`null` und festen Fehlerkategorien; keine Tokenwerte und keine GitHub-Berechtigungsprüfung. |
 | `GET /api/experiments/{id}/paper-bundle` | Aufbereitetes Paper-Paket als ZIP herunterladen; für beendete Läufe auch ohne Opt-in und ohne Token. |
 | `GET /api/experiments/{id}` | Experimentzustand einschließlich getrenntem `publication`-Status lesen. |
 | `POST /api/experiments/{id}/publish` | Upload eines beendeten, zuvor freigegebenen Experiments anstoßen beziehungsweise nach einem Fehler wiederholen. |

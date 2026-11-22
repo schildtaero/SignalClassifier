@@ -4048,11 +4048,17 @@
     $("#experiment-github-repository").disabled = !enabled;
     $("#experiment-github-branch").disabled = !enabled;
     const status = state.publicationStatus;
+    const fileError = {
+      token_file_permissions: "Die lokale Token-Datei benötigt private Zugriffsrechte für diesen Benutzer. Mit ./configure_github.sh neu einrichten.",
+      token_file_unreadable: "Die lokale Token-Datei ist nicht lesbar. Mit ./configure_github.sh im WSL-Terminal neu einrichten.",
+      token_file_invalid: "Die lokale Token-Datei enthält keinen gültigen einzelnen Token. Mit ./configure_github.sh neu einrichten.",
+      token_file_too_large: "Die lokale Token-Datei ist zu groß. Mit ./configure_github.sh genau einen Token speichern.",
+    }[status?.credential_error];
     $("#experiment-github-status").textContent = !status
       ? "Backend-Zugang noch nicht geprüft. Das lokale Paper-Paket bleibt unabhängig davon verfügbar."
       : status.configured
-        ? "GitHub-Token ist in der Backend-Umgebung gesetzt; Berechtigung wird beim Upload geprüft. Im Browser werden keine Tokens gespeichert."
-        : "Kein GitHub-Zugang in der Backend-Umgebung eingerichtet. Das Experiment kann laufen; ein aktivierter Upload bleibt nach Einrichtung wiederholbar. Das lokale Paper-Paket steht unabhängig davon bereit.";
+        ? `GitHub-Token ${status.credential_source === "local_file" ? "aus privater lokaler Datei" : "aus der Backend-Umgebung"} erkannt; Berechtigung wird beim Upload geprüft. Im Browser werden keine Tokens gespeichert.`
+        : `${fileError || "Kein GitHub-Zugang eingerichtet. Im WSL-Terminal ./configure_github.sh für dauerhaften Zugang ausführen und diese Ansicht neu laden."} Das Experiment kann laufen; ein aktivierter Upload bleibt nach Einrichtung wiederholbar. Das lokale Paper-Paket steht unabhängig davon bereit.`;
   }
   function populateGithubPublicationForm(value) {
     const config = normalizeGithubPublication(value);

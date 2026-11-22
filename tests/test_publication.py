@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import tempfile
 import unittest
 from unittest import mock
 import urllib.error
@@ -104,7 +105,7 @@ class PublicationTests(unittest.TestCase):
     def package(self):
         return pub.make_publication_package(*fixture())
 
-    def test_settings_are_opt_in_strict_and_credentials_are_environment_only(self):
+    def test_settings_are_opt_in_strict_and_credentials_cannot_be_embedded_in_config(self):
         self.assertEqual(pub.normalize_publication(None), {"enabled": False, "repository": "schildtaero/SignalClassifier", "branch": "experiment-results"})
         for invalid in ({"token": TOKEN}, {"enabled": "yes"}, {"repository": "https://github.com/a/b"},
                         {"repository": "a/b/extra"}, {"branch": "main"}, {"branch": "../bad"},
@@ -116,7 +117,7 @@ class PublicationTests(unittest.TestCase):
             self.assertTrue(status["configured"])
             self.assertEqual(status["credential_source"], "environment")
             self.assertNotIn(TOKEN, json.dumps(status))
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with tempfile.TemporaryDirectory() as config_folder, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_folder}, clear=True):
             self.assertFalse(pub.credential_status()["configured"])
 
     def test_nested_private_fields_never_enter_public_files_and_groups_stay_consistent(self):
@@ -268,7 +269,7 @@ class PublicationTests(unittest.TestCase):
         with mock.patch.object(pub, "_GitHub") as api:
             self.assertEqual(pub.publish_package(None, RUN, {}), {"status": "disabled"})
             api.assert_not_called()
-        with mock.patch.dict(os.environ, {}, clear=True), self.assertRaises(pub.PublicationError):
+        with tempfile.TemporaryDirectory() as config_folder, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_folder}, clear=True), self.assertRaises(pub.PublicationError):
             pub.publish_package({"enabled": True}, RUN, self.package())
         files = self.package(); files["private.sigmf-data"] = b"IQ"
         with mock.patch.object(pub, "_GitHub") as api, self.assertRaises(pub.PublicationError):
