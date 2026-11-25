@@ -58,6 +58,7 @@
     generatorPlan: null,
     generatorPlanSequence: 0,
     generatorPlanning: false,
+    generatorRemovingRejected: false,
     generatorStarting: false,
     generatorStopping: false,
     generatorStatus: null,
@@ -8064,6 +8065,25 @@
       if (scheme.available === true) selected.add(String(scheme.id));
     return selected;
   }
+  function generatorRejectedModes(plan, selected) {
+    const rejected = new Set(
+      arr(plan?.rejected_mode_ids).filter((id) => typeof id === "string"),
+    );
+    return [...selected].filter((id) => rejected.has(id));
+  }
+  function generatorPruneRejected(plan, config, selected, overrides = {}) {
+    if (!plan || plan.inputSignature !== JSON.stringify(config))
+      throw new Error("Die Konfiguration hat sich geändert. Plan erneut prüfen.");
+    const removed = generatorRejectedModes(plan, selected);
+    const rejected = new Set(removed);
+    return {
+      removed,
+      remaining: [...selected].filter((id) => !rejected.has(id)),
+      overrides: Object.fromEntries(
+        Object.entries(overrides).filter(([id]) => !rejected.has(id)),
+      ),
+    };
+  }
   function generatorValueList(raw, label, schema = {}) {
     let values;
     if (Array.isArray(raw)) values = [...raw];
@@ -8754,7 +8774,8 @@
       const summary = plan.summary || {},
         cases = arr(plan.cases),
         errors = arr(plan.errors),
-        warnings = arr(plan.warnings);
+        warnings = arr(plan.warnings),
+        rejected = generatorRejectedModes(plan, state.generatorSelected);
       const preview = el("details", { class: "generator-case-preview" }, [
         el("summary", {
           text: `Fallvorschau · ${num(cases.length, 0)} im Plan${cases.length > 40 ? ", erste 40 angezeigt" : ""}`,
@@ -8824,6 +8845,25 @@
             text: typeof error === "string" ? error : JSON.stringify(error),
           }),
         ),
+        ...(rejected.length
+          ? [
+              el("div", { class: "generator-plan-files" }, [
+                Object.assign(
+                  button(
+                    `Beanstandete Profile abwählen (${num(rejected.length, 0)})`,
+                    () => action(() => removeRejectedGeneratorModes(plan)),
+                    "button button-quiet",
+                    "close",
+                  ),
+                  { id: "generator-remove-rejected" },
+                ),
+                el("p", {
+                  class: "form-help",
+                  text: "Entfernt jeweils das ganze Profil einschließlich seiner gültigen Varianten und Parameter-Overrides. Die verbleibende Auswahl wird ohne Senden erneut geprüft.",
+                }),
+              ]),
+            ]
+          : []),
         ...warnings.map((warning) =>
           el("p", {
             class: "notice amber",
@@ -8860,6 +8900,15 @@
     $("#generator-start").disabled = !enabled;
     $("#generator-plan-button").disabled =
       state.generatorPlanning || generatorBusy();
+    const removeRejected = $("#generator-remove-rejected");
+    if (removeRejected)
+      removeRejected.disabled =
+        state.generatorRemovingRejected ||
+        state.generatorPlanning ||
+        state.generatorStarting ||
+        state.generatorStopping ||
+        generatorNeedsAttention() ||
+        Boolean(state.generatorStatusError);
     const release = generatorBusy() || state.generatorStarting;
     $("#generator-setup-confirmed").disabled = release;
     $("#generator-transmit-enabled").disabled = release;
@@ -8888,6 +8937,57 @@
       renderGeneratorPlan();
     } finally {
       state.generatorPlanning = false;
+      updateGeneratorStart();
+    }
+  }
+  async function removeRejectedGeneratorModes(expectedPlan) {
+    if (
+      state.generatorRemovingRejected ||
+      state.generatorPlanning ||
+      state.generatorStarting ||
+      state.generatorStopping
+    )
+      return;
+    if (generatorNeedsAttention() || state.generatorStatusError)
+      throw new Error(
+        "Zuerst den Generator vollständig stoppen und einen aktuellen, geklärten TX-Status abwarten.",
+      );
+    if (state.generatorPlan !== expectedPlan)
+      throw new Error(
+        "Das Planergebnis hat sich geändert. Den aktuellen Plan verwenden.",
+      );
+    const selection = generatorPruneRejected(
+      expectedPlan,
+      generatorFormConfig(),
+      state.generatorSelected,
+      state.generatorOverrides,
+    );
+    if (!selection.removed.length) return;
+    state.generatorRemovingRejected = true;
+    updateGeneratorStart();
+    try {
+      state.generatorSelected = new Set(selection.remaining);
+      state.generatorOverrides = selection.overrides;
+      generatorInvalidatePlan();
+      renderGeneratorCatalogue();
+      renderGeneratorParameters();
+      if (!selection.remaining.length) {
+        $("#generator-plan-content").replaceChildren(
+          empty(
+            "Alle ausgewählten Profile wurden beanstandet und abgewählt. Es wurde kein neuer Plan angefordert. Für eine weitere Prüfung zuerst ein verfügbares Profil auswählen.",
+          ),
+        );
+        toast(
+          `${num(selection.removed.length, 0)} beanstandete Profile abgewählt. Die Auswahl ist leer.`,
+        );
+        return;
+      }
+      toast(
+        `${num(selection.removed.length, 0)} beanstandete Profile abgewählt. Die verbleibende Auswahl wird erneut geprüft.`,
+      );
+      await planGenerator();
+    } finally {
+      state.generatorRemovingRejected = false;
       updateGeneratorStart();
     }
   }

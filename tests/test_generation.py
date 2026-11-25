@@ -127,6 +127,44 @@ class GenerationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.manager.plan(self.config(transmitter={"tx_gain_db": -50, "attenuation_offsets_db": bad}))
 
+    def test_plan_identifies_whole_rejected_profiles_and_reduced_selection_is_ready(self):
+        from signalclassifier import onair
+        entries = [{**entry, "available": True, "provider": "onair"}
+                   for entry in onair.catalogue() if entry["id"] in {"onair:atsc", "onair:atsc3"}]
+        entries += [{**entry, "available": True, "provider": "native"}
+                    for entry in waveforms.catalogue() if entry["id"] == "am"]
+        config = self.config(mode_ids=["onair:atsc3", "am", "onair:atsc"], variants_per_mode=4,
+            receiver={"source": "rsp1a", "sample_rate": 6.4e6},
+            impairments={"frequency_offset_hz": [0, 1000]})
+        plan = generation.build_plan(config, entries=entries)
+        self.assertFalse(plan["ready"])
+        self.assertEqual(plan["rejected_mode_ids"], ["onair:atsc3", "onair:atsc"])
+        self.assertGreater(len(plan["errors"]), len(plan["rejected_mode_ids"]))
+        self.assertTrue(any(case["mode_id"] == "onair:atsc" for case in plan["cases"]),
+                        "A profile with some valid variants still needs whole-profile deselection")
+        config["mode_ids"] = [mode for mode in config["mode_ids"] if mode not in plan["rejected_mode_ids"]]
+        reduced = generation.build_plan(config, entries=entries)
+        self.assertTrue(reduced["ready"], reduced["errors"])
+        self.assertEqual(reduced["rejected_mode_ids"], [])
+        self.assertEqual({case["mode_id"] for case in reduced["cases"]}, {"am"})
+        self.assertEqual(FakeTx.instances, [])
+
+    def test_unavailable_profiles_are_rejected_but_global_storage_errors_are_not(self):
+        entries = [{**entry, "available": False, "provider": "native", "reason": "Not available"}
+                   for entry in waveforms.catalogue() if entry["id"] == "am"]
+        rejected = generation.build_plan(self.config(mode_ids=["missing", "am"]), entries=entries)
+        self.assertEqual(rejected["rejected_mode_ids"], ["missing", "am"])
+        self.assertEqual(rejected["cases"], [])
+        budget = self.manager.plan(self.config(max_bytes=1024*1024))
+        self.assertFalse(budget["ready"])
+        self.assertEqual(budget["rejected_mode_ids"], [])
+        with patch("signalclassifier.generation.shutil.disk_usage") as disk:
+            disk.return_value.free = 128*1024**2
+            full_disk = self.manager.plan(self.config())
+        self.assertFalse(full_disk["ready"])
+        self.assertEqual(full_disk["rejected_mode_ids"], [])
+        self.assertEqual(FakeTx.instances, [])
+
     def test_frames_facets_and_labels_are_resolved_after_parameter_variation(self):
         plan = self.manager.plan(self.config(mode_ids=["ofdm"], label_facet="modulation", variants_per_mode=2,
             parameter_overrides={"ofdm": {"subcarrier_modulation": ["QPSK", "64QAM"]}}, receiver={"source": "rsp1a", "sample_rate": 2e6}))

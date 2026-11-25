@@ -17,6 +17,7 @@ flowchart LR
 
 1. Im Tab **Signalgenerator** ein tatsächlich verfügbares Generatorprofil auswählen. Ein reiner Referenzeintrag aus dem Verfahrenskatalog ist noch kein ausführbarer Generator.
 2. Sendequelle, Empfangsquelle, Frequenz, Bandbreite, Rate, Dauer und vorhandene Varianten beziehungsweise Störungen einstellen. **Plan prüfen** erstellt die Vorschau; diese Aktion sendet noch nicht.
+   Bei profilspezifischen Fehlern bietet **Beanstandete Profile abwählen** die gemeinsame Entfernung aller betroffenen Profile an, auch wenn nur einzelne Varianten nicht passen. Die übrige Auswahl wird automatisch erneut geprüft; Parameter-Overrides der entfernten Profile werden gelöscht. Bleibt kein Profil übrig, eine neue Auswahl treffen. Globale Speicher-/Budgetfehler allein bieten keine Profilentfernung an.
 3. Den gewählten Kabel-/Antennenaufbau herstellen und prüfen. **Messaufbau bestätigt** und **Senden ausdrücklich freigeben** sind getrennt vom Erstellen des Plans. Änderungen am Plan entwerten diese Freigaben.
 4. **Geplanten Lauf starten** ausführen. Der Empfang ist währenddessen für diesen Lauf reserviert. Ein parallel gestarteter manueller Empfang soll diese Sitzung nicht übernehmen.
 5. Über **TX & Lauf stoppen** beenden, wenn nötig. Anschließend Plan, Laufmanifest und erhaltene Aufnahmen prüfen beziehungsweise herunterladen. Für einen späteren Vergleich die tatsächlich verwendeten Parameter und die Herkunft gemeinsam aufbewahren.

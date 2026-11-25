@@ -1,4 +1,6 @@
-# SignalClassifier 0.7.0
+# SignalClassifier 0.7.1
+
+Version 0.7.1 ergänzt nach der Generator-Planprüfung **„Beanstandete Profile abwählen“**: Profile mit mindestens einer fehlerhaften Variante lassen sich gesammelt entfernen; die verbleibende Auswahl wird erneut geprüft. Globale Speicher-/Budgetfehler entfernen keine Profile. Die Sendefreigabe muss für den neuen Plan erneut erteilt werden.
 
 Version 0.7.0 ergänzt den **Signalgenerator**: PlutoSDR sendet definierte Testsignale, ein RSP1A oder Pluto nimmt sie als gelabelte SigMF-Daten auf. Frequenz, Parameter, zusätzliche Dämpfung und Software-Kanalfehler werden reproduzierbar variiert. Ein manueller Sende-Gain bildet die Obergrenze; zusätzliche Dämpfungswerte werden davon abgezogen. Kabel und Antennenmessung werden getrennt dokumentiert. Vor dem Senden zeigt ein unveränderlicher Plan Fallanzahl, Einstellungen, IQ-Speicherbedarf und Grenzen.
 

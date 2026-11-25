@@ -216,6 +216,7 @@ def build_plan(config, *, entries=None):
     if count > MAX_CASES:
         raise ValueError(f"Plan enthält {count} Fälle; höchstens {MAX_CASES} zulässig. Varianten/Wiederholungen/Frequenzen verringern.")
     errors, warnings, cases = [], [], []
+    rejected_modes = set()
     if c["variants_per_mode"] != requested_variants:
         warnings.append(f"Variantenanzahl auf {c['variants_per_mode']} erhöht, damit jeder ausdrücklich gewählte Variationswert wenigstens einmal vorkommt; kein vollständiges kartesisches Raster.")
     labels = set()
@@ -223,6 +224,7 @@ def build_plan(config, *, entries=None):
         entry = by_id.get(mode_id)
         if not entry or not entry.get("available", True):
             errors.append(f"{mode_id}: {entry.get('reason') if entry else 'Generator nicht registriert'}")
+            rejected_modes.add(mode_id)
             continue
         if entry.get("provider") == "onair":
             warnings.append(f"{mode_id}: externer Testsignal-Ausschnitt mit fester Nutzdatenherkunft; Wiederholungen erzeugen keine unabhängigen Payloads.")
@@ -279,6 +281,7 @@ def build_plan(config, *, entries=None):
                             "requested_rx_samples": int(math.ceil(c["duration_seconds"]*c["receiver"]["sample_rate"]))})
             except (ValueError, TypeError, KeyError) as exc:
                 errors.append(f"{mode_id}, Variante {variation+1}: {exc}")
+                rejected_modes.add(mode_id)
     byte_count = sum(item["requested_rx_samples"]*8 for item in cases)
     if byte_count > c["max_bytes"]:
         errors.append(f"Plan benötigt ungefähr {byte_count/1024**3:.2f} GiB IQ-Daten; Gesamtbudget beträgt {c['max_bytes']/1024**3:.2f} GiB.")
@@ -291,7 +294,9 @@ def build_plan(config, *, entries=None):
                "estimated_seconds": len(cases)*(c["duration_seconds"]+c["settle_seconds"]+c["rx_preroll_seconds"]),
                "classes": sorted(labels), "label_facet": c["label_facet"], "sampling": "bounded_seeded_stratified"}
     return {"id": uuid.uuid4().hex, "sha256": _hash({"config": c, "cases": cases}), "ready": bool(cases) and not errors,
-            "config": c, "summary": summary, "cases": cases, "errors": errors, "warnings": list(dict.fromkeys(warnings)), "created_at": utcnow()}
+            "config": c, "summary": summary, "cases": cases, "errors": errors,
+            "rejected_mode_ids": [mode_id for mode_id in c["mode_ids"] if mode_id in rejected_modes],
+            "warnings": list(dict.fromkeys(warnings)), "created_at": utcnow()}
 
 
 def apply_impairments(iq, sample_rate, effects, seed):

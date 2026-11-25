@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 25. November 2026, SignalClassifier 0.7.0, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 25. November 2026, SignalClassifier 0.7.1, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 416 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse, Generatoroberfläche und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
+- 418 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse, Generatoroberfläche und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,13 @@ Prüfstand: 25. November 2026, SignalClassifier 0.7.0, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.7.1
+
+- Vollständige Python-Suite: **418 Tests bestanden in 54,9 Sekunden**. JavaScript-Syntax, Frontend-Logiktests und `git diff --check` bestanden.
+- Zwei zusätzliche Planungsregressionen prüfen die strukturierten `rejected_mode_ids` mit ATSC-/ATSC-3.0-Katalogdaten: eindeutige Reihenfolge, Profile mit teils gültigen Varianten, erneute gültige AM-Teilplanung, unbekannte/nicht verfügbare Profile und Trennung globaler Budget-/Speicherfehler. Planung öffnet keine Hardware.
+- Frontend-Regressionen prüfen die vollständige Profil- und Override-Entfernung, erhaltene gültige Profileinstellungen, leere Restauswahl und Abwehr veralteter Pläne. Menschliche Fehlermeldungen werden nicht zur Ermittlung von Profilkennungen geparst.
+- Chromium mit lokalen API-Testantworten bei 1440 und 390 Pixeln: Sammelabwahl auch bei ausgefilterten Profilen, genau eine erneute Planung trotz Doppelklick, gelöschte Overrides bei Wiederwahl, zurückgesetzte Sendefreigaben, leere Auswahl ohne weiteren Planaufruf, gesperrte Aktion während eines aktiven Laufstatus und unveränderte Auswahl bei globalem Budgetfehler. Kein Seitenüberlauf, keine Browserfehler und keine TX-/RX-Startanforderung.
 
 ## Ergänzungen in 0.7.0
 

@@ -37,7 +37,8 @@ const source = original.replace(
   spectrumContext, mergeSpectrumFrame, spectrumStreamMessage, streamBackoff, waterfallPixelRows,
   generatorSchemeKind, generatorFacets, generatorVisibleSchemes, generatorSelectionWithAdditions,
   generatorValueList, generatorConfig, generatorEffectiveGains, generatorCaseSummary, generatorStartPayload,
-  generatorBusy, generatorNeedsAttention, generatorStatusLabel, generatorReferenceStatus, recordingMeta
+  generatorBusy, generatorNeedsAttention, generatorStatusLabel, generatorReferenceStatus, recordingMeta,
+  generatorRejectedModes, generatorPruneRejected
 };`,
 );
 const sandbox = {
@@ -1867,6 +1868,97 @@ assert.throws(
     ),
   "Changing settings invalidates a previous plan",
 );
+// Only structured profile errors can drive batch removal. A partial valid
+// variant must not keep a rejected profile in the selection.
+const rejectedSelection = new Set(["onair:atsc", "am", "onair:atsc3"]);
+const rejectionConfig = { mode_ids: [...rejectedSelection], seed: 42 };
+const rejectionOverrides = {
+  "onair:atsc": { snr_db: [10] },
+  am: { modulation_index: [0.3] },
+  "onair:atsc3": { snr_db: [20] },
+};
+const rejectionPlan = {
+  inputSignature: JSON.stringify(rejectionConfig),
+  rejected_mode_ids: [
+    "onair:atsc3",
+    "onair:atsc",
+    "onair:atsc",
+    "not-selected",
+  ],
+  errors: ["Unzureichender Speicher"],
+  cases: [{ mode_id: "onair:atsc", variation: 0 }, { mode_id: "am" }],
+};
+const pruned = f.generatorPruneRejected(
+  rejectionPlan,
+  rejectionConfig,
+  rejectedSelection,
+  rejectionOverrides,
+);
+assert.deepEqual(
+  Array.from(pruned.removed),
+  ["onair:atsc", "onair:atsc3"],
+  "Use selected IDs in their original order, once each",
+);
+assert.deepEqual(
+  Array.from(pruned.remaining),
+  ["am"],
+  "A rejected profile is removed even if some variants were valid",
+);
+assert.deepEqual(Object.keys(pruned.overrides), ["am"]);
+assert.equal(pruned.overrides.am, rejectionOverrides.am);
+assert.equal(
+  rejectedSelection.size,
+  3,
+  "Pure preparation does not mutate the selection",
+);
+assert.deepEqual(
+  Object.keys(rejectionOverrides),
+  ["onair:atsc", "am", "onair:atsc3"],
+  "Original overrides remain untouched",
+);
+const storageOnly = f.generatorPruneRejected(
+  { ...rejectionPlan, rejected_mode_ids: [] },
+  rejectionConfig,
+  rejectedSelection,
+  rejectionOverrides,
+);
+assert.equal(
+  storageOnly.removed.length,
+  0,
+  "A global storage error must not remove profiles",
+);
+assert.equal(
+  f.generatorRejectedModes(
+    { errors: ["onair:atsc: Fehler"] },
+    rejectedSelection,
+  ).length,
+  0,
+  "Never infer IDs by parsing human error strings",
+);
+assert.equal(
+  f.generatorPruneRejected(
+    {
+      ...rejectionPlan,
+      rejected_mode_ids: ["onair:atsc", "am", "onair:atsc3"],
+    },
+    rejectionConfig,
+    rejectedSelection,
+    rejectionOverrides,
+  ).remaining.length,
+  0,
+);
+assert.throws(
+  () =>
+    f.generatorPruneRejected(
+      rejectionPlan,
+      { ...rejectionConfig, seed: 43 },
+      rejectedSelection,
+      rejectionOverrides,
+    ),
+  /geändert/,
+  "A stale plan cannot remove current profiles",
+);
+
 const caseSummary = f.generatorCaseSummary({
   case_id: "case-0042",
   mode_id: "am",
