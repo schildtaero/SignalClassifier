@@ -253,7 +253,7 @@ class _Projection:
     def config(self, value):
         value = _obj(value)
         out = _numbers(value, _CONFIG_NUMBERS)
-        out.update(_bools(value, ("include_clean", "use_priors", "allow_same_session", "respect_generation_splits")))
+        out.update(_bools(value, ("include_clean", "use_priors", "allow_same_session", "respect_generation_splits", "use_all_recordings")))
         out["source"] = _enum(value.get("source"), _SOURCES)
         out["evaluation_mode"] = _enum(value.get("evaluation_mode"), {"independent", "training_only"})
         out["device"] = _enum(value.get("device"), {"auto", "cpu", "cuda"})
@@ -265,6 +265,19 @@ class _Projection:
         execution = _obj(value.get("execution"))
         out["execution"] = {**_numbers(execution, _EXECUTION_NUMBERS), "mode": _enum(execution.get("mode"), {"auto", "serial", "parallel"})}
         return out
+
+    def recording_sampling(self, value):
+        """Publish the measured bounded sampling summary, never source objects."""
+        if not isinstance(value, dict) or not value:
+            return None
+        result = {"policy": _enum(value.get("policy"), {"all_recordings_fair_quota_v1"})}
+        for key in ("recordings", "segments", "retained_iq_bytes", "budget_iq_bytes",
+                    "anchor_samples", "available_segments", "segment_limit"):
+            number = value.get(key)
+            if not isinstance(number, bool) and isinstance(number, numbers.Integral) and 0 <= number <= 1e15:
+                result[key] = int(number)
+        result.update(_bools(value, ("capped", "all_recordings_represented")))
+        return result
 
     def split_policy(self, config):
         config = _obj(config)
@@ -475,6 +488,8 @@ class _Projection:
                     "input": _enum(topology.get("input"), {"features", "feature_sequence", "iq", "spectrogram"}),
                     "parameters": _numbers(topology.get("parameters"), {"width", "depth", "kernel", "heads", "dropout"})},
                 "config": self.config(config), "validation_independence": self.split_policy(config),
+                **_bools(report, ("use_all_recordings",)),
+                "recording_sampling": self.recording_sampling(report.get("recording_sampling")),
                 **self.generator_reference(report),
                 "recording_group_memberships": self.group_memberships(report.get("recording_group_memberships")),
                 "classes": self.classes(report.get("classes", config.get("classes"))),
@@ -582,7 +597,7 @@ def _software(value):
     out.update(_bools(value, ("working_tree_dirty",)))
     out["dependencies"] = {key: version for key in ("numpy", "scipy", "torch", "fastapi", "uvicorn", "psutil", "python-multipart")
                            if isinstance(version := _obj(value.get("dependencies")).get(key), str) and _VERSION.fullmatch(version)}
-    known_files = {name + ".py" for name in ("__init__", "__main__", "app", "db", "drones", "experiment_log", "labels", "ml", "optimization", "receivers", "reporting", "sigmf", "topologies", "execution", "telemetry", "decision", "publication", "analysis_runtime", "surveillance", "spectrum_stream", "generation", "waveforms", "onair", "txhardware")}
+    known_files = {name + ".py" for name in ("__init__", "__main__", "app", "db", "drones", "experiment_log", "labels", "ml", "optimization", "receivers", "reporting", "sigmf", "topologies", "execution", "telemetry", "decision", "publication", "analysis_runtime", "surveillance", "spectrum_stream", "generation", "waveforms", "onair", "txhardware", "training_plan")}
     out["source_files_sha256"] = {key: digest for key, raw in _obj(value.get("source_files_sha256")).items() if key in known_files and (digest := _digest(raw))}
     out["data_catalogues_sha256"] = {key: digest for key, raw in _obj(value.get("data_catalogues_sha256")).items()
                                     if key in {"onair-generators.json", "onair-modes.json"} and (digest := _digest(raw))}
@@ -619,6 +634,8 @@ def make_publication_package(experiment, dataset_inventory=None, events=None) ->
     data = {"schema_version": 1, "package_kind": "signalclassifier-paper-results", "run_alias": projection.alias("run", experiment.get("id")),
             "status": _enum(experiment.get("status"), _STATUS), "error_category": _error_category(experiment.get("error")),
             "config": projection.config(config), "validation_independence": projection.split_policy(config),
+            **_bools(report, ("use_all_recordings",)),
+            "recording_sampling": projection.recording_sampling(report.get("recording_sampling")),
             **projection.generator_reference(report),
             "recording_group_memberships": projection.group_memberships(report.get("recording_group_memberships")),
             "overall_comparison_available": bool(report.get("comparison")),

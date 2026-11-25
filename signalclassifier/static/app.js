@@ -37,6 +37,8 @@
     selectedRecordings: new Set(),
     datasetReadiness: null,
     readinessSequence: 0,
+    trainingPlanRevision: 0,
+    trainingPlanBusy: false,
     wasReceiving: false,
     cleanupPlan: null,
     cleanupBusy: false,
@@ -4231,17 +4233,19 @@
   function experimentConfig({
     allowEmptyTopologies = false,
     includeDisabledOptimization = false,
+    trainingPreset = false,
   } = {}) {
     const form = $("#experiment-form");
     const f = new FormData(form);
-    const optimization = optimizationConfigFromForm(
-      form,
-      includeDisabledOptimization,
-    );
+    if (trainingPreset && f.get("source") !== "recordings")
+      throw new Error(
+        "Für diesen Trainingsplan zuerst Aufnahmen als Datenquelle wählen.",
+      );
+    const optimization = trainingPreset
+      ? normalizeOptimizationConfig({ enabled: false })
+      : optimizationConfigFromForm(form, includeDisabledOptimization);
     const activeSearch = optimization.enabled && !includeDisabledOptimization;
-    const activeBase = activeSearch
-      ? optimizationBaseConfig(optimization)
-      : null;
+    const activeBase = activeSearch ? optimizationBaseConfig(optimization) : null;
     const lengths = activeSearch
       ? activeBase.segment_lengths
       : parseList(form.elements.segment_lengths.value, "Segmentlängen", true);
@@ -4254,12 +4258,22 @@
     const config = {
       name: f.get("name"),
       source: f.get("source"),
-      evaluation_mode:
-        f.get("source") === "recordings"
+      evaluation_mode: trainingPreset
+        ? "training_only"
+        : f.get("source") === "recordings"
           ? f.get("evaluation_mode")
           : "independent",
-      allow_same_session: f.get("source") === "recordings" && f.has("allow_same_session"),
-      respect_generation_splits: f.get("source") === "recordings" && f.has("respect_generation_splits"),
+      allow_same_session:
+        f.get("source") === "recordings" && f.has("allow_same_session"),
+      respect_generation_splits:
+        !trainingPreset &&
+        f.get("source") === "recordings" &&
+        f.has("respect_generation_splits"),
+      use_all_recordings:
+        trainingPreset ||
+        (f.get("source") === "recordings" &&
+          f.get("evaluation_mode") === "training_only" &&
+          f.has("use_all_recordings")),
       topology_id: topologyIds[0],
       topology_ids: topologyIds,
       samples_per_class: Number(f.get("samples_per_class")),
@@ -4294,10 +4308,7 @@
       repository: $("#experiment-github-repository").value,
       branch: $("#experiment-github-branch").value,
     });
-    if (
-      config.optimization.enabled &&
-      config.evaluation_mode === "training_only"
-    )
+    if (config.optimization.enabled && config.evaluation_mode === "training_only")
       throw new Error(
         "Automatische HPO benötigt eine unabhängige Bewertung; im Modus „Nur trainieren“ ist sie nicht verfügbar.",
       );
@@ -4318,6 +4329,8 @@
     return config;
   }
   function scheduleReadiness() {
+    ++state.trainingPlanRevision;
+    updateAllRecordingsControls();
     ++state.readinessSequence;
     state.datasetReadiness = null;
     $("#dataset-readiness").replaceChildren(
@@ -4357,23 +4370,44 @@
         );
     }
   }
+  function trainingSamplingSummary(sampling) {
+    if (!sampling || typeof sampling !== "object") return null;
+    const coverage =
+      sampling.all_recordings_represented === true
+        ? "Jede gewählte Datei ist vertreten."
+        : sampling.all_recordings_represented === false
+          ? "Noch nicht jede gewählte Datei ist vertreten."
+          : "Dateiabdeckung ist unbekannt.";
+    return `Trainingsstichprobe: ${num(sampling.recordings, 0)} Dateien · ${num(sampling.segments, 0)} für das Training ausgewählte Segmente · ${bytes(sampling.retained_iq_bytes)} / ${bytes(sampling.budget_iq_bytes)} IQ-Budget. ${coverage}${sampling.capped === true ? " Die Segmentzahl wurde durch die Stichprobenquote oder das Budget begrenzt." : ""} Dies bezeichnet Segmente, nicht jede Rohprobe.`;
+  }
   function renderReadiness(data) {
     state.datasetReadiness = data;
     const trainingOnly = data.evaluation_mode === "training_only";
     const classes = arr(data.classes);
-    const sameSession = data.split_policy === "recording_holdout_same_session_allowed";
+    const sameSession =
+      data.split_policy === "recording_holdout_same_session_allowed";
     const body = el("div", { class: "readiness-body" }, [
       el("div", { class: "readiness-heading" }, [
         el("strong", {
           text: trainingOnly
             ? "Training ohne unabhängige Bewertung"
-            : sameSession ? "Bewertung mit getrennten Aufnahmen · gleiche Sitzung zugelassen" : "Datengrundlage für unabhängige Bewertung",
+            : sameSession
+              ? "Bewertung mit getrennten Aufnahmen · gleiche Sitzung zugelassen"
+              : "Datengrundlage für unabhängige Bewertung",
         }),
         pill(
           data.ready ? "Bereit" : "Weitere Daten nötig",
           data.ready ? "green" : "amber",
         ),
       ]),
+      ...(data.sampling
+        ? [
+            el("p", {
+              class: "field-help",
+              text: trainingSamplingSummary(data.sampling),
+            }),
+          ]
+        : []),
       classes.length
         ? el("div", { class: "table-scroll" }, [
             el("table", { class: "data-table readiness-table" }, [
@@ -4381,9 +4415,12 @@
                 el(
                   "tr",
                   {},
-                  ["Klasse", "Aufnahmen", sameSession ? "Ursprüngliche Aufnahmen" : "Sitzungen", "Segmente"].map((t) =>
-                    el("th", { text: t }),
-                  ),
+                  [
+                    "Klasse",
+                    "Aufnahmen",
+                    sameSession ? "Ursprüngliche Aufnahmen" : "Sitzungen",
+                    data.sampling ? "Verfügbare Segmente" : "Segmente",
+                  ].map((t) => el("th", { text: t })),
                 ),
               ]),
               el(
@@ -4436,6 +4473,170 @@
           }),
     ]);
     $("#dataset-readiness").replaceChildren(body);
+  }
+  function useAllRecordingsFlag(value, source, mode) {
+    if (value !== undefined && typeof value !== "boolean")
+      throw new Error(
+        "Alle Aufnahmen verwenden muss als boolescher Wert gespeichert sein.",
+      );
+    if (value === true && (source !== "recordings" || mode !== "training_only"))
+      throw new Error(
+        "Alle Aufnahmen verwenden ist nur für Aufnahmen im Modus „Nur trainieren“ möglich.",
+      );
+    return value ?? false;
+  }
+  function normalizeTrainingPlanSettings(settings) {
+    const allowed = new Set([
+      "evaluation_mode",
+      "optimization",
+      "respect_generation_splits",
+      "use_all_recordings",
+      "segment_length",
+      "segment_lengths",
+      "learning_rate",
+      "learning_rates",
+      "batch_size",
+      "batch_sizes",
+    ]);
+    if (
+      !settings ||
+      typeof settings !== "object" ||
+      Array.isArray(settings) ||
+      Object.keys(settings).some((key) => !allowed.has(key)) ||
+      settings.evaluation_mode !== "training_only" ||
+      settings.optimization?.enabled !== false ||
+      settings.respect_generation_splits !== false ||
+      settings.use_all_recordings !== true
+    )
+      throw new Error(
+        "Der Trainingsplan enthält keine gültige, unbewertete Trainingskonfiguration.",
+      );
+    for (const [scalar, list, minimum, maximum, integer] of [
+      ["segment_length", "segment_lengths", 256, 65536, true],
+      ["learning_rate", "learning_rates", 0.00001, 0.1, false],
+      ["batch_size", "batch_sizes", 4, 256, true],
+    ]) {
+      const value = settings[scalar];
+      if (
+        typeof value !== "number" ||
+        !Number.isFinite(value) ||
+        value < minimum ||
+        value > maximum ||
+        (integer && !Number.isInteger(value)) ||
+        !Array.isArray(settings[list]) ||
+        settings[list].length !== 1 ||
+        settings[list][0] !== value
+      )
+        throw new Error(
+          "Der Trainingsplan enthält ungültige Segment- oder Hyperparameterwerte.",
+        );
+    }
+    return {
+      evaluation_mode: "training_only",
+      optimization: { enabled: false },
+      respect_generation_splits: false,
+      use_all_recordings: true,
+      segment_length: settings.segment_length,
+      segment_lengths: [settings.segment_length],
+      learning_rate: settings.learning_rate,
+      learning_rates: [settings.learning_rate],
+      batch_size: settings.batch_size,
+      batch_sizes: [settings.batch_size],
+    };
+  }
+  function trainingPlanFormSignature() {
+    return JSON.stringify(
+      [...$("#experiment-form").elements]
+        .filter(
+          (field) =>
+            (field.name || field.id) &&
+            !["button", "submit", "reset", "file"].includes(field.type),
+        )
+        .map((field) => [
+          field.name || field.id,
+          field.type === "checkbox"
+            ? field.checked
+            : field.multiple
+              ? [...field.options]
+                  .filter((option) => option.selected)
+                  .map((option) => option.value)
+              : field.value,
+        ])
+        .concat([["selected_recordings", selectedExperimentRecordingIds()]]),
+    );
+  }
+  function updateAllRecordingsControls() {
+    const form = $("#experiment-form"),
+      allowed =
+        form.elements.source.value === "recordings" &&
+        form.elements.evaluation_mode.value === "training_only";
+    $("#experiment-use-all-field").hidden = !allowed;
+    form.elements.use_all_recordings.disabled = !allowed;
+    if (!allowed) form.elements.use_all_recordings.checked = false;
+    $("#experiment-training-plan").disabled =
+      state.trainingPlanBusy ||
+      form.elements.source.value !== "recordings" ||
+      selectedExperimentRecordingIds().length === 0;
+  }
+  async function prepareAllRecordingsTraining() {
+    if (state.trainingPlanBusy) return;
+    const config = experimentConfig({ trainingPreset: true });
+    if (!arr(config.recording_ids).length)
+      throw new Error("Zuerst die gewünschten Aufnahmen auswählen.");
+    const revision = state.trainingPlanRevision,
+      signature = trainingPlanFormSignature();
+    const notice = $("#experiment-training-plan-status");
+    state.trainingPlanBusy = true;
+    updateAllRecordingsControls();
+    notice.hidden = false;
+    notice.textContent = "Passender Trainingsplan wird geprüft …";
+    try {
+      const result = await api("/api/experiments/training-plan", {
+        method: "POST",
+        body: config,
+      });
+      if (
+        revision !== state.trainingPlanRevision ||
+        signature !== trainingPlanFormSignature()
+      ) {
+        notice.textContent =
+          "Die Konfiguration wurde während der Prüfung geändert. Der Trainingsplan wurde nicht übernommen; bitte erneut anfordern.";
+        return;
+      }
+      const settings = normalizeTrainingPlanSettings(result.settings);
+      if (
+        !result.readiness ||
+        typeof result.readiness.ready !== "boolean" ||
+        result.readiness.evaluation_mode !== "training_only"
+      )
+        throw new Error("Die Vorprüfung des Trainingsplans ist unvollständig.");
+      prepareExperimentDraft(
+        { ...config, ...settings },
+        state.topologies,
+        $$("#experiment-recordings input").map((input) => input.value),
+        state.status.hardware?.torch_available,
+      );
+      const form = $("#experiment-form");
+      form.elements.evaluation_mode.value = settings.evaluation_mode;
+      form.elements.optimization_enabled.checked = false;
+      form.elements.respect_generation_splits.checked = false;
+      form.elements.use_all_recordings.checked = true;
+      form.elements.segment_lengths.value = String(settings.segment_length);
+      form.elements.learning_rates.value = String(settings.learning_rate);
+      form.elements.batch_sizes.value = String(settings.batch_size);
+      updateOptimizationControls();
+      updateAllRecordingsControls();
+      updateGenerationSplitControls();
+      scheduleReadiness();
+      renderReadiness(result.readiness);
+      notice.textContent = `${num(result.summary?.selected_recordings ?? config.recording_ids.length, 0)} gewählte Dateien · ${num(settings.segment_length, 0)} Samples je Segment. Trainingsvorgabe übernommen, noch kein Experiment gestartet. Keine Bewertung, kein Ranking und keine HPO; die IQ-Stichprobe bleibt begrenzt.`;
+    } catch (error) {
+      notice.textContent = `Trainingsplan nicht übernommen: ${errorMessage(error)}`;
+      throw error;
+    } finally {
+      state.trainingPlanBusy = false;
+      updateAllRecordingsControls();
+    }
   }
   async function startExperiment() {
     const form = $("#experiment-form");
@@ -7806,6 +8007,7 @@
       throw new Error("Generator-Kohorten müssen als boolescher Wert gespeichert sein.");
     if (c.respect_generation_splits === true && (c.allow_same_session !== true || c.source !== "recordings"))
       throw new Error("Generator-Kohorten benötigen Aufnahmen als Datenquelle und die Zustimmung zu Aufnahmen derselben Sitzung.");
+    const useAllRecordings = useAllRecordingsFlag(c.use_all_recordings, c.source, c.evaluation_mode);
     const listBounds = {
       segment_lengths: [256, 65536, 4, true],
       snr_db: [-30, 80, 12, false],
@@ -7880,7 +8082,7 @@
       );
     const available = new Set(availableRecordings);
     return {
-      config: c,
+      config: { ...c, use_all_recordings: useAllRecordings },
       optimization,
       execution,
       githubPublication,
@@ -7942,6 +8144,8 @@
     form.elements.use_priors.checked = c.use_priors === true;
     form.elements.allow_same_session.checked = c.allow_same_session === true;
     form.elements.respect_generation_splits.checked = c.respect_generation_splits === true;
+    form.elements.use_all_recordings.checked = c.use_all_recordings === true;
+    updateAllRecordingsControls();
     updateGenerationSplitControls();
     form.elements.experiment_notes.value = c.experiment_notes || "";
     populateOptimizationForm(prepared.optimization);
@@ -9367,6 +9571,10 @@
     if (control.disabled) control.checked = false;
   }
   function setupEvents() {
+    updateAllRecordingsControls();
+    $("#experiment-source").addEventListener("change", updateAllRecordingsControls);
+    $("#experiment-evaluation-mode").addEventListener("change", updateAllRecordingsControls);
+    $("#experiment-training-plan").addEventListener("click", () => action(prepareAllRecordingsTraining));
     updateGenerationSplitControls();
     $("#experiment-source").addEventListener("change", updateGenerationSplitControls);
     $("#experiment-allow-same-session").addEventListener("change", updateGenerationSplitControls);

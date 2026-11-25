@@ -1,4 +1,6 @@
-# SignalClassifier 0.7.1
+# SignalClassifier 0.7.2
+
+Version 0.7.2 ergänzt **„Alle gewählten Aufnahmen nur trainieren“** im Experiment-Setup. Der geprüfte Trainingsplan passt die Segmentlänge an kurze Dateien an, deaktiviert automatische Hyperparametersuche und Generator-Holdout und behält alle gewählten Dateien bei. Vollständige Präfixsegmente werden innerhalb von 128 MiB IQ und 4096 Trainingssegmenten auf die Dateien verteilt; das ist eine begrenzte Stichprobe, keine Verarbeitung jeder Rohprobe. Modelle bleiben ausdrücklich unbewertet und erhalten kein Genauigkeitsranking. [Vorgehen und Grenzen](docs/training-mit-allen-aufnahmen.md).
 
 Version 0.7.1 ergänzt nach der Generator-Planprüfung **„Beanstandete Profile abwählen“**: Profile mit mindestens einer fehlerhaften Variante lassen sich gesammelt entfernen; die verbleibende Auswahl wird erneut geprüft. Globale Speicher-/Budgetfehler entfernen keine Profile. Die Sendefreigabe muss für den neuen Plan erneut erteilt werden.
 

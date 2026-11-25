@@ -38,7 +38,7 @@ const source = original.replace(
   generatorSchemeKind, generatorFacets, generatorVisibleSchemes, generatorSelectionWithAdditions,
   generatorValueList, generatorConfig, generatorEffectiveGains, generatorCaseSummary, generatorStartPayload,
   generatorBusy, generatorNeedsAttention, generatorStatusLabel, generatorReferenceStatus, recordingMeta,
-  generatorRejectedModes, generatorPruneRejected
+  generatorRejectedModes, generatorPruneRejected, useAllRecordingsFlag, normalizeTrainingPlanSettings, trainingSamplingSummary
 };`,
 );
 const sandbox = {
@@ -534,6 +534,120 @@ assert.throws(() => f.prepareExperimentDraft({ ...draft, allow_same_session: fal
 assert.equal(f.recordingMeta({id:"generated",annotation:{verification_kind:"generator_reference",verified:true,label:"AM"}}).generator_reference,true);
 assert.equal(f.recordingMeta({id:"generated",metadata:{global:{"sc:generation":{mode_id:"am"}}}}).generator_reference,true);
 assert.equal(f.recordingMeta({id:"ordinary",annotation:{verified:true,label:"AM"}}).generator_reference,false);
+assert.equal(
+  f.useAllRecordingsFlag(undefined, "recordings", "training_only"),
+  false,
+);
+assert.equal(f.useAllRecordingsFlag(true, "recordings", "training_only"), true);
+for (const value of ["true", 1, null, {}, []])
+  assert.throws(
+    () => f.useAllRecordingsFlag(value, "recordings", "training_only"),
+    /boolescher/,
+  );
+assert.throws(
+  () => f.useAllRecordingsFlag(true, "synthetic", "training_only"),
+  /Nur trainieren/,
+);
+assert.throws(
+  () => f.useAllRecordingsFlag(true, "recordings", "independent"),
+  /Nur trainieren/,
+);
+for (const enabled of [false, true])
+  assert.equal(
+    f.prepareExperimentDraft(
+      {
+        ...draft,
+        evaluation_mode: "training_only",
+        use_all_recordings: enabled,
+      },
+      catalog,
+      ["available-a"],
+      false,
+    ).config.use_all_recordings,
+    enabled,
+    "All-file sampling flag roundtrips without coercion",
+  );
+assert.equal(
+  prepared.config.use_all_recordings,
+  false,
+  "Old drafts restore the disabled default",
+);
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      { ...draft, use_all_recordings: "true" },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /boolescher/,
+);
+assert.throws(
+  () =>
+    f.prepareExperimentDraft(
+      { ...draft, evaluation_mode: "independent", use_all_recordings: true },
+      catalog,
+      ["available-a"],
+      false,
+    ),
+  /Nur trainieren/,
+);
+const trainingPlanSettings = {
+  evaluation_mode: "training_only",
+  optimization: { enabled: false },
+  respect_generation_splits: false,
+  use_all_recordings: true,
+  segment_length: 512,
+  segment_lengths: [512],
+  learning_rate: 0.001,
+  learning_rates: [0.001],
+  batch_size: 32,
+  batch_sizes: [32],
+};
+assert.deepEqual(
+  JSON.parse(
+    JSON.stringify(f.normalizeTrainingPlanSettings(trainingPlanSettings)),
+  ),
+  trainingPlanSettings,
+);
+for (const mutation of [
+  { use_all_recordings: false },
+  { use_all_recordings: "true" },
+  { respect_generation_splits: true },
+  { optimization: { enabled: true } },
+  { evaluation_mode: "independent" },
+  { segment_length: 128, segment_lengths: [128] },
+  { segment_lengths: [512, 1024] },
+  { learning_rates: [0.01] },
+  { batch_size: 0, batch_sizes: [0] },
+  { topology_ids: ["replacement"] },
+])
+  assert.throws(
+    () =>
+      f.normalizeTrainingPlanSettings({ ...trainingPlanSettings, ...mutation }),
+    /Trainingsplan/,
+  );
+assert.equal(
+  trainingPlanSettings.segment_lengths.length,
+  1,
+  "Response preparation does not mutate backend values",
+);
+const samplingText = f.trainingSamplingSummary({
+  recordings: 100,
+  segments: 500,
+  retained_iq_bytes: 4 * 1048576,
+  budget_iq_bytes: 128 * 1048576,
+  capped: true,
+  all_recordings_represented: true,
+});
+assert.match(samplingText, /100 Dateien/);
+assert.match(samplingText, /500.*ausgewählte Segmente/);
+assert.match(samplingText, /4 MiB \/ 128 MiB/);
+assert.match(samplingText, /Jede gewählte Datei/);
+assert.match(samplingText, /begrenzt/);
+assert.equal(f.trainingSamplingSummary(null), null);
+assert.match(f.trainingSamplingSummary({}), /unbekannt/);
+
 assert.deepEqual(Array.from(prepared.recordingIds), ["available-a"]);
 assert.deepEqual(Array.from(prepared.missingRecordingIds), ["missing-b"]);
 assert.deepEqual(
@@ -2035,6 +2149,10 @@ for (const id of [
   "generator-global-stop",
   "generator-global-banner",
   "experiment-respect-generation-splits",
+  "experiment-training-plan",
+  "experiment-training-plan-status",
+  "experiment-use-all-recordings",
+  "experiment-use-all-field",
   "view-analyse",
   "analysis-settings-form",
   "analysis-scan-form",
@@ -2054,7 +2172,7 @@ for (const id of [
   );
 }
 
-for (const id of ["generator-transmit-enabled", "generator-setup-confirmed"]) {
+for (const id of ["generator-transmit-enabled", "generator-setup-confirmed", "experiment-use-all-recordings"]) {
   const tag = staticHTML.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`, "s"))?.[0];
   assert.ok(tag, `${id} exists as an input`);
   assert.doesNotMatch(tag, /\bchecked\b/, `${id} is unchecked by default`);

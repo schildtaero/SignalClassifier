@@ -42,6 +42,8 @@ Die OnAir-CLI stellt nicht für jedes Profil neue Nutzdaten bereit. Ihre Generat
 
 ## Frequenz, Pegel und Variationen
 
+Für ein erstes Training mit festen externen Nutzdaten oder gemischten Bestandsaufnahmen kann im Experiment-Setup ausdrücklich **Alle gewählten Aufnahmen nur trainieren** gewählt werden. Dieser Weg verwendet eine begrenzte Stichprobe jeder gewählten geeigneten Datei und liefert keine unabhängige Bewertung. [Bedienung und Grenzen](training-mit-allen-aufnahmen.md).
+
 Die Frequenzen sind frei innerhalb des gemeinsamen Hardwarebereichs wählbar: mit unverändertem Pluto als Sender und RSP1A als Empfänger **325 MHz bis 2 GHz**, mit Pluto als Empfänger grundsätzlich bis **3,8 GHz**. Der Laborpfad begrenzt die RX-Rate zusätzlich auf 10 Millionen Samples pro Sekunde. Stock-Pluto-Grenzen werden nicht durch Firmwareänderung erweitert. Das Signal darf für einen Kabelversuch auf einer anderen Trägerfrequenz als seinem üblichen Funkdienst liegen; das Protokoll-/Modulationslabel wird aus der Quelle abgeleitet, nicht aus dem Frequenzband.
 
 Der manuelle TX-Gain ist eine relative Hardwareeinstellung in Schritten von **0,25 dB**, kein kalibrierter Ausgangspegel in dBm. Zusätzliche Dämpfungswerte werden ausschließlich **abgezogen**. Beispiel: Basis `-35 dB`, zusätzliche Dämpfung `[0, 3, 9]` ergibt `[-35, -38, -44] dB`. Kein Fall überschreitet den manuellen Basiswert. Werte unter `-89,75 dB` oder über `0 dB` werden abgewiesen. Tatsächliche Frequenz, Rate, Filterbandbreite und TX-Gain werden zurückgelesen; unverträgliche Werte verhindern den Sendestart.

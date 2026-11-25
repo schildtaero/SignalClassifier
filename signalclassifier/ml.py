@@ -36,6 +36,7 @@ FEATURE_NAMES = ["amplitude_cv", "amplitude_kurtosis", "phase_std", "phase_dispe
 _SCHEMA = 1
 MAX_RECORDINGS = 1000
 MAX_SEGMENTS_PER_SPLIT = 4096
+MAX_RETAINED_IQ_SAMPLES = 16_777_216
 _EXECUTION_CONTEXT = contextvars.ContextVar("signalclassifier_ml_execution", default=None)
 _DATASET_EXECUTION = contextvars.ContextVar("signalclassifier_ml_dataset_execution", default=None)
 PREPROCESSING_PARALLEL_THRESHOLD = 32
@@ -265,6 +266,9 @@ def _validate_config(config):
     c.setdefault("respect_generation_splits", False)
     if type(c["respect_generation_splits"]) is not bool:
         raise ValueError("respect_generation_splits muss true oder false sein.")
+    c.setdefault("use_all_recordings", False)
+    if type(c["use_all_recordings"]) is not bool:
+        raise ValueError("use_all_recordings muss true oder false sein.")
     c.setdefault("evaluation_mode", "independent")
     if c["evaluation_mode"] not in ("independent", "training_only"):
         raise ValueError("evaluation_mode muss independent oder training_only sein.")
@@ -301,6 +305,8 @@ def _validate_config(config):
         raise ValueError("Quelle oder Rechengerät ist ungültig.")
     if c["respect_generation_splits"] and (c["source"] != "recordings" or not c["allow_same_session"]):
         raise ValueError("Generator-Splits erfordern Aufnahmen und ausdrücklich allow_same_session=true.")
+    if c["use_all_recordings"] and (c["source"] != "recordings" or c["evaluation_mode"] != "training_only"):
+        raise ValueError("Alle Aufnahmen verwenden ist nur für source=recordings im Modus Nur trainieren erlaubt.")
     if c["source"] == "recordings" and not c.get("recordings"):
         raise ValueError("Für dieses Experiment fehlen bestätigte AM-/FM-Aufnahmen.")
     c["device"] = c.get("device", "auto")
@@ -380,6 +386,7 @@ def _split_metadata(config):
     evaluated = config.get("evaluation_mode", "independent") != "training_only"
     synthetic = config.get("source") == "synthetic"
     return {"allow_same_session": config.get("allow_same_session", False),
+            "use_all_recordings": config.get("use_all_recordings", False),
             "respect_generation_splits": config.get("respect_generation_splits", False),
             "split_source": "generator_plan" if config.get("respect_generation_splits") else "group_assignment",
             "split_policy": "synthetic_origin_holdout" if synthetic else "recording_holdout_same_session_allowed" if relaxed else "session_holdout",
@@ -570,6 +577,52 @@ def _assign_groups(membership, classes, seed, training_only=False):
     raise ValueError("Aufnahmegruppen lassen sich nicht mit allen Klassen auf Training, Validierung und Test aufteilen. Weitere unabhängige Aufnahmen ergänzen oder ausdrücklich „Nur trainieren“ ohne Bewertung wählen.")
 
 
+def _recording_quota_plan(config, inventory, anchor):
+    """Allocate bounded complete windows fairly, retaining every selected file.
+
+    The quota is determined from metadata before reading IQ. It is deliberately
+    restricted to unvalidated training: changing held-out datasets or HPO anchors
+    through automatic subsampling would require a separate evaluation policy.
+    """
+    if config.get("use_all_recordings") is not True or config.get("source") != "recordings" or config.get("evaluation_mode") != "training_only":
+        raise ValueError("Aufnahmequoten sind nur für ausdrücklich aktiviertes Nur-trainieren mit Aufnahmen erlaubt.")
+    if type(anchor) is not int or not 256 <= anchor <= 65_536:
+        raise ValueError("Für Aufnahmequoten ist eine Segmentlänge von 256 bis 65536 Samples erforderlich.")
+    samples_cap = config.get("samples_per_class", 64)
+    samples_cap = min(64, samples_cap) if type(samples_cap) is int and samples_cap > 0 else 64
+    capacities = [min(entry["sample_count"] // anchor, 4_194_304 // anchor, samples_cap) for entry in inventory]
+    if not capacities or any(capacity < 1 for capacity in capacities):
+        raise ValueError("Jede ausgewählte Aufnahme benötigt mindestens ein vollständiges Segment; kürzere Segmentlänge wählen. Keine Datei wird ausgelassen oder aufgefüllt.")
+    limit = min(MAX_SEGMENTS_PER_SPLIT, MAX_RETAINED_IQ_SAMPLES // anchor)
+    if len(inventory) > limit:
+        raise ValueError(f"Mindestens ein Segment je Datei benötigt {len(inventory) * anchor * 8} IQ-Bytes; das 128-MiB-IQ-Budget beziehungsweise {MAX_SEGMENTS_PER_SPLIT} Segmente reicht nicht. Kürzere Segmentlänge wählen; keine Datei wird ausgelassen.")
+    quotas = [1] * len(inventory)
+    remaining = limit - len(inventory)
+    order = sorted(range(len(inventory)), key=lambda index: (
+        str(inventory[index].get("label", "")),
+        str(inventory[index].get("id") or Path(inventory[index]["metadata_path"]).stem),
+        str(inventory[index].get("group_id", "")), str(inventory[index]["metadata_path"])))
+    while remaining:
+        advanced = False
+        for index in order:
+            if quotas[index] < capacities[index]:
+                quotas[index] += 1
+                remaining -= 1
+                advanced = True
+                if not remaining:
+                    break
+        if not advanced:
+            break
+    segments = sum(quotas)
+    summary = {"policy": "all_recordings_fair_quota_v1", "recordings": len(inventory),
+               "segments": segments, "retained_iq_bytes": segments * anchor * 8,
+               "budget_iq_bytes": MAX_RETAINED_IQ_SAMPLES * 8,
+               "capped": segments < sum(capacities), "all_recordings_represented": True,
+               "anchor_samples": anchor, "available_segments": sum(capacities),
+               "segment_limit": MAX_SEGMENTS_PER_SPLIT}
+    return quotas, summary
+
+
 def dataset_readiness(config: dict) -> dict:
     """Metadata preflight; opt-in recording holdout also streams identity hashes.
 
@@ -583,6 +636,13 @@ def dataset_readiness(config: dict) -> dict:
     if type(config.get("respect_generation_splits", False)) is not bool:
         return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
                 "errors": ["respect_generation_splits muss true oder false sein."], "warnings": [], "group_count": 0}
+    if type(config.get("use_all_recordings", False)) is not bool:
+        return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
+                "errors": ["use_all_recordings muss true oder false sein."], "warnings": [], "group_count": 0}
+    if config.get("use_all_recordings") and (config.get("source", "recordings" if config.get("recordings") else "synthetic") != "recordings"
+                                            or config.get("evaluation_mode", "independent") != "training_only"):
+        return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
+                "errors": ["Alle Aufnahmen verwenden ist nur für source=recordings im Modus Nur trainieren erlaubt."], "warnings": [], "group_count": 0}
     if config.get("respect_generation_splits") and (config.get("source", "recordings" if config.get("recordings") else "synthetic") != "recordings"
                                                    or config.get("allow_same_session") is not True):
         return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
@@ -707,6 +767,31 @@ def dataset_readiness(config: dict) -> dict:
             retained_samples += min(count, length * samples_cap, 4_194_304)
         except (OSError, ValueError, UnicodeError) as exc:
             errors.append(f"{label}, Aufnahme {index + 1}: nicht lesbar ({exc}). SigMF-Metadaten und zugehörige IQ-Datei prüfen.")
+    if config.get("use_all_recordings", False):
+        result["sampling"] = {"policy": "all_recordings_fair_quota_v1", "recordings": len(entries),
+                              "segments": 0, "retained_iq_bytes": 0,
+                              "budget_iq_bytes": MAX_RETAINED_IQ_SAMPLES * 8,
+                              "capped": False, "all_recordings_represented": False,
+                              "anchor_samples": length, "available_segments": 0,
+                              "segment_limit": MAX_SEGMENTS_PER_SPLIT}
+        try:
+            quotas, sampling = _recording_quota_plan({**config, "source": source, "evaluation_mode": mode}, effective, length)
+            sampling["all_recordings_represented"] = len(effective) == len(entries)
+            result["sampling"] = sampling
+            retained_samples = sampling["retained_iq_bytes"] // 8
+            planned_counts = {}
+            per_group = {}
+            for entry, quota in zip(effective, quotas):
+                planned_counts[entry["label"]] = planned_counts.get(entry["label"], 0) + quota
+                per_group[entry["group_id"]] = per_group.get(entry["group_id"], 0) + quota
+            for label, state in stats.items():
+                state["usable_segments"] = planned_counts.get(label, 0)
+            group_segment_counts = {length: per_group}
+            warnings.append("Alle ausgewählten verwendbaren Dateien werden mit begrenzten vollständigen Segmenten repräsentiert; dies umfasst nicht jede Rohprobe und bleibt ohne unabhängige Bewertung.")
+            if sampling["capped"]:
+                warnings.append("Die Segmentzahl je Datei wurde für das bestehende IQ-/Segmentbudget reduziert; keine ausgewählte verwendbare Datei wird ausgelassen.")
+        except ValueError as exc:
+            errors.append(str(exc))
     classes = sorted(stats)
     if not 2 <= len(classes) <= 64:
         errors.append(f"Es sind {len(classes)} bestätigte Klassen ausgewählt; mindestens zwei und maximal 64 sind erforderlich.")
@@ -877,7 +962,10 @@ def _recording_groups(config, length, include_test=True, anchor_length=None, onl
         assignments = _resolve_split_assignments(config, eligible, membership, classes)
     retained_samples = 0
     anchor = anchor_length or length
-    for entry in eligible:
+    quotas = None
+    if config.get("use_all_recordings", False):
+        quotas, _ = _recording_quota_plan(config, eligible, anchor)
+    for index, entry in enumerate(eligible):
         label = entry.get("label")
         if label not in classes or entry.get("verified") is False:
             continue
@@ -889,11 +977,14 @@ def _recording_groups(config, length, include_test=True, anchor_length=None, onl
         if (split == "test" and not include_test) or (only_test and split != "test"):
             continue
         # Bound memory and segments. Read only the beginning of long captures.
-        count = min(entry["sample_count"], 4_194_304, anchor * min(64, config["samples_per_class"]))
+        count = (quotas[index] * anchor if quotas is not None else
+                 min(entry["sample_count"], 4_194_304, anchor * min(64, config["samples_per_class"])))
         # Budget before loading, independent of the number of files and segment size.
         if retained_samples + count > 16_777_216:
             raise ValueError("Aufnahmedatensatz überschreitet das 128-MiB-IQ-Budget. Weniger Aufnahmen/Segmente wählen.")
         x, metadata = read_recording(path, count=count)
+        if quotas is not None and len(x) != count:
+            raise ValueError("Aufnahme lieferte nicht die geplante Samplezahl; Datei wurde seit der Vorprüfung möglicherweise verändert. Alle Dateien erneut prüfen; keine Aufnahme wird still ausgelassen.")
         retained_samples += len(x)
         rate = float(metadata.get("global", {}).get("core:sample_rate", metadata.get("sample_rate", config["sample_rate"])))
         for start in range(0, len(x) - anchor + 1, anchor):
@@ -1179,6 +1270,7 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
     if not readiness["ready"]:
         raise ValueError(" ".join(readiness["errors"]))
     reference_metadata = {key: copy.deepcopy(readiness[key]) for key in ("generator_reference_summary", "label_evidence")}
+    reference_metadata["recording_sampling"] = copy.deepcopy(readiness.get("sampling"))
     if c["respect_generation_splits"] and _planned_groups is not None and _planned_split_groups(c) != _planned_groups:
         raise ValueError("Generator-Splitplan wurde seit der Suchplanung verändert; Experiment mit eingefrorenem Plan erneut starten.")
     training_only = c["evaluation_mode"] == "training_only"
@@ -1590,6 +1682,8 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
             "Extern erzeugte überlappende Ausschnitte ohne korrekte Ursprungsmetadaten sind nicht allgemein erkennbar."])
     if reference_metadata["generator_reference_summary"]["count"]:
         report["limitations"].extend(text for text in readiness["warnings"] if text.startswith(("Generator-Referenzlabels", "Generator-Splitplan")))
+    if c["use_all_recordings"]:
+        report["limitations"].append("Alle ausgewählten verwendbaren Dateien sind durch vollständige Präfixsegmente vertreten; dies ist eine begrenzte IQ-Stichprobe, keine Verarbeitung sämtlicher Rohproben. Die Modelle bleiben unvalidiert.")
     _json(out / "report.json", report)
     _json(Path(best["model_path"]) / "report.json", report)
     emit(1., "complete", "Modell trainiert und gespeichert; unabhängige Auswertung steht aus" if training_only else "Experiment ausgewertet; Modell und Konfiguration gespeichert")

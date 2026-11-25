@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__, decision, experiment_log, labels, ml, publication
+from . import training_plan
 from .analysis_runtime import AnalysisManager
 from .db import Store, utcnow
 from .drones import Bridge, DroneStore, capabilities, example_payload
@@ -1373,6 +1374,18 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
             return {"ready": False, "evaluation_mode": payload.get("evaluation_mode", "independent"),
                     "classes": [], "group_count": 0, "errors": [str(detail)], "warnings": []}
+
+    @app.post("/api/experiments/training-plan")
+    def prepare_training_plan(payload: dict):
+        settings = training_plan.requested_settings(payload)
+        # Resolve trusted recording IDs at the smallest valid segment before
+        # fitting the requested length; oversized old grids cannot block repair.
+        config = validate_experiment({**payload, **settings, "segment_length": 256,
+                                      "segment_lengths": [256]}, runtime)
+        settings, summary = training_plan.fit_settings(config, settings)
+        config = ml.validate_experiment_config({**config, **settings})
+        return finite_json({"settings": settings, "summary": summary,
+                            "readiness": ml.dataset_readiness(config)})
 
     @app.post("/api/experiments")
     def start_experiment(payload: dict):

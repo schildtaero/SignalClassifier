@@ -1,11 +1,11 @@
 # Softwareprüfung und Abnahmegrenzen
 
-Prüfstand: 25. November 2026, SignalClassifier 0.7.1, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
+Prüfstand: 25. November 2026, SignalClassifier 0.7.2, Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0, PyTorch 2.15.0+cpu. Kein physischer SDR und keine CUDA-GPU in der Entwicklungsumgebung.
 
 ## Ausgeführt
 
 - Gesamtsuite: `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 .venv/bin/python -m unittest discover -s tests -v`.
-- 418 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse, Generatoroberfläche und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
+- 437 Python-Softwaretests bestanden, einschließlich optionaler neuronaler CPU-Tests; zusätzliche JavaScript-Logiktests prüfen Wasserfall, Vergleichsansicht, Sammelauswahl, Bereinigung, Optimierung, Ressourcensteuerung, Telemetrie, Mehrsignalanalyse, Generatoroberfläche und Veröffentlichung. Der Wheel-/Asset-Prüfstand 0.4.0 bleibt als frühere Prüfung dokumentiert.
 - SigMF cf32-/ci16-Roundtrip, Daten-/Indexvalidierung, begrenzte Reads, Replay bis EOF, sichtbarer Treiberfehler ohne Simulation, Stock-Pluto-Grenzen.
 - Energieselektive Kanalaufnahme mit echten numerischen IQ-Daten, Frequenz-/Sampleherkunft, kontinuierlicher FIR-/Dezimationsphase und gemeinsamer Speichergrenze.
 - Begrenzter Inferenzpuffer über mehrere dezimierte Blöcke mit Rücksetzung bei Kanal-/Frequenz-/Ratenwechsel; atomarer Zugriff auf IQ und zugehörige RF-Parameter.
@@ -18,6 +18,16 @@ Prüfstand: 25. November 2026, SignalClassifier 0.7.1, Linux x86_64, Python 3.12
 - JavaScript-Syntax, Shell-Syntax, eindeutige HTML-IDs und Abgleich statischer JavaScript-ID-Referenzen mit dem HTML.
 
 Die Tests messen echte Rechenpfade auf generierten beziehungsweise gespeicherten Test-IQ-Daten. Hohe AM/FM-Genauigkeit auf diesen Daten wird nicht auf reales Flugfunk-/UKW-Material übertragen.
+
+## Ergänzungen in 0.7.2
+
+- Vollständige Suite: **437 Tests bestanden in 56,2 Sekunden**. JavaScript-Syntax und -Logik sowie `git diff --check` bestanden.
+- Neun zusätzliche Sampling-Tests prüfen striktes Opt-in nur für unbewertetes Aufnahme-Training, identische Quoten in Readiness und Loader, Abdeckung jeder ausgewählten Datei, unveränderte 128-MiB-/4096-Segment-Grenzen, Kapazitäten bei 1000 Dateien, den unveränderten strengen Standardpfad, kurze Dateien und tatsächlich verkürzte Reads. Berichte und Modelle halten die verwendete Stichprobe fest und erhalten keine unabhängige Qualitätsbewertung.
+- Vier zusätzliche HTTP-/Trainingsprüfungen kombinieren eine 922-Sample-Datei mit festen Generatorherkünften und manuellen Labels. Der neue Plan wählt 512 Samples, behält alle vier Dateien bei und startet weder Experiment noch Hardware. Ein numerischer Trainingslauf speichert ein unbewertetes Modell mit Stichprobenprovenienz. Dateien unter 256 Samples, unbekannte IDs/Topologien und ungültige Eingaben bleiben Fehler; Quelldateien werden nicht geändert.
+- Sechs zusätzliche Veröffentlichungstests prüfen die typisierte öffentliche Stichprobenzusammenfassung und das boolesche Konfigurationsflag. Unbekannte Felder, Pfade, IQ-Daten und Geheimnis-Canaries werden verworfen; Qualität und Ranking unvalidierter Modelle bleiben gesperrt.
+- JavaScript-Logiktests prüfen strikte Trainingsplaneinstellungen, Import/Export des Opt-ins, unveränderte alte Konfigurationen, unzulässige Bewertungsmodi und die sichtbare Stichprobenzusammenfassung.
+- Chromium bei 1440 und 390 Pixeln mit echtem lokalen Backend: vier numerische Dateien und zwei ausgewählte Topologien bleiben unverändert; der bisher blockierte gemischte Datensatz wird mit 512 statt 1024 Samples je Segment bereit. Veraltete Antworten werden verworfen, ein Doppelklick erzeugt nur einen Planaufruf, gespeicherte Konfigurationen erhalten den Opt-in-Wert und die tatsächliche Stichprobe ist sichtbar. Kein Seitenüberlauf, keine Browserfehler und kein Experiment-/Hardwarestart.
+- Wheel `signalclassifier-0.7.2-py3-none-any.whl` ohne Abhängigkeiten gebaut; neues Trainingsplanmodul und statische Oberflächenassets im Archiv geprüft.
 
 ## Ergänzungen in 0.7.1
 

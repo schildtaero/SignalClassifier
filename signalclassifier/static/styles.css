@@ -5649,3 +5649,7 @@ html[data-theme="light"] {
   overflow-y: auto;
   margin-top: 12px;
 }
+
+.training-plan-action { display: flex; flex-direction: column; gap: 9px; margin: 14px 0; min-width: 0; }
+.training-plan-action .button { white-space: normal; text-align: left; line-height: 1.5; align-self: stretch; }
+#experiment-training-plan-status { color: var(--cyan); }

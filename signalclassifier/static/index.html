@@ -2369,6 +2369,22 @@
                         </option>
                       </select></label
                     >
+                    <div id="experiment-use-all-field" hidden>
+                      <label class="checkbox"
+                        ><input
+                          type="checkbox"
+                          name="use_all_recordings"
+                          id="experiment-use-all-recordings"
+                          disabled
+                        />Jede gewählte Datei im Training berücksichtigen</label
+                      >
+                      <p class="field-help">
+                        Mindestens ein Segment pro ausgewählter Datei, innerhalb
+                        von 128 MiB IQ und höchstens 4.096 Segmenten. Das ist
+                        eine begrenzte Stichprobe, nicht jede Rohprobe. Modelle
+                        bleiben ohne Bewertung und Ranking.
+                      </p>
+                    </div>
                     <label class="checkbox">
                       <input
                         type="checkbox"
@@ -2430,6 +2446,28 @@
                       id="experiment-recordings"
                       class="recording-checklist"
                     ></div>
+                    <div class="training-plan-action">
+                      <button
+                        type="button"
+                        class="button button-quiet"
+                        id="experiment-training-plan"
+                        disabled
+                      >
+                        Alle gewählten Aufnahmen nur trainieren
+                      </button>
+                      <p class="field-help">
+                        Bereitet eine passende Segmentlänge vor. Berücksichtigt
+                        jede ausgewählte Datei mit einer begrenzten Stichprobe;
+                        schaltet Bewertung, Ranking, HPO und geplante
+                        Generator-Kohorten aus. Startet noch kein Experiment.
+                      </p>
+                      <p
+                        class="field-help"
+                        id="experiment-training-plan-status"
+                        role="status"
+                        hidden
+                      ></p>
+                    </div>
                     <p class="field-help">
                       Unabhängige Bewertung benötigt je Klasse mindestens drei
                       eigenständige Aufnahmesitzungen. Mehrere Clips derselben
