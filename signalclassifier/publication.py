@@ -186,6 +186,14 @@ def _digest(value):
     return value.lower() if isinstance(value, str) and _SHA256.fullmatch(value) else None
 
 
+def _version(value):
+    return value if isinstance(value, str) and _VERSION.fullmatch(value) else None
+
+
+def _git_sha(value):
+    return value.lower() if isinstance(value, str) and _SHA1.fullmatch(value) else None
+
+
 def _encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
 
@@ -213,6 +221,12 @@ class _Projection:
         self.salt = str(experiment_id or "unspecified")[:4096]
         self.omissions = Counter()
         self.known_models = {x["id"] for x in list_topologies()}
+        from .waveforms import catalogue
+        self.generator_schemas = {x["id"]: x.get("parameters", {}) for x in catalogue()}
+        registry = Path(__file__).with_name("data") / "onair-generators.json"
+        if registry.is_file():
+            for row in json.loads(registry.read_text(encoding="utf-8")).get("generators", []):
+                self.generator_schemas[row["id"]] = row.get("parameters", {})
 
     def alias(self, kind, value):
         if value is None:
@@ -239,7 +253,7 @@ class _Projection:
     def config(self, value):
         value = _obj(value)
         out = _numbers(value, _CONFIG_NUMBERS)
-        out.update(_bools(value, ("include_clean", "use_priors", "allow_same_session")))
+        out.update(_bools(value, ("include_clean", "use_priors", "allow_same_session", "respect_generation_splits")))
         out["source"] = _enum(value.get("source"), _SOURCES)
         out["evaluation_mode"] = _enum(value.get("evaluation_mode"), {"independent", "training_only"})
         out["device"] = _enum(value.get("device"), {"auto", "cpu", "cuda"})
@@ -266,6 +280,68 @@ class _Projection:
                 "session_independent": not same_session,
                 "recording_disjoint_required": True,
                 "limitation": "shared_session_conditions_may_inflate_quality" if same_session else None}
+
+    def generator_reference(self, value):
+        value = _obj(value)
+        summary = _obj(value.get("generator_reference_summary"))
+        return {"respect_generation_splits": value.get("respect_generation_splits") is True,
+                "split_source": _enum(value.get("split_source"), {"generator_plan", "group_assignment"}),
+                "label_evidence": _enum(value.get("label_evidence"), {"generator_provenance", "mixed_generator_and_recording_annotations", "recording_annotations", "synthetic_generator"}),
+                "generator_reference_summary": {**_numbers(summary, {"count"}),
+                    "facets": [x for x in self.bounded(summary.get("facets"), 6, "generator_facets")
+                               if x in {"scheme", "waveform_family", "modulation", "protocol", "service", "emitter"}],
+                    "reference_kind": _enum(summary.get("reference_kind"), {"controlled_generator_reference"}),
+                    "rx_class_verified": False, "rf_origin_verified": False}}
+
+    def generation(self, value):
+        value = _obj(value)
+        if not value:
+            return None
+        mode = value.get("mode_id")
+        schema = self.generator_schemas.get(mode, {})
+        spec = _obj(value.get("requested_waveform"))
+        parameters = _obj(spec.get("parameters"))
+        public_parameters = {}
+        for key, definition in schema.items():
+            entry = parameters.get(key)
+            if definition.get("type") in {"integer", "number"}:
+                number = _num(entry)
+                if number is not None:
+                    public_parameters[key] = number
+            elif isinstance(entry, str) and entry in definition.get("choices", definition.get("enum", [])):
+                public_parameters[key] = entry
+        facets = _obj(value.get("facets"))
+        tx = _obj(value.get("tx"))
+        receiver = _obj(value.get("rx"))
+        software = _obj(value.get("software_channel"))
+        encoder = _obj(value.get("generator"))
+        return {"mode_id": mode if mode in self.generator_schemas else self.alias("generator", mode),
+                "campaign_alias": self.alias("generation", value.get("campaign_id")),
+                "payload_root_alias": self.alias("group", value.get("payload_root_id")),
+                "plan_sha256": _digest(value.get("plan_sha256")),
+                "planned_split": _enum(value.get("planned_split"), {"train", "validation", "test"}),
+                "label_facet": _enum(value.get("label_facet"), {"scheme", "modulation", "protocol"}),
+                "facets": {key: self.label(facets[key]) for key in ("scheme", "waveform_family", "modulation", "protocol")
+                           if isinstance(facets.get(key), str)},
+                "reference_kind": _enum(value.get("reference_kind"), {"controlled_generator_reference"}),
+                "rx_class_verified": False, "rf_origin_verified": False,
+                "transport": _enum(value.get("transport"), {"cable", "over_the_air"}),
+                "parameters": public_parameters,
+                **_numbers(value, {"payload_seed", "waveform_seed", "native_sample_rate", "tx_sample_rate", "tx_period_samples", "tx_gain_baseline_db", "additional_attenuation_db"}),
+                "baseband_sha256": _digest(value.get("baseband_sha256")),
+                "transmitted_iq_sha256": _digest(value.get("transmitted_iq_sha256")),
+                "tx_actual": _numbers(tx.get("actual_config"), {"sample_rate", "center_frequency_hz", "rf_bandwidth_hz", "tx_gain_db"}),
+                "rx_actual": {"source": _enum(receiver.get("source"), _SOURCES),
+                              **_numbers(receiver, {"sample_rate", "center_frequency_hz", "gain_db_requested", "gain_db_measured"})},
+                "software_channel": {"settings": _numbers(software.get("settings"), {"snr_db", "frequency_offset_hz", "sample_clock_ppm", "jitter_rms_samples", "iq_gain_db", "iq_phase_deg", "dc_offset", "clip_level"}),
+                    **_numbers(software, {"seed", "peak_scale", "cyclic_start_offset_samples"}),
+                    "snr_scope": "injected_software_noise_not_calibrated_RF_SNR", "noise_scope": "finite_periodic_IQ_noise"},
+                "generator": {"source_release": _version(encoder.get("source_release")),
+                    "source_commit": _git_sha(encoder.get("source_commit")),
+                    "encoder_version": _enum(encoder.get("encoder_version"), {"signalclassifier-waveforms-v1"}),
+                    **_numbers(encoder, {"native_quantization_bits", "full_export_sample_count", "returned_sample_count"}),
+                    **_bools(encoder, ("native_seed_control", "truncated")),
+                    "protocol_compliance_proven": False}}
 
     def quality(self, value, allowed=True):
         if not allowed:
@@ -321,7 +397,7 @@ class _Projection:
         out = {}
         for split in ("train", "validation", "test"):
             row = _obj(_obj(value).get(split))
-            out[split] = _numbers(row, {"segments", "groups", "signal_seconds", "reference_window_seconds"})
+            out[split] = _numbers(row, {"segments", "groups", "session_groups", "signal_seconds", "reference_window_seconds"})
             out[split]["sample_rates"] = [n for x in self.bounded(row.get("sample_rates"), 1000, "sample_rates") if (n := _num(x)) is not None]
         return out
 
@@ -399,6 +475,7 @@ class _Projection:
                     "input": _enum(topology.get("input"), {"features", "feature_sequence", "iq", "spectrogram"}),
                     "parameters": _numbers(topology.get("parameters"), {"width", "depth", "kernel", "heads", "dropout"})},
                 "config": self.config(config), "validation_independence": self.split_policy(config),
+                **self.generator_reference(report),
                 "recording_group_memberships": self.group_memberships(report.get("recording_group_memberships")),
                 "classes": self.classes(report.get("classes", config.get("classes"))),
                 "evaluation_scope": _enum(report.get("evaluation_scope"), {"validation_only", "validation_and_test", "training_only"}),
@@ -505,8 +582,10 @@ def _software(value):
     out.update(_bools(value, ("working_tree_dirty",)))
     out["dependencies"] = {key: version for key in ("numpy", "scipy", "torch", "fastapi", "uvicorn", "psutil", "python-multipart")
                            if isinstance(version := _obj(value.get("dependencies")).get(key), str) and _VERSION.fullmatch(version)}
-    known_files = {name + ".py" for name in ("__init__", "__main__", "app", "db", "drones", "experiment_log", "labels", "ml", "optimization", "receivers", "reporting", "sigmf", "topologies", "execution", "telemetry", "decision", "publication", "analysis_runtime", "surveillance")}
+    known_files = {name + ".py" for name in ("__init__", "__main__", "app", "db", "drones", "experiment_log", "labels", "ml", "optimization", "receivers", "reporting", "sigmf", "topologies", "execution", "telemetry", "decision", "publication", "analysis_runtime", "surveillance", "spectrum_stream", "generation", "waveforms", "onair", "txhardware")}
     out["source_files_sha256"] = {key: digest for key, raw in _obj(value.get("source_files_sha256")).items() if key in known_files and (digest := _digest(raw))}
+    out["data_catalogues_sha256"] = {key: digest for key, raw in _obj(value.get("data_catalogues_sha256")).items()
+                                    if key in {"onair-generators.json", "onair-modes.json"} and (digest := _digest(raw))}
     return out
 
 
@@ -540,6 +619,7 @@ def make_publication_package(experiment, dataset_inventory=None, events=None) ->
     data = {"schema_version": 1, "package_kind": "signalclassifier-paper-results", "run_alias": projection.alias("run", experiment.get("id")),
             "status": _enum(experiment.get("status"), _STATUS), "error_category": _error_category(experiment.get("error")),
             "config": projection.config(config), "validation_independence": projection.split_policy(config),
+            **projection.generator_reference(report),
             "recording_group_memberships": projection.group_memberships(report.get("recording_group_memberships")),
             "overall_comparison_available": bool(report.get("comparison")),
             "models": [projection.model(row, config, optimization_only=partial) for row, partial in views[:64]],
@@ -563,6 +643,7 @@ def make_publication_package(experiment, dataset_inventory=None, events=None) ->
         row = _obj(row)
         inventory.append({"recording_alias": projection.alias("recording", row.get("id")), "group_alias": projection.alias("group", row.get("group_id")),
                           "recording_group_alias": projection.alias("group", row.get("recording_group_id")),
+                          "generation": projection.generation(row.get("generation")),
                           "label": projection.label(row.get("label")), **_bools(row, ("verified", "synthetic")),
                           **_numbers(row, {"sample_rate", "center_frequency_hz", "sample_count", "duration_seconds", "data_bytes"}),
                           "declared_source": _enum(row.get("source"), _SOURCES),

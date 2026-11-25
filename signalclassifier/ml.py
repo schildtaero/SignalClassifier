@@ -262,6 +262,9 @@ def _validate_config(config):
     c.setdefault("allow_same_session", False)
     if type(c["allow_same_session"]) is not bool:
         raise ValueError("allow_same_session muss true oder false sein.")
+    c.setdefault("respect_generation_splits", False)
+    if type(c["respect_generation_splits"]) is not bool:
+        raise ValueError("respect_generation_splits muss true oder false sein.")
     c.setdefault("evaluation_mode", "independent")
     if c["evaluation_mode"] not in ("independent", "training_only"):
         raise ValueError("evaluation_mode muss independent oder training_only sein.")
@@ -296,6 +299,8 @@ def _validate_config(config):
     c.setdefault("source", "recordings" if c.get("recordings") else "synthetic")
     if c["source"] not in ("synthetic", "recordings") or c.get("device", "auto") not in ("auto", "cpu", "cuda"):
         raise ValueError("Quelle oder Rechengerät ist ungültig.")
+    if c["respect_generation_splits"] and (c["source"] != "recordings" or not c["allow_same_session"]):
+        raise ValueError("Generator-Splits erfordern Aufnahmen und ausdrücklich allow_same_session=true.")
     if c["source"] == "recordings" and not c.get("recordings"):
         raise ValueError("Für dieses Experiment fehlen bestätigte AM-/FM-Aufnahmen.")
     c["device"] = c.get("device", "auto")
@@ -375,6 +380,8 @@ def _split_metadata(config):
     evaluated = config.get("evaluation_mode", "independent") != "training_only"
     synthetic = config.get("source") == "synthetic"
     return {"allow_same_session": config.get("allow_same_session", False),
+            "respect_generation_splits": config.get("respect_generation_splits", False),
+            "split_source": "generator_plan" if config.get("respect_generation_splits") else "group_assignment",
             "split_policy": "synthetic_origin_holdout" if synthetic else "recording_holdout_same_session_allowed" if relaxed else "session_holdout",
             "validation_independence": {"split_unit": "original_recording" if relaxed else "session" if config.get("source") == "recordings" else "synthetic_origin",
                                         "session_independence_required": evaluated and not relaxed and not synthetic,
@@ -408,7 +415,11 @@ def _recording_inventory(entry, *, allow_same_session=False):
                                            glob.get("sc:recording_id")) if x),
             "parent_recording_ids": tuple(parents),
             "sample_count": info["sample_count"], "sample_rate": info["sample_rate"],
-            "integrity": glob.get("sc:integrity")}
+            "integrity": glob.get("sc:integrity"),
+            "generation_present": "sc:generation" in glob,
+            "generation": ({key: copy.deepcopy(glob["sc:generation"].get(key)) for key in
+                            ("campaign_id", "payload_root_id", "planned_split", "label_facet", "facets", "reference_kind")}
+                           if isinstance(glob.get("sc:generation"), dict) else None)}
     if allow_same_session:
         data = Path(info["data_path"]).resolve(strict=True)
         signature = _recording_signature(data)
@@ -421,7 +432,7 @@ def _recording_inventory(entry, *, allow_same_session=False):
     return result
 
 
-def _effective_recording_groups(entries, allow_same_session=False):
+def _effective_recording_groups(entries, allow_same_session=False, *, respect_generation_splits=False):
     """Merge every declared ancestor, alias and exact duplicate before splitting."""
     result = [dict(entry) for entry in entries]
     if not allow_same_session:
@@ -442,6 +453,11 @@ def _effective_recording_groups(entries, allow_same_session=False):
         identities = [("origin", origin_token(entry["recording_group_id"]))]
         identities += [("origin", origin_token(name)) for name in entry.get("recording_identifiers", ())]
         identities += [("origin", origin_token(name)) for name in entry.get("parent_recording_ids", ())]
+        generation = entry.get("generation")
+        if respect_generation_splits and isinstance(generation, dict):
+            payload_root = generation.get("payload_root_id")
+            if isinstance(payload_root, str) and payload_root:
+                identities.append(("origin", origin_token(payload_root)))
         identities += [(key, entry[key]) for key in ("recording_sha256", "data_identity_path", "data_identity_inode") if entry.get(key)]
         for token in identities:
             if token in tokens:
@@ -462,7 +478,77 @@ def _effective_recording_groups(entries, allow_same_session=False):
 def _config_recording_inventory(config, entries):
     relaxed = config.get("allow_same_session", False)
     values = [_recording_inventory(entry, allow_same_session=True) if relaxed else _recording_inventory(entry) for entry in entries]
-    return _effective_recording_groups(values, relaxed)
+    return _effective_recording_groups(values, relaxed, respect_generation_splits=config.get("respect_generation_splits", False))
+
+
+_GENERATION_FACETS = frozenset(("scheme", "waveform_family", "modulation", "protocol", "service", "emitter"))
+_GENERATION_REFERENCE = "controlled_generator_reference"
+
+
+def _generation_reference_metadata(entries):
+    generated = [entry for entry in entries if entry.get("generation_present")]
+    facets = sorted({value for entry in generated for value in [(entry.get("generation") or {}).get("label_facet")]
+                     if isinstance(value, str) and value in _GENERATION_FACETS})
+    known_kind = any((entry.get("generation") or {}).get("reference_kind") == _GENERATION_REFERENCE for entry in generated)
+    all_known = bool(generated) and all((entry.get("generation") or {}).get("reference_kind") == _GENERATION_REFERENCE for entry in generated)
+    return {"generator_reference_summary": {
+                "count": len(generated), "facets": facets,
+                "reference_kind": _GENERATION_REFERENCE if all_known else None,
+                "reference_kinds": [_GENERATION_REFERENCE] if known_kind else [],
+                "rx_class_verified": False, "rf_origin_verified": False},
+            "label_evidence": ("generator_provenance" if len(generated) == len(entries) and generated else
+                               "mixed_generator_and_recording_annotations" if generated else "recording_annotations")}
+
+
+def _resolve_split_assignments(config, inventory, membership, classes):
+    """Honor a complete generator plan only after all physical-root unions.
+
+    Known generator settings establish a reference class, not an independently
+    decoded receive class. The ordinary group assignment remains the default.
+    """
+    training_only = config.get("evaluation_mode") == "training_only"
+    if not config.get("respect_generation_splits", False):
+        return _assign_groups(membership, classes, config.get("seed", 42), training_only)
+    if config.get("source", "recordings") != "recordings" or config.get("allow_same_session") is not True:
+        raise ValueError("Generator-Splits erfordern Aufnahmen und ausdrücklich allow_same_session=true.")
+    assignments, facets = {}, set()
+    for entry in inventory:
+        generation = entry.get("generation")
+        if not entry.get("generation_present") or not isinstance(generation, dict):
+            raise ValueError("Generator-Splitplan unvollständig: Jede Aufnahme benötigt sc:generation; reale/manuell gelabelte und erzeugte Daten nicht still mischen.")
+        for key in ("campaign_id", "payload_root_id"):
+            value = generation.get(key)
+            if not isinstance(value, str) or not value.strip() or len(value) > 1024:
+                raise ValueError(f"Generator-Splitplan: gültiges {key} fehlt.")
+        split = generation.get("planned_split")
+        if not isinstance(split, str) or split not in ("train", "validation", "test"):
+            raise ValueError("Generator-Splitplan: planned_split muss train, validation oder test sein.")
+        facet = generation.get("label_facet")
+        if not isinstance(facet, str) or facet not in _GENERATION_FACETS:
+            raise ValueError("Generator-Splitplan: label_facet ist unbekannt.")
+        labels = generation.get("facets")
+        if (not isinstance(labels, dict) or set(labels) - _GENERATION_FACETS
+                or any(value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 120)
+                       for value in labels.values())
+                or labels.get(facet) != entry.get("label")):
+            raise ValueError("Generator-Splitplan: Klassenlabel stimmt nicht mit der gewählten Label-Facette überein.")
+        if generation.get("reference_kind") != _GENERATION_REFERENCE:
+            raise ValueError("Generator-Splitplan: reference_kind muss controlled_generator_reference sein.")
+        facets.add(facet)
+        group = entry["group_id"]
+        if group in assignments and assignments[group] != split:
+            raise ValueError("Generator-Splitkonflikt: Varianten, Ableitungen oder exakte Kopien desselben Ursprungs sind unterschiedlichen Splits zugeordnet.")
+        assignments[group] = split
+    if len(facets) != 1:
+        raise ValueError("Generator-Splitplan darf unterschiedliche Label-Facetten wie Modulation und Protokoll nicht in einem Klassenkopf mischen.")
+    if training_only:
+        return {group: "train" for group in membership}
+    for split in ("train", "validation", "test"):
+        present = set().union(*(labels for group, labels in membership.items() if assignments.get(group) == split))
+        missing = sorted(set(classes) - present)
+        if missing:
+            raise ValueError(f"Generator-Splitplan: {split} fehlen Klassen {', '.join(missing)}. Frische unabhängige Nutzdatenkohorten erzeugen oder ausdrücklich Nur trainieren wählen; feste Testvorlagen werden nicht zufällig aufgeteilt.")
+    return {group: assignments[group] for group in membership}
 
 
 def _assign_groups(membership, classes, seed, training_only=False):
@@ -494,6 +580,13 @@ def dataset_readiness(config: dict) -> dict:
     if type(config.get("allow_same_session", False)) is not bool:
         return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
                 "errors": ["allow_same_session muss true oder false sein."], "warnings": [], "group_count": 0}
+    if type(config.get("respect_generation_splits", False)) is not bool:
+        return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
+                "errors": ["respect_generation_splits muss true oder false sein."], "warnings": [], "group_count": 0}
+    if config.get("respect_generation_splits") and (config.get("source", "recordings" if config.get("recordings") else "synthetic") != "recordings"
+                                                   or config.get("allow_same_session") is not True):
+        return {"ready": False, "evaluation_mode": config.get("evaluation_mode", "independent"), "classes": [],
+                "errors": ["Generator-Splits erfordern Aufnahmen und ausdrücklich allow_same_session=true."], "warnings": [], "group_count": 0}
     if isinstance(config.get("optimization"), dict) and config["optimization"].get("enabled") is True:
         return _optimization_readiness(config)
     mode = config.get("evaluation_mode", "independent")
@@ -506,6 +599,7 @@ def dataset_readiness(config: dict) -> dict:
     source = config.get("source", "recordings" if config.get("recordings") else "synthetic")
     relaxed = source == "recordings" and config.get("allow_same_session", False)
     result.update(_split_metadata({**config, "source": source}))
+    result.update(_generation_reference_metadata([]))
     lengths = config.get("segment_lengths", [config.get("segment_length", 4096)])
     if not isinstance(lengths, list) or not lengths or any(type(x) is not int or not 256 <= x <= 65536 for x in lengths):
         errors.append("Segmentlängen müssen ganze Zahlen zwischen 256 und 65536 sein.")
@@ -524,6 +618,7 @@ def dataset_readiness(config: dict) -> dict:
             errors.append("Nur trainieren erlaubt genau eine Segmentlänge, Lernrate und Batchgröße; ohne Validierung ist keine Modellwahl möglich.")
         warnings.append("Nur trainieren: Das Modell bleibt unvalidiert. Es werden keine Genauigkeit, F1-Werte oder unabhängigen Testergebnisse berechnet.")
     if source == "synthetic":
+        result["label_evidence"] = "synthetic_generator"
         count = config.get("samples_per_class", 64)
         if type(count) is not int or not 12 <= count <= 1000:
             errors.append("Synthetische Experimente benötigen 12–1000 Segmente je Klasse.")
@@ -552,8 +647,16 @@ def dataset_readiness(config: dict) -> dict:
             inspected[index] = _recording_inventory(entry, allow_same_session=True) if relaxed else _recording_inventory(entry)
         except (OSError, ValueError, UnicodeError) as exc:
             inventory_errors[index] = exc
-    effective = _effective_recording_groups(list(inspected.values()), relaxed)
+    effective = _effective_recording_groups(list(inspected.values()), relaxed,
+                                           respect_generation_splits=config.get("respect_generation_splits", False))
     inspected = dict(zip(inspected, effective))
+    result.update(_generation_reference_metadata(effective))
+    if result["generator_reference_summary"]["count"]:
+        warnings.append("Generator-Referenzlabels beschreiben bekannte Erzeugungssollwerte, keinen unabhängigen Empfangs-, Protokoll- oder HF-Herkunftsnachweis.")
+        if not config.get("respect_generation_splits", False):
+            warnings.append("Generator-Splitplan wird nicht übernommen: Die bisherige Gruppenteilung ist aktiv. Vorab zurückgehaltene Nutzdatenkohorten nur mit ausdrücklich aktivierter Planübernahme verwenden.")
+    if config.get("respect_generation_splits", False):
+        warnings.append("Generator-Splitplan: Getrennte Nutzdatenursprünge ersetzen keine unabhängigen Aufnahmesitzungen. Bewertung misst Übereinstimmung mit kontrollierten Generator-Referenzlabels.")
     result["recording_group_memberships"] = [
         {"recording_id": str(info.get("id") or Path(info["metadata_path"]).stem),
          "session_group_id": str(info.get("session_group_id", info["group_id"])),
@@ -622,9 +725,18 @@ def dataset_readiness(config: dict) -> dict:
     result["session_group_count"] = len(set().union(*(state["session_groups"] for state in stats.values()))) if stats else 0
     if retained_samples > 16_777_216:
         errors.append("Aufnahmedatensatz überschreitet das 128-MiB-IQ-Budget; weniger Aufnahmen oder Segmente wählen.")
+    assignments = None
+    if config.get("respect_generation_splits", False):
+        try:
+            assignments = _resolve_split_assignments(config, effective, membership, classes)
+        except ValueError as exc:
+            errors.append(str(exc))
     if not errors:
         try:
-            assignments = _assign_groups(membership, classes, config.get("seed", 42), mode == "training_only")
+            if assignments is None:
+                assignments = _resolve_split_assignments(config, effective, membership, classes)
+            result["split_groups"] = {split: sorted(group for group, assigned in assignments.items() if assigned == split)
+                                      for split in ("train", "validation", "test")}
             for candidate_length, per_group in sorted(group_segment_counts.items()):
                 split_counts = {split: 0 for split in ("train", "validation", "test")}
                 for group_id, count in per_group.items():
@@ -753,13 +865,16 @@ def _recording_groups(config, length, include_test=True, anchor_length=None, onl
     for entry in eligible:
         gid = entry["group_id"]
         membership.setdefault(gid, set()).add(entry["label"])
+    assignments = (_resolve_split_assignments(config, eligible, membership, classes)
+                   if config.get("respect_generation_splits", False) else None)
     for label in classes:
         ids = [gid for gid, labels in membership.items() if label in labels]
         required = 1 if training_only else 3
         if len(ids) < required:
             raise ValueError(f"{label}: {len(ids)} unabhängige Aufnahmegruppen vorhanden; {required} erforderlich. Weitere Aufnahmesitzungen ergänzen oder ausdrücklich „Nur trainieren“ wählen.")
     # One assignment per physical source group, across labels and every derived clip.
-    assignments = _assign_groups(membership, classes, config["seed"], training_only)
+    if assignments is None:
+        assignments = _resolve_split_assignments(config, eligible, membership, classes)
     retained_samples = 0
     anchor = anchor_length or length
     for entry in eligible:
@@ -812,7 +927,7 @@ def _planned_split_groups(config):
     membership = {}
     for entry in inventory:
         membership.setdefault(entry["group_id"], set()).add(entry["label"])
-    assignments = _assign_groups(membership, config["classes"], config["seed"])
+    assignments = _resolve_split_assignments(config, inventory, membership, config["classes"])
     return {split: sorted(group for group, assigned in assignments.items() if assigned == split)
             for split in ("train", "validation", "test")}
 
@@ -1063,6 +1178,9 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
     readiness = dataset_readiness(c)
     if not readiness["ready"]:
         raise ValueError(" ".join(readiness["errors"]))
+    reference_metadata = {key: copy.deepcopy(readiness[key]) for key in ("generator_reference_summary", "label_evidence")}
+    if c["respect_generation_splits"] and _planned_groups is not None and _planned_split_groups(c) != _planned_groups:
+        raise ValueError("Generator-Splitplan wurde seit der Suchplanung verändert; Experiment mit eingefrorenem Plan erneut starten.")
     training_only = c["evaluation_mode"] == "training_only"
     classes = c["classes"]
     if c.get("topology"):
@@ -1299,6 +1417,7 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
                     "inference_device": "cpu",
                     "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
                     **_split_metadata(c),
+                    **reference_metadata,
                     "test_evaluation_available": bool(_evaluate_test and not training_only),
                     "evaluation_scope": "training_only" if training_only else "validation_and_test" if _evaluate_test else "validation_only",
                     "validation_status": "unvalidated" if training_only else "evaluated",
@@ -1307,7 +1426,8 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
                     "preprocessing": {"version": 1, "segment_length": length, "normalization": "training-only zscore for features", "iq_samples": 1024,
                                       "feature_sequence": {"resampled_samples": 2048, "frames": 16, "frame_samples": 128, "window": "Hamming"},
                                       "spectrogram": "32x32 log1p power, RF linear frequency", "timing_jitter_units": "RMS samples"},
-                    "provenance": {"seed": c["seed"], "synthetic": c["source"] == "synthetic", "software": "SignalClassifier", "software_version": __version__, "schema_version": _SCHEMA},
+                    "provenance": {"seed": c["seed"], "synthetic": c["source"] == "synthetic", "software": "SignalClassifier", "software_version": __version__, "schema_version": _SCHEMA,
+                                   "label_evidence": reference_metadata["label_evidence"]},
                     "split_groups": _planned_groups or {key: sorted(set(x["group_id"] for x in entries)) for key, entries in groups.items()},
                     "reference_window_samples": _reference_length or length}
         _json(modeldir / "model.json", manifest)
@@ -1433,6 +1553,7 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
     report = {"schema_version": 1, "source": c["source"], "synthetic": c["source"] == "synthetic", "config": safe_config,
               "evaluation_mode": c["evaluation_mode"], "evaluation_available": not training_only,
               **_split_metadata(c),
+              **reference_metadata,
               "test_evaluation_available": bool(_evaluate_test and not training_only),
               "evaluation_scope": "training_only" if training_only else "validation_and_test" if _evaluate_test else "validation_only",
               "final_test_evaluations": int(_evaluate_test and not training_only),
@@ -1467,6 +1588,8 @@ def _run_experiment_impl(config: dict, output_dir, progress=None, *, _evaluate_t
             "Aufnahme-Holdout mit erlaubter gleicher Sitzung: Ursprungsaufnahmen, deklarierte Ableitungen und exakte Dateikopien bleiben in einem Split. Dies ist kein Nachweis unabhängiger Aufnahmesitzungen.",
             "Die Vorprüfung liest vollständige Dateibytes für Duplikat-Hashes, auch bei später zurückgehaltenen Quellen; Test-Signalmerkmale und Testqualität bleiben bis zur endgültigen Modellwahl ungenutzt.",
             "Extern erzeugte überlappende Ausschnitte ohne korrekte Ursprungsmetadaten sind nicht allgemein erkennbar."])
+    if reference_metadata["generator_reference_summary"]["count"]:
+        report["limitations"].extend(text for text in readiness["warnings"] if text.startswith(("Generator-Referenzlabels", "Generator-Splitplan")))
     _json(out / "report.json", report)
     _json(Path(best["model_path"]) / "report.json", report)
     emit(1., "complete", "Modell trainiert und gespeichert; unabhängige Auswertung steht aus" if training_only else "Experiment ausgewertet; Modell und Konfiguration gespeichert")
@@ -1533,6 +1656,8 @@ def _optimization_failure_summary(state, report_path):
 def _evaluate_optimized_test(report, config, reference_length, progress=None):
     """Access final test IQ only after search has fixed the winning model."""
     started = time.perf_counter()
+    if config.get("respect_generation_splits") and _planned_split_groups(config) != report["split_groups"]:
+        raise ValueError("Generator-Splitplan wurde seit der Suchplanung verändert; Finaltest nicht gelesen.")
     length = int(report["config"]["segment_length"])
     groups = (_synthetic_groups(config, length, reference_length=reference_length, only_test=True)
               if config["source"] == "synthetic" else _recording_groups(config, length, anchor_length=reference_length, only_test=True))
@@ -1584,6 +1709,7 @@ def _run_optimization(config, output_dir, progress=None):
     started = time.perf_counter()
     deadline = time.monotonic() + settings["timeout_seconds"] if settings["timeout_seconds"] else None
     state = {**settings, **_split_metadata(config), "schema_version": 1, "status": "running", "seed": config["seed"], "topology_id": topology["id"],
+             **{key: copy.deepcopy(readiness[key]) for key in ("generator_reference_summary", "label_evidence")},
              "recording_group_memberships": readiness.get("recording_group_memberships", []),
              "reference_window_samples": reference_length, "split_groups": split_groups,
              "excluded_segment_lengths": readiness["optimization"]["excluded_segment_lengths"],

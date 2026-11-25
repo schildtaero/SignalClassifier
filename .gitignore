@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 .runtime/
 data/
+!signalclassifier/data/
+signalclassifier/data/*
+!signalclassifier/data/onair-modes.json
+!signalclassifier/data/onair-generators.json
 *.sigmf-data
 *.sigmf-meta
 *.pt

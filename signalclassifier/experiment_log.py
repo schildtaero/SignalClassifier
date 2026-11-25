@@ -34,6 +34,9 @@ def canonical_sha256(value) -> str:
 def software_provenance() -> dict:
     package = Path(__file__).resolve().parent
     files = {path.name: file_sha256(path) for path in sorted(package.glob("*.py")) if not path.is_symlink()}
+    catalogues = {name: file_sha256(package / "data" / name)
+                  for name in ("onair-generators.json", "onair-modes.json")
+                  if (package / "data" / name).is_file() and not (package / "data" / name).is_symlink()}
     packages = {}
     for name in ("numpy", "scipy", "torch", "fastapi", "uvicorn", "psutil", "python-multipart"):
         try:
@@ -51,6 +54,7 @@ def software_provenance() -> dict:
             "repository": "https://github.com/schildtaero/SignalClassifier",
             "working_tree_dirty": dirty, "python": platform.python_version(), "dependencies": packages,
             "source_files_sha256": files,
+            "data_catalogues_sha256": catalogues,
             "source_hash_scope": "Python source files directly in the backend package; frontend assets and launcher scripts are outside this fingerprint.",
             "source_fingerprint_sha256": canonical_sha256(files)}
 
@@ -78,7 +82,9 @@ def dataset_inventory(entries: list[dict], annotations: dict[str, dict]) -> list
                      "group_id": entry.get("group_id") or info["group_id"],
                      "recording_group_id": entry.get("recording_group_id"), "annotation": annotation,
                      "metadata_filename": path.name, "data_filename": data.name,
-                     "source": info["source"], "mode": info["mode"], "synthetic": info["synthetic"],
+                     "source": info["source"], "mode": info["mode"],
+                     "synthetic": info["synthetic"] or glob.get("sc:declared_source_synthetic") is True,
+                     "generation": glob.get("sc:generation"),
                      "sample_rate": info["sample_rate"], "center_frequency_hz": info["center_frequency_hz"],
                      "sample_count": info["sample_count"], "duration_seconds": info["duration_seconds"],
                      "datatype": info["datatype"], "data_bytes": stat.st_size,

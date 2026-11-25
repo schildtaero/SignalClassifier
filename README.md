@@ -1,4 +1,8 @@
-# SignalClassifier 0.6.1
+# SignalClassifier 0.7.0
+
+Version 0.7.0 ergänzt den **Signalgenerator**: PlutoSDR sendet definierte Testsignale, ein RSP1A oder Pluto nimmt sie als gelabelte SigMF-Daten auf. Frequenz, Parameter, zusätzliche Dämpfung und Software-Kanalfehler werden reproduzierbar variiert. Ein manueller Sende-Gain bildet die Obergrenze; zusätzliche Dämpfungswerte werden davon abgezogen. Kabel und Antennenmessung werden getrennt dokumentiert. Vor dem Senden zeigt ein unveränderlicher Plan Fallanzahl, Einstellungen, IQ-Speicherbedarf und Grenzen.
+
+**30 native Generatorprofile** einschließlich AM/FM, SSB, ASK/FSK/PSK/QAM, generischem OFDM/Chirp und echten AX.25-/POCSAG-Testencodern sind enthalten. Die optionale externe OnAir-CLI ergänzt **301 registrierte Testsignalprofile** aus Release 4.6.0. Ihre festen Nutzdaten, 8-Bit-Generatorquantisierung und gegebenenfalls begrenzten IQ-Ausschnitte bleiben gekennzeichnet; das ist keine Zusage vollständiger Protokollkonformität. Die 393 Einträge des referenzierten Webkatalogs enthalten außerdem Scanner und Werkzeuge. Hardware-, Bandbreiten- und Datenbudgets begrenzen die tatsächlich ausführbare Auswahl. [Ablauf, Einrichtung und Grenzen](docs/signalgenerator.md).
 
 Version 0.6.1 ergänzt dauerhaften GitHub-Zugang über `./configure_github.sh`. Der Helfer speichert den Schlüssel verdeckt in einer privaten Benutzerdatei außerhalb des Repositorys; das Backend liest sie auch bei Windows-/WSL-Start automatisch. Vorhandene Token-Umgebungsvariablen haben Vorrang. Siehe [Einrichtung und Diagnose](docs/paper-veroeffentlichung.md#zugangsdaten-unter-linux-und-windows-mit-wsl).
 
@@ -21,6 +25,8 @@ cd SignalClassifier
 ```
 
 Beim ersten Start richtet `setup.sh` eine lokale Pythonumgebung ein und installiert die Kernabhängigkeiten. Internet wird für diese Installation benötigt. Falls `venv` fehlt: `sudo apt install python3-venv`. Danach **http://127.0.0.1:8090** öffnen. Die Anwendung startet im gestoppten Zustand. Live, Recording und synthetische Quelle werden ausdrücklich gewählt; Hardwarefehler starten keine Simulation.
+
+Für zusätzliche OnAir-Testgeneratoren optional `./install_onair.sh` ausführen. Der Helfer installiert eine unveränderte, mit festgelegter SHA-256-Prüfsumme geprüfte Linux-/WSL-x86_64-Distribution in den persönlichen Datenordner (Download etwa 187 MB). Er startet weder Sender noch Upload und ersetzt keine SDR-Treiber. Ohne diese Installation bleiben die nativen Generatoren verfügbar.
 
 Unter Windows `start.cmd` ausführen. Eine vorhandene WSL2-Distribution mit Python 3.11+ wird verwendet. Bei fehlendem WSL zunächst in einer administrativen PowerShell `wsl --install -d Ubuntu-24.04` ausführen und die Einrichtung abschließen. Für größere IQ-Datensätze ist ein Checkout im Linux-Dateisystem von WSL sinnvoll. Es gibt keinen nativen Windows-USB-Pfad.
 

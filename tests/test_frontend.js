@@ -34,7 +34,10 @@ const source = original.replace(
   analysisPredictionExplanation, presentChildren, replaceContent, analysisLabel, analysisScoreKind,
   selectedDeletionPlan, normalizeGithubPublication, githubPublicationURL, publicationStateLabel,
   classificationEnabled, currentClassificationEnabled, classificationFormValue, detectionTone, detectionModulationLabel,
-  spectrumContext, mergeSpectrumFrame, spectrumStreamMessage, streamBackoff, waterfallPixelRows
+  spectrumContext, mergeSpectrumFrame, spectrumStreamMessage, streamBackoff, waterfallPixelRows,
+  generatorSchemeKind, generatorFacets, generatorVisibleSchemes, generatorSelectionWithAdditions,
+  generatorValueList, generatorConfig, generatorEffectiveGains, generatorCaseSummary, generatorStartPayload,
+  generatorBusy, generatorNeedsAttention, generatorStatusLabel, generatorReferenceStatus, recordingMeta
 };`,
 );
 const sandbox = {
@@ -522,6 +525,14 @@ for (const consent of [true, false]) {
     "Explicit same-session consent survives draft validation");
 }
 assert.throws(() => f.prepareExperimentDraft({ ...draft, allow_same_session: "true" }, catalog, ["available-a"], false), /boolescher/);
+for (const consent of [true, false]) {
+  assert.equal(f.prepareExperimentDraft({ ...draft, allow_same_session: true, respect_generation_splits: consent }, catalog, ["available-a"], false).config.respect_generation_splits, consent);
+}
+assert.throws(() => f.prepareExperimentDraft({ ...draft, respect_generation_splits: "true" }, catalog, ["available-a"], false), /boolescher/);
+assert.throws(() => f.prepareExperimentDraft({ ...draft, allow_same_session: false, respect_generation_splits: true }, catalog, ["available-a"], false), /derselben Sitzung/);
+assert.equal(f.recordingMeta({id:"generated",annotation:{verification_kind:"generator_reference",verified:true,label:"AM"}}).generator_reference,true);
+assert.equal(f.recordingMeta({id:"generated",metadata:{global:{"sc:generation":{mode_id:"am"}}}}).generator_reference,true);
+assert.equal(f.recordingMeta({id:"ordinary",annotation:{verified:true,label:"AM"}}).generator_reference,false);
 assert.deepEqual(Array.from(prepared.recordingIds), ["available-a"]);
 assert.deepEqual(Array.from(prepared.missingRecordingIds), ["missing-b"]);
 assert.deepEqual(
@@ -1579,6 +1590,341 @@ assert.equal(
 assert.equal(f.analysisPredictionExplanation({ explanation: null }), null);
 assert.equal(f.analysisPredictionExplanation({}), null);
 
+
+// Generator planning is read-only: only an unchanged reviewed plan plus both
+// explicit setup/TX fields can produce a start payload. No device is opened here.
+const generatorSchemes = [
+  {
+    id: "am",
+    name: "AM mit Träger",
+    available: true,
+    implementation_kind: "native_numeric",
+    facets: { modulation: "AM", protocol: null },
+    parameters: {
+      modulation_index: { type: "number", default: 0.6, min: 0.05, max: 0.95 },
+      message_kind: {
+        type: "string",
+        default: "tone",
+        choices: ["tone", "multitone"],
+      },
+    },
+  },
+  {
+    id: "pocsag",
+    name: "POCSAG",
+    available: true,
+    implementation_kind: "protocol_encoder",
+    parameters: {},
+  },
+  {
+    id: "proxy",
+    name: "Demo-Modulationsmuster",
+    available: true,
+    implementation_kind: "modulation_proxy",
+    parameters: {},
+  },
+  {
+    id: "external",
+    name: "Externer Ausschnitt",
+    available: false,
+    reason: "CLI fehlt",
+    implementation_kind: "external_fixture",
+    parameters: {},
+  },
+];
+assert.deepEqual(
+  Array.from(
+    f.generatorSelectionWithAdditions(new Set(["am"]), generatorSchemes),
+  ),
+  ["am", "pocsag", "proxy"],
+  "All available never silently selects missing hardware/dependencies",
+);
+assert.deepEqual(
+  Array.from(
+    f.generatorVisibleSchemes(generatorSchemes, "cli", "unavailable"),
+    (x) => x.id,
+  ),
+  ["external"],
+);
+assert.deepEqual(
+  Array.from(
+    f.generatorVisibleSchemes(generatorSchemes, "", "proxy"),
+    (x) => x.id,
+  ),
+  ["proxy"],
+);
+assert.equal(
+  f.generatorSchemeKind(generatorSchemes[0]).label,
+  "Signalgenerator",
+);
+assert.equal(
+  f.generatorSchemeKind(generatorSchemes[2]).label,
+  "Modulationsproxy",
+);
+assert.equal(
+  f.generatorSchemeKind(generatorSchemes[3]).label,
+  "Externer IQ-Payload",
+  "Fixed fixtures are not claimed to be complete protocol encoders",
+);
+assert.equal(f.generatorFacets(generatorSchemes[0]), "Modulation: AM");
+assert.deepEqual(
+  Array.from(f.generatorValueList("null, 0, 10", "SNR", { nullable: true })),
+  [null, 0, 10],
+);
+assert.deepEqual(
+  Array.from(
+    f.generatorValueList('["tone", "multitone"]', "Nachricht", {
+      type: "string",
+      choices: ["tone", "multitone"],
+    }),
+  ),
+  ["tone", "multitone"],
+);
+for (const raw of [
+  "",
+  "NaN",
+  "Infinity",
+  "-1",
+  "1.5",
+  "[true]",
+  "[null]",
+  Array(33).fill(1),
+])
+  assert.throws(() =>
+    f.generatorValueList(raw, "Ganzzahlen", { type: "integer", min: 0 }),
+  );
+assert.deepEqual(
+  Array.from(f.generatorEffectiveGains(-50, [0, 3, 6])),
+  [-50, -53, -56],
+  "Additional attenuation is subtracted, never added to TX power",
+);
+for (const offsets of [[-3], [40], [0.1], [Infinity]])
+  assert.throws(() => f.generatorEffectiveGains(-50, offsets));
+assert.throws(() => f.generatorEffectiveGains(-50.1, [0]));
+assert.equal(f.generatorReferenceStatus({name:"POCSAG",native_cli_id:null},generatorSchemes).label,"Nur Referenzeintrag","Similar names never substitute for an established native ID");
+assert.equal(f.generatorReferenceStatus({kind:"tool"},generatorSchemes).label,"Werkzeug / Hilfsfunktion");
+assert.equal(f.generatorReferenceStatus({native_cli_id:"exact"},[{native_cli_id:"exact",available:true}]).label,"Externes Exportprofil");
+const generatorValues = {
+  transport: "cable",
+  tx_uri: "ip:192.168.2.1",
+  tx_gain_db: "-50",
+  attenuation_offsets_db: "0, 3, 6",
+  tx_sample_rate_msps: "",
+  tx_bandwidth_mhz: "",
+  rx_source: "rsp1a",
+  rx_uri: "",
+  shared_pluto: false,
+  rx_sample_rate_msps: "2",
+  rx_gain_db: "30",
+  frequencies_mhz: "433.92, 434.1",
+  variants_per_mode: "3",
+  payload_repetitions: "3",
+  duration_seconds: "1",
+  seed: "42",
+  label_facet: "modulation",
+  settle_seconds: ".1",
+  rx_preroll_seconds: ".2",
+  max_gib: "8",
+  impairment_snr_db: "null, 0, 10, 20",
+  impairment_frequency_offset_hz: "-1000, 0, 1000",
+  impairment_sample_clock_ppm: "-20,0,20",
+  impairment_iq_gain_db: "0,1",
+  impairment_iq_phase_deg: "0,3",
+  impairment_dc_offset: "0,.02",
+};
+const generatorConfig = f.generatorConfig(
+  generatorValues,
+  ["am", "am"],
+  generatorSchemes,
+  { am: { modulation_index: ".3,.8", message_kind: "" } },
+);
+assert.equal(generatorConfig.transport, "cable");
+assert.equal(generatorConfig.receiver.source, "rsp1a");
+assert.equal(generatorConfig.receiver.shared_pluto, false);
+assert.equal(generatorConfig.receiver.sample_rate, 2e6);
+assert.equal(
+  generatorConfig.transmitter.sample_rate,
+  null,
+  "Blank rate keeps backend automatic planning",
+);
+assert.equal(generatorConfig.transmitter.rf_bandwidth_hz, null);
+assert.deepEqual(
+  Array.from(generatorConfig.transmitter.attenuation_offsets_db),
+  [0, 3, 6],
+);
+assert.deepEqual(
+  Array.from(generatorConfig.frequencies_hz),
+  [433920000, 434100000],
+);
+assert.deepEqual(
+  Array.from(generatorConfig.parameter_overrides.am.modulation_index),
+  [0.3, 0.8],
+);
+assert.equal(
+  Object.hasOwn(generatorConfig.parameter_overrides.am, "message_kind"),
+  false,
+  "Blank override preserves authored defaults/automatic variation",
+);
+assert.equal(
+  Object.hasOwn(generatorConfig, "transmit_enabled"),
+  false,
+  "Configuration and drafts never grant TX permission",
+);
+assert.equal(
+  f.generatorConfig(
+    { ...generatorValues, transport: "over_the_air" },
+    ["am"],
+    generatorSchemes,
+  ).transport,
+  "over_the_air",
+);
+assert.equal(
+  f.generatorConfig(
+    { ...generatorValues, transport: undefined },
+    ["am"],
+    generatorSchemes,
+  ).transport,
+  "cable",
+  "Old drafts retain cable default",
+);
+for (const mutation of [
+  { transport: "automatic" },
+  { attenuation_offsets_db: "-3" },
+  { tx_gain_db: "-89", attenuation_offsets_db: "3" },
+  { duration_seconds: ".1" },
+  { variants_per_mode: "33" },
+  { payload_repetitions: "101" },
+  { seed: "2147483648" },
+  { rx_sample_rate_msps: "20" },
+])
+  assert.throws(() =>
+    f.generatorConfig(
+      { ...generatorValues, ...mutation },
+      ["am"],
+      generatorSchemes,
+    ),
+  );
+for (const ids of [[], ["external"], ["missing"]])
+  assert.throws(() =>
+    f.generatorConfig(generatorValues, ids, generatorSchemes),
+  );
+assert.throws(() =>
+  f.generatorConfig(generatorValues, ["am"], generatorSchemes, {
+    am: { unexpected: "1" },
+  }),
+);
+const readyGeneratorPlan = {
+  id: "reviewed-plan",
+  sha256: "immutable-digest",
+  ready: true,
+  inputSignature: JSON.stringify(generatorConfig),
+};
+assert.deepEqual(
+  JSON.parse(
+    JSON.stringify(
+      f.generatorStartPayload(readyGeneratorPlan, generatorConfig, true, true),
+    ),
+  ),
+  {
+    plan_id: "reviewed-plan",
+    plan_sha256: "immutable-digest",
+    transmit_enabled: true,
+    setup_confirmed: true,
+  },
+);
+for (const flags of [
+  [false, false],
+  [true, false],
+  [false, true],
+  ["true", true],
+])
+  assert.throws(() =>
+    f.generatorStartPayload(readyGeneratorPlan, generatorConfig, ...flags),
+  );
+assert.throws(() =>
+  f.generatorStartPayload(
+    { ...readyGeneratorPlan, ready: false },
+    generatorConfig,
+    true,
+    true,
+  ),
+);
+assert.throws(() =>
+  f.generatorStartPayload(
+    { ...readyGeneratorPlan, ready: "true" },
+    generatorConfig,
+    true,
+    true,
+  ),
+);
+assert.throws(
+  () =>
+    f.generatorStartPayload(
+      readyGeneratorPlan,
+      { ...generatorConfig, seed: 43 },
+      true,
+      true,
+    ),
+  "Changing settings invalidates a previous plan",
+);
+const caseSummary = f.generatorCaseSummary({
+  case_id: "case-0042",
+  mode_id: "am",
+  label: "AM",
+  tx_config: { center_frequency_hz: 433920000, tx_gain_db: -56 },
+  waveform_spec: { parameters: { modulation_index: 0.8 } },
+});
+assert.equal(caseSummary.frequency, 433920000);
+assert.equal(caseSummary.gain, -56);
+assert.equal(caseSummary.parameters.modulation_index, 0.8);
+assert.equal(
+  f.generatorBusy({ status: "running", busy: false, tx_active: null }),
+  true,
+);
+assert.equal(
+  f.generatorNeedsAttention({
+    id: "interrupted",
+    status: "interrupted",
+    busy: false,
+    tx_active: null,
+  }),
+  true,
+  "Unknown RF state after interruption stays globally visible and stoppable",
+);
+assert.equal(
+  f.generatorNeedsAttention({
+    id: "completed",
+    status: "completed",
+    busy: false,
+    tx_active: null,
+  }),
+  true,
+);
+assert.equal(
+  f.generatorNeedsAttention({
+    status: "idle",
+    busy: false,
+    tx_active: false,
+    start_request_uncertain: true,
+  }),
+  true,
+  "A network-uncertain start is not displayed as TX off",
+);
+assert.equal(
+  f.generatorNeedsAttention({ status: "idle", busy: false, tx_active: null }),
+  false,
+  "An untouched idle manager does not imply a running transmitter",
+);
+assert.equal(
+  f.generatorNeedsAttention({
+    id: "complete",
+    status: "completed",
+    tx_active: false,
+  }),
+  false,
+);
+assert.equal(f.generatorStatusLabel("interrupted"), "Unterbrochen");
+
 const staticHTML = fs.readFileSync(
   path.join(__dirname, "..", "signalclassifier", "static", "index.html"),
   "utf8",
@@ -1589,6 +1935,14 @@ assert.match(
   "Multi-signal rows require a real table body",
 );
 for (const id of [
+  "view-generator",
+  "generator-form",
+  "generator-plan-content",
+  "generator-transmit-enabled",
+  "generator-setup-confirmed",
+  "generator-global-stop",
+  "generator-global-banner",
+  "experiment-respect-generation-splits",
   "view-analyse",
   "analysis-settings-form",
   "analysis-scan-form",
@@ -1608,6 +1962,12 @@ for (const id of [
   );
 }
 
+for (const id of ["generator-transmit-enabled", "generator-setup-confirmed"]) {
+  const tag = staticHTML.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`, "s"))?.[0];
+  assert.ok(tag, `${id} exists as an input`);
+  assert.doesNotMatch(tag, /\bchecked\b/, `${id} is unchecked by default`);
+}
+
 console.log(
-  "Frontend pure-logic regressions passed: waterfall, selection/drafts, cleanup, HPO, execution/telemetry, multi-signal hierarchy/association, expert policy and coverage.",
+  "Frontend pure-logic regressions passed: generator planning/attenuation/TX release/unknown state, waterfall, selection/drafts, cleanup, HPO, execution/telemetry, multi-signal hierarchy/association, expert policy and coverage.",
 );

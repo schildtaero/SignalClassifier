@@ -5083,3 +5083,569 @@ html[data-theme="light"] {
     padding-right: 15px;
   }
 }
+
+/* Generator campaigns: acquisition configuration, capability matrix and explicit TX release. */
+.generator-intro {
+  padding: 24px 26px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 1fr);
+  gap: 20px 32px;
+  margin-bottom: 22px;
+  border-top: 2px solid var(--cyan);
+}
+.generator-intro h2 {
+  margin: 8px 0 10px;
+  font-size: 1.32rem;
+}
+.generator-intro p {
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.75;
+}
+.generator-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  align-self: center;
+}
+.generator-steps li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.generator-steps strong {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-weight: 400;
+  flex-shrink: 0;
+}
+.generator-intro .generator-intro-note {
+  grid-column: 1/-1;
+  font-size: 0.75rem;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.generator-workspace {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.65fr);
+  gap: 22px;
+  align-items: start;
+}
+.generator-workspace > *,
+.generator-results-column > *,
+.generator-config-panel,
+.generator-config-panel fieldset {
+  min-width: 0;
+}
+.generator-results-column {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+}
+.generator-config-panel .form-body {
+  gap: 25px;
+}
+.generator-config-panel fieldset + fieldset {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 20px;
+}
+.generator-config-panel .form-help,
+.generator-advanced-body .form-help {
+  font-size: 0.75rem;
+  line-height: 1.65;
+  color: var(--faint);
+}
+.generator-config-panel .form-pair {
+  align-items: start;
+}
+.generator-advanced,
+.generator-reference,
+.generator-case-preview,
+.generator-json {
+  min-width: 0;
+}
+.generator-advanced > summary,
+.generator-reference > summary,
+.generator-case-preview > summary,
+.generator-json > summary,
+.generator-parameter-group > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.generator-advanced > summary:hover,
+.generator-reference > summary:hover,
+.generator-case-preview > summary:hover,
+.generator-json > summary:hover {
+  color: var(--cyan);
+}
+.generator-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 14px;
+  min-width: 0;
+}
+.generator-parameter-group {
+  min-width: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.generator-parameter-group > summary {
+  color: var(--text);
+}
+.generator-catalog-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.6fr);
+  gap: 10px;
+  padding: 0 22px 14px;
+}
+.generator-catalog-tools input,
+.generator-catalog-tools select {
+  width: 100%;
+  min-width: 0;
+}
+.generator-selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  padding: 0 22px 16px;
+}
+.generator-selection-actions .text-button {
+  font-size: 0.75rem;
+  text-align: left;
+}
+.generator-engine-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 0 22px 16px;
+  color: var(--faint);
+  font-size: 0.75rem;
+}
+.generator-engine-status:empty {
+  display: none;
+}
+.generator-catalog-table {
+  min-width: 690px;
+}
+.generator-catalog-table th:first-child {
+  width: 42px;
+}
+.generator-catalog-table th:nth-child(2) {
+  width: 35%;
+}
+.generator-catalog-table th:nth-child(3) {
+  width: 23%;
+}
+.generator-catalog-table td {
+  vertical-align: top;
+}
+.generator-catalog-table td input {
+  accent-color: var(--cyan);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.generator-catalog-table td input:disabled {
+  cursor: not-allowed;
+}
+.generator-catalog-table td small {
+  display: block;
+  margin-top: 6px;
+  color: var(--faint);
+  font-size: 0.7rem;
+  line-height: 1.6;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.generator-catalog-table td strong {
+  font-weight: 500;
+  font-size: 0.8125rem;
+  white-space: normal;
+}
+.generator-catalog-table .pill {
+  font-size: 0.625rem;
+  white-space: normal;
+}
+.generator-unavailable td {
+  color: var(--muted);
+}
+.generator-catalog-panel .table-scroll {
+  max-height: 430px;
+  overflow-y: auto;
+}
+.generator-catalog-panel thead {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+.generator-catalog-notes {
+  padding: 0 22px;
+}
+.generator-catalog-notes .form-help {
+  font-size: 0.75rem;
+  line-height: 1.65;
+  margin: 12px 0;
+}
+.generator-reference {
+  padding: 16px 22px 20px;
+  border-top: 1px solid var(--border-soft);
+  margin-top: 12px;
+}
+.generator-reference .form-help {
+  margin-top: 12px;
+  font-size: 0.75rem;
+  line-height: 1.65;
+  color: var(--faint);
+}
+.generator-reference .generator-json {
+  margin-top: 12px;
+}
+.generator-plan-content,
+.generator-run-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 22px 22px;
+}
+.generator-plan-content > .notice,
+.generator-run-content > .notice {
+  margin: 0;
+  display: block;
+  line-height: 1.65;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+.generator-plan-content > .form-help,
+.generator-run-content > .form-help {
+  font-size: 0.75rem;
+  line-height: 1.65;
+  color: var(--faint);
+}
+.generator-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.generator-metrics .analysis-stat {
+  background: var(--panel-soft);
+  padding: 12px 14px;
+}
+.generator-metrics .analysis-stat strong {
+  font-size: 1.1rem;
+}
+.generator-case-preview > summary {
+  margin-bottom: 12px;
+}
+.generator-cases-table {
+  min-width: 640px;
+}
+.generator-cases-table td {
+  vertical-align: top;
+  font-size: 0.75rem;
+}
+.generator-case-parameters {
+  max-width: 240px;
+  white-space: normal;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.generator-plan-files {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+}
+.generator-plan-files > .generator-json {
+  align-self: stretch;
+}
+.generator-json pre {
+  max-height: 320px;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  margin: 10px 0 0;
+  font: 0.7rem/1.7 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.generator-release {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  padding: 20px 22px 22px;
+  border-top: 1px solid var(--border);
+  background: var(--cyan-bg);
+}
+.generator-release .checkbox {
+  align-items: flex-start;
+  font-size: 0.8125rem;
+  line-height: 1.65;
+}
+.generator-release input {
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.generator-release .form-help {
+  color: var(--faint);
+  font-size: 0.75rem;
+  line-height: 1.65;
+}
+.generator-release .button {
+  align-self: flex-start;
+}
+.generator-tx-indicator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.generator-tx-indicator > span:last-child {
+  font: 0.7rem/1.65 var(--mono);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.generator-run-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.generator-run-progress progress {
+  display: block;
+  width: 100%;
+  height: 8px;
+  accent-color: var(--cyan);
+}
+.generator-current-case {
+  padding: 12px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  min-width: 0;
+}
+.generator-current-case > .generator-json {
+  margin-top: 10px;
+}
+.generator-stop {
+  color: var(--red);
+  border-color: var(--red);
+}
+.generator-stop:not(:disabled):hover {
+  background: var(--panel-hover);
+  color: var(--red);
+}
+.generator-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--border-soft);
+}
+.generator-history-row > div {
+  min-width: 0;
+}
+.generator-history-row strong {
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+.generator-history-row small {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--faint);
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.generator-manifest {
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+  min-width: 0;
+}
+.generator-manifest .form-help {
+  font-size: 0.75rem;
+  line-height: 1.65;
+  color: var(--faint);
+}
+.generator-manifest > .button {
+  align-self: flex-start;
+}
+.generator-global-banner {
+  position: sticky;
+  top: 12px;
+  z-index: 12;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+  padding: 15px 18px;
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 8px 30px #0003;
+}
+.generator-global-banner > div {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.generator-global-banner strong {
+  display: block;
+  color: var(--amber);
+  font-size: 0.85rem;
+}
+.generator-global-banner span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.rail-btn[data-view="generator"] span {
+  font-size: 0.64rem;
+}
+@media (max-width: 1200px) {
+  .generator-workspace {
+    grid-template-columns: minmax(310px, 0.85fr) minmax(0, 1.35fr);
+    gap: 18px;
+  }
+  .generator-intro {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .generator-steps {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .generator-config-panel .form-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 1050px) {
+  .generator-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .generator-config-panel .form-body {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+  .generator-config-panel .form-body > fieldset,
+  .generator-config-panel .form-body > details {
+    min-width: 0;
+  }
+  .generator-config-panel fieldset + fieldset {
+    border-top: 0;
+    padding-top: 0;
+  }
+  .generator-config-panel .form-body > fieldset:nth-child(3) {
+    grid-column: 1/-1;
+  }
+  .generator-config-panel .form-body > fieldset:nth-child(3) .form-pair {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 650px) {
+  .generator-intro {
+    padding: 20px;
+    gap: 18px;
+  }
+  .generator-intro h2 {
+    font-size: 1.18rem;
+  }
+  .generator-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .generator-config-panel .form-body {
+    display: flex;
+  }
+  .generator-config-panel fieldset + fieldset {
+    border-top: 1px solid var(--border-soft);
+    padding-top: 20px;
+  }
+  .generator-config-panel .form-pair,
+  .generator-config-panel .form-body > fieldset:nth-child(3) .form-pair {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .generator-catalog-tools {
+    grid-template-columns: minmax(0, 1fr);
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+  .generator-catalog-tools label,
+  .generator-catalog-tools input {
+    min-width: 0;
+  }
+  .generator-selection-actions {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+  .generator-plan-content,
+  .generator-run-content {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+  .generator-release {
+    padding: 18px;
+  }
+  .generator-global-banner {
+    top: 7px;
+    padding: 13px;
+    gap: 9px;
+  }
+  .generator-global-banner > .button {
+    font-size: 0.75rem;
+    padding: 9px 11px;
+  }
+  .generator-history-row {
+    align-items: flex-start;
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+}
+
+.generator-reference-table {
+  min-width: 680px;
+}
+.generator-reference-table td {
+  vertical-align: top;
+  font-size: 0.75rem;
+}
+.generator-reference-table td small {
+  display: block;
+  margin-top: 6px;
+  color: var(--faint);
+  font-size: 0.7rem;
+  white-space: normal;
+  line-height: 1.6;
+}
+.generator-reference-table td strong {
+  font-weight: 500;
+}
+.generator-reference > div > .table-scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 12px;
+}

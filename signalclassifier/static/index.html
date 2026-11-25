@@ -124,6 +124,10 @@
       >
         <svg class="icon"><use href="#i-signal" /></svg><span>Empfang</span>
       </button>
+      <button class="rail-btn" data-view="generator" title="Signalgenerator">
+        <svg class="icon"><use href="#i-signal" /></svg
+        ><span>Signalgenerator</span>
+      </button>
       <button class="rail-btn" data-view="analyse" title="Analyse">
         <svg class="icon"><use href="#i-chart" /></svg><span>Analyse</span>
       </button>
@@ -209,6 +213,31 @@
             id="dismiss-error"
           >
             <svg class="icon"><use href="#i-close" /></svg>
+          </button>
+        </div>
+        <div
+          id="generator-global-banner"
+          class="generator-global-banner"
+          role="status"
+          hidden
+        >
+          <div>
+            <strong id="generator-global-title"
+              >Generator reserviert den Empfänger</strong
+            ><span id="generator-global-detail"></span>
+          </div>
+          <button
+            type="button"
+            class="button button-quiet"
+            data-view="generator"
+          >
+            Zum Generator</button
+          ><button
+            type="button"
+            class="button generator-stop"
+            id="generator-global-stop"
+          >
+            <svg class="icon"><use href="#i-stop" /></svg>TX & Lauf stoppen
           </button>
         </div>
         <section
@@ -438,11 +467,11 @@
                   werden Stichproben je Zeitpixel durch Farbmaxima gebündelt;
                   Frequenzspalten verwenden lineare Leistungsmittel. Dies sind
                   Anzeigewerte, keine zusätzlichen Messungen. Unbeobachtete
-                  Zeitpixel bleiben leer. Gestrichelte Rahmen fassen
-                  beobachtete Stichproben zusammen; sie belegen keine
-                  durchgehende Signaldauer. Zeitmarken beruhen auf der
-                  Host-Empfangszeit und sind ohne bestätigten
-                  Hardware-Zeitstempel nur eine zeitliche Schätzung.
+                  Zeitpixel bleiben leer. Gestrichelte Rahmen fassen beobachtete
+                  Stichproben zusammen; sie belegen keine durchgehende
+                  Signaldauer. Zeitmarken beruhen auf der Host-Empfangszeit und
+                  sind ohne bestätigten Hardware-Zeitstempel nur eine zeitliche
+                  Schätzung.
                 </p>
               </div>
               <div class="plot-footer">
@@ -828,6 +857,517 @@
                 Funkdienst noch Emitter.
               </div>
             </article>
+          </div>
+        </section>
+        <section
+          class="view"
+          id="view-generator"
+          hidden
+          aria-label="Signalgenerator und Empfangsmessung"
+        >
+          <article class="panel generator-intro">
+            <div>
+              <span class="panel-kicker"
+                >REPRODUZIERBARE SIGNALE / ECHTER EMPFANG</span
+              >
+              <h2>Vom Sollsignal zum gelabelten IQ-Datensatz.</h2>
+              <p>
+                Pluto sendet definierte Varianten an einen Empfänger,
+                standardmäßig SDRplay RSP1A. Kabelmessung und optionaler
+                Antennenbetrieb bleiben im Datensatz getrennt. Ein Plan hält
+                Verfahren, Parameter und Zufallsstartwert fest; erfolgreiche
+                Aufnahmen erhalten das Soll-Label und ihre TX-Provenienz.
+              </p>
+            </div>
+            <ol class="generator-steps" aria-label="Ablauf">
+              <li><strong>1</strong><span>Verfahren wählen</span></li>
+              <li><strong>2</strong><span>Plan prüfen</span></li>
+              <li><strong>3</strong><span>TX freigeben</span></li>
+              <li><strong>4</strong><span>Datensatz prüfen</span></li>
+            </ol>
+            <p class="generator-intro-note">
+              Ein erzeugtes Sollsignal ist kein unabhängiger Protokollnachweis.
+              Modulationsproxies werden ausdrücklich als Näherung geführt.
+              Planung und Katalogabfragen starten keine Hardware.
+            </p>
+          </article>
+          <div class="generator-workspace">
+            <form id="generator-form" class="panel generator-config-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker">MESSAUFBAU & VARIANTEN</span>
+                  <h2>Generator konfigurieren</h2>
+                </div>
+              </div>
+              <div class="form-body">
+                <fieldset class="analysis-fieldset">
+                  <legend>Aufbau & Pluto-Sender</legend>
+                  <label
+                    >Übertragungsweg<select name="transport">
+                      <option value="cable">Kabel · TX → Dämpfung → RX</option>
+                      <option value="over_the_air">
+                        Antenne · Over the Air
+                      </option>
+                    </select></label
+                  >
+                  <p class="form-help" id="generator-transport-help">
+                    Kabelaufbau mit geeigneter externer Dämpfung verwenden.
+                    Frequenz und Pegel müssen zum Aufbau und zulässigen
+                    Testbetrieb passen.
+                  </p>
+                  <label
+                    >Pluto-URI<input
+                      name="tx_uri"
+                      value="ip:192.168.2.1"
+                      autocomplete="off"
+                      placeholder="ip:192.168.2.1"
+                      required
+                  /></label>
+                  <label
+                    >Trägerfrequenzen [MHz]<input
+                      name="frequencies_mhz"
+                      value="433.92"
+                      inputmode="decimal"
+                      required
+                    /><small
+                      >Liste mit Komma trennen; Dezimalpunkt verwenden.
+                      Gerätegrenzen werden im Plan geprüft.</small
+                    ></label
+                  >
+                  <div class="form-pair">
+                    <label
+                      >Manueller TX-Basispegel [dB]<input
+                        name="tx_gain_db"
+                        type="number"
+                        value="-50"
+                        min="-89.75"
+                        max="0"
+                        step="0.25" /></label
+                    ><label
+                      >TX-Abtastrate [MS/s]<input
+                        name="tx_sample_rate_msps"
+                        type="number"
+                        min="0.520834"
+                        max="61.44"
+                        step="any"
+                        placeholder="Automatisch"
+                    /></label>
+                  </div>
+                  <label
+                    >Zusätzliche TX-Dämpfung [dB]<input
+                      name="attenuation_offsets_db"
+                      value="0, 3, 6"
+                      inputmode="decimal"
+                    /><small id="generator-effective-gain"
+                      >Effektiver TX-Pegel: −50, −53, −56 dB. Die Zusatzdämpfung
+                      wird abgezogen; dies ist keine kalibrierte
+                      HF-Leistung.</small
+                    ></label
+                  >
+                  <label
+                    >TX-HF-Bandbreite [MHz]<input
+                      name="tx_bandwidth_mhz"
+                      type="number"
+                      min="0.2"
+                      max="20"
+                      step="any"
+                      placeholder="Automatisch je Verfahren"
+                  /></label>
+                </fieldset>
+                <fieldset class="analysis-fieldset">
+                  <legend>Empfänger · RSP1A / Pluto</legend>
+                  <div class="form-pair">
+                    <label
+                      >Empfänger<select name="rx_source">
+                        <option value="rsp1a">SDRplay RSP1A</option>
+                        <option value="pluto">PlutoSDR</option>
+                      </select></label
+                    ><label
+                      >RX-Abtastrate [MS/s]<input
+                        name="rx_sample_rate_msps"
+                        type="number"
+                        min="0.520834"
+                        max="10"
+                        value="2"
+                        step="any"
+                        required
+                    /></label>
+                  </div>
+                  <label
+                    >RX-Geräteadresse<input
+                      name="rx_uri"
+                      autocomplete="off"
+                      placeholder="Automatisch (RSP1A)"
+                  /></label>
+                  <label
+                    >RX-Verstärkung [dB]<input
+                      name="rx_gain_db"
+                      type="number"
+                      value="30"
+                      step="any"
+                  /></label>
+                  <label class="checkbox" id="generator-shared-field" hidden
+                    ><input name="shared_pluto" type="checkbox" /><span
+                      >Sender und Empfänger verwenden denselben Pluto</span
+                    ></label
+                  >
+                  <p class="form-help">
+                    Der Lauf reserviert den Empfänger. Regulärer Empfang und
+                    Scan stehen dann nicht zur Verfügung. Generatorfortschritt
+                    und gespeicherte Aufnahmen werden hier angezeigt; das
+                    Empfangsspektrum wird dabei noch nicht mitgeführt.
+                  </p>
+                </fieldset>
+                <fieldset class="analysis-fieldset">
+                  <legend>Umfang & Reproduzierbarkeit</legend>
+                  <div class="form-pair">
+                    <label
+                      >Varianten je Verfahren (min.)<input
+                        name="variants_per_mode"
+                        type="number"
+                        min="1"
+                        max="32"
+                        value="3"
+                        step="1"
+                        required /></label
+                    ><label
+                      >Payload-Wiederholungen<input
+                        name="payload_repetitions"
+                        type="number"
+                        min="1"
+                        max="100"
+                        value="3"
+                        step="1"
+                        required
+                    /></label>
+                  </div>
+                  <div class="form-pair">
+                    <label
+                      >Aufnahmedauer je Fall [s]<input
+                        name="duration_seconds"
+                        type="number"
+                        min="0.5"
+                        max="30"
+                        value="1"
+                        step="any"
+                        required /></label
+                    ><label
+                      >Zufallsstartwert (Seed)<input
+                        name="seed"
+                        type="number"
+                        value="42"
+                        min="0"
+                        max="2147483647"
+                        step="1"
+                        required
+                    /></label>
+                  </div>
+                  <div class="form-pair">
+                    <label
+                      >Einschwingzeit [s]<input
+                        name="settle_seconds"
+                        type="number"
+                        value="0.1"
+                        min="0.05"
+                        max="5"
+                        step="any" /></label
+                    ><label
+                      >RX-Vorlauf [s]<input
+                        name="rx_preroll_seconds"
+                        type="number"
+                        value="0.2"
+                        min="0.05"
+                        max="5"
+                        step="any"
+                    /></label>
+                  </div>
+                  <div class="form-pair">
+                    <label
+                      >Dateibudget [GiB]<input
+                        name="max_gib"
+                        type="number"
+                        value="8"
+                        min="0.001"
+                        max="64"
+                        step="any"
+                        required /></label
+                    ><label
+                      >Soll-Label nach<select name="label_facet">
+                        <option value="scheme">Verfahren</option>
+                        <option value="modulation">Modulation</option>
+                        <option value="protocol">Protokoll</option>
+                      </select></label
+                    >
+                  </div>
+                  <p class="form-help">
+                    Der Seed steuert eine begrenzte, geschichtete Auswahl statt
+                    aller Kombinationen. Wiederholungen und verwandte Varianten
+                    ersetzen keine unabhängigen Empfangssitzungen. Maximal
+                    <span id="generator-limit">4.096</span> Fälle; das Training
+                    unterstützt bis zu 64 Klassen.
+                  </p>
+                </fieldset>
+                <details class="generator-advanced">
+                  <summary>Kanalvariationen</summary>
+                  <div class="generator-advanced-body">
+                    <p class="form-help">
+                      Wertelisten mit Komma trennen. Das sind digitale
+                      Erzeugungsparameter: eingespritztes Rauschen ist keine
+                      Messung des absoluten HF-SNR. „null“ bedeutet kein
+                      zusätzliches Rauschen.
+                    </p>
+                    <label
+                      >Zusätzliches Rausch-SNR [dB]<input
+                        name="impairment_snr_db"
+                        value="null, 0, 10, 20"
+                    /></label>
+                    <label
+                      >Frequenzversatz [Hz]<input
+                        name="impairment_frequency_offset_hz"
+                        value="-1000, 0, 1000"
+                    /></label>
+                    <label
+                      >Abtaktabweichung [ppm]<input
+                        name="impairment_sample_clock_ppm"
+                        value="-20, 0, 20"
+                    /></label>
+                    <div class="form-pair">
+                      <label
+                        >I/Q-Gain [dB]<input
+                          name="impairment_iq_gain_db"
+                          value="0, 1" /></label
+                      ><label
+                        >I/Q-Phase [°]<input
+                          name="impairment_iq_phase_deg"
+                          value="0, 3"
+                      /></label>
+                    </div>
+                    <label
+                      >Gleichanteil [relativ]<input
+                        name="impairment_dc_offset"
+                        value="0, 0.02"
+                    /></label>
+                  </div>
+                </details>
+                <details class="generator-advanced">
+                  <summary>Parameter der gewählten Verfahren</summary>
+                  <div
+                    class="generator-advanced-body"
+                    id="generator-parameters"
+                  >
+                    <div class="empty-state compact">
+                      Zuerst ein verfügbares Verfahren auswählen.
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <div class="panel-actions">
+                <button
+                  type="submit"
+                  class="button button-primary"
+                  id="generator-plan-button"
+                >
+                  <svg class="icon"><use href="#i-check" /></svg>Plan prüfen</button
+                ><button
+                  type="button"
+                  class="button button-quiet"
+                  id="generator-refresh"
+                >
+                  <svg class="icon"><use href="#i-refresh" /></svg>Katalog
+                  aktualisieren
+                </button>
+              </div>
+            </form>
+            <div class="generator-results-column">
+              <article class="panel generator-catalog-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker">IMPLEMENTIERUNG & GRENZEN</span>
+                    <h2>Verfahren auswählen</h2>
+                  </div>
+                  <span class="pill cyan" id="generator-selected-count"
+                    >0 gewählt</span
+                  >
+                </div>
+                <div class="generator-catalog-tools">
+                  <label class="search-field"
+                    ><span class="sr-only">Verfahren suchen</span
+                    ><input
+                      id="generator-search"
+                      type="search"
+                      placeholder="Name, Familie oder Verfahren suchen …" /></label
+                  ><label
+                    ><span class="sr-only">Verfahrensstatus filtern</span
+                    ><select id="generator-kind-filter">
+                      <option value="all">Alle Status</option>
+                      <option value="available">Verfügbar</option>
+                      <option value="encoder">Echte Generatoren</option>
+                      <option value="proxy">Modulationsproxies</option>
+                      <option value="unavailable">Nicht verfügbar</option>
+                    </select></label
+                  >
+                </div>
+                <div class="generator-selection-actions">
+                  <button
+                    type="button"
+                    class="text-button"
+                    id="generator-select-all"
+                  >
+                    Alle verfügbaren auswählen</button
+                  ><button
+                    type="button"
+                    class="text-button"
+                    id="generator-select-visible"
+                  >
+                    Sichtbare verfügbare auswählen</button
+                  ><button
+                    type="button"
+                    class="text-button"
+                    id="generator-select-none"
+                  >
+                    Auswahl aufheben
+                  </button>
+                </div>
+                <div
+                  id="generator-engine-status"
+                  class="generator-engine-status"
+                ></div>
+                <div
+                  class="table-scroll"
+                  role="region"
+                  tabindex="0"
+                  aria-label="Verfahrenskatalog, horizontal scrollbar"
+                >
+                  <table class="data-table generator-catalog-table">
+                    <thead>
+                      <tr>
+                        <th><span class="sr-only">Auswahl</span></th>
+                        <th>Verfahren / Soll-Label</th>
+                        <th>Umsetzung</th>
+                        <th>Bandbreite / Einschränkungen</th>
+                      </tr>
+                    </thead>
+                    <tbody id="generator-catalog-body">
+                      <tr>
+                        <td colspan="4">Katalog wird beim Öffnen geladen.</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div
+                  id="generator-catalog-notes"
+                  class="generator-catalog-notes"
+                ></div>
+                <details class="generator-reference">
+                  <summary id="generator-reference-label">
+                    OnAir-Verzeichnis · Referenz, keine Implementierungszusage
+                  </summary>
+                  <div id="generator-onair-coverage"></div>
+                </details>
+              </article>
+              <article class="panel generator-plan-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker"
+                      >VORPRÜFUNG / KEINE ÜBERTRAGUNG</span
+                    >
+                    <h2>Plan & Freigabe</h2>
+                  </div>
+                  <span class="pill" id="generator-plan-state">Kein Plan</span>
+                </div>
+                <div id="generator-plan-content" class="generator-plan-content">
+                  <div class="empty-state compact">
+                    Verfahren auswählen und „Plan prüfen“ aufrufen. Erst ein
+                    freigegebener Plan kann einen Lauf starten.
+                  </div>
+                </div>
+                <div class="generator-release">
+                  <label class="checkbox"
+                    ><input
+                      id="generator-setup-confirmed"
+                      type="checkbox"
+                    /><span id="generator-setup-label"
+                      >Kabelaufbau vorbereitet: TX ist über geeignete Dämpfung
+                      mit RX verbunden.</span
+                    ></label
+                  ><label class="checkbox"
+                    ><input
+                      id="generator-transmit-enabled"
+                      type="checkbox"
+                    /><span>Senden ausdrücklich freigeben.</span></label
+                  >
+                  <p class="form-help">
+                    Diese Freigabe gilt nur für den angezeigten Plan. Ein
+                    geänderter Plan erfordert eine neue Freigabe. Der Plan ist
+                    keine Messung zulässiger Eingangspegel.
+                  </p>
+                  <button
+                    type="button"
+                    class="button button-primary"
+                    id="generator-start"
+                    disabled
+                  >
+                    <svg class="icon"><use href="#i-play" /></svg>Geplanten Lauf
+                    starten
+                  </button>
+                </div>
+              </article>
+              <article class="panel generator-run-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker">HARDWARELAUF</span>
+                    <h2>Lauf & Aufnahmen</h2>
+                  </div>
+                  <span class="pill" id="generator-run-state"
+                    >Nicht geladen</span
+                  >
+                </div>
+                <div id="generator-run-content" class="generator-run-content">
+                  <div class="empty-state compact">Noch kein Lauf geladen.</div>
+                </div>
+                <div class="panel-actions">
+                  <button
+                    type="button"
+                    class="button generator-stop"
+                    id="generator-stop"
+                    disabled
+                  >
+                    <svg class="icon"><use href="#i-stop" /></svg>TX & Lauf
+                    stoppen</button
+                  ><button
+                    type="button"
+                    class="button button-quiet"
+                    data-view="aufnahmen"
+                  >
+                    Zu den Aufnahmen
+                  </button>
+                </div>
+              </article>
+              <article class="panel generator-history-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="panel-kicker">PROVENIENZ</span>
+                    <h2>Bisherige Läufe</h2>
+                  </div>
+                  <button
+                    type="button"
+                    class="icon-button"
+                    id="generator-runs-refresh"
+                    aria-label="Laufliste aktualisieren"
+                  >
+                    <svg class="icon"><use href="#i-refresh" /></svg>
+                  </button>
+                </div>
+                <div id="generator-runs">
+                  <div class="empty-state compact">Keine Läufe geladen.</div>
+                </div>
+                <div
+                  id="generator-manifest"
+                  class="generator-manifest"
+                  hidden
+                ></div>
+              </article>
+            </div>
           </div>
         </section>
         <section
@@ -1830,19 +2370,39 @@
                       </select></label
                     >
                     <label class="checkbox">
-                      <input type="checkbox" name="allow_same_session" id="experiment-allow-same-session" />
+                      <input
+                        type="checkbox"
+                        name="allow_same_session"
+                        id="experiment-allow-same-session"
+                      />
                       Ich akzeptiere Aufnahmen derselben Sitzung in Training,
                       Validierung und Test.
                     </label>
                     <p class="field-help">
-                      Bei aktivierter Checkbox werden unterschiedliche ursprüngliche
-                      Aufnahmen aufgeteilt. Dieselbe Aufnahme und ihre abgeleiteten
-                      Ausschnitte bleiben zusammen. Gemeinsame Empfangsbedingungen
-                      können die Genauigkeit zu günstig erscheinen lassen; diese
-                      Einschränkung wird im Bericht gespeichert. Ausgeschaltet
-                      bleiben ganze Sitzungen getrennt. Die Vorprüfung prüft
-                      zusätzlich Dateiduplikate; bei großen Datensätzen kann
-                      dies dauern.
+                      Bei aktivierter Checkbox werden unterschiedliche
+                      ursprüngliche Aufnahmen aufgeteilt. Dieselbe Aufnahme und
+                      ihre abgeleiteten Ausschnitte bleiben zusammen. Gemeinsame
+                      Empfangsbedingungen können die Genauigkeit zu günstig
+                      erscheinen lassen; diese Einschränkung wird im Bericht
+                      gespeichert. Ausgeschaltet bleiben ganze Sitzungen
+                      getrennt. Die Vorprüfung prüft zusätzlich Dateiduplikate;
+                      bei großen Datensätzen kann dies dauern.
+                    </p>
+                    <label class="checkbox">
+                      <input
+                        type="checkbox"
+                        name="respect_generation_splits"
+                        id="experiment-respect-generation-splits"
+                        disabled
+                      />
+                      Vorgeplante Generator-Kohorten verwenden
+                    </label>
+                    <p class="field-help">
+                      Benötigt die Zustimmung zu Aufnahmen derselben Sitzung.
+                      Alle Varianten eines Nutzdatenursprungs bleiben ihrer
+                      geplanten Trainings-, Validierungs- oder Testkohorte
+                      zugeordnet. Feste externe Demo-Nutzdaten können nicht
+                      unabhängig ausgewertet werden.
                     </p>
                     <span class="field-label"
                       >Bestätigte Aufnahmen auswählen</span
@@ -2431,10 +2991,10 @@
                   hidden
                 ></div>
                 <p id="experiment-split-limitation" class="field-help" hidden>
-                  Bewertung mit getrennten Aufnahmen derselben Sitzung zugelassen:
-                  Gemeinsame Empfangsbedingungen können die gemessene Genauigkeit
-                  begünstigen. Die Übertragbarkeit auf neue Sitzungen ist damit
-                  nicht nachgewiesen.
+                  Bewertung mit getrennten Aufnahmen derselben Sitzung
+                  zugelassen: Gemeinsame Empfangsbedingungen können die
+                  gemessene Genauigkeit begünstigen. Die Übertragbarkeit auf
+                  neue Sitzungen ist damit nicht nachgewiesen.
                 </p>
                 <div id="experiment-result-body" hidden></div>
               </article>

@@ -52,12 +52,25 @@
     analysisSelectedId: null,
     analysisDetail: null,
     analysisScanPlan: null,
+    generatorCatalogue: null,
+    generatorSelected: new Set(),
+    generatorOverrides: Object.create(null),
+    generatorPlan: null,
+    generatorPlanSequence: 0,
+    generatorPlanning: false,
+    generatorStarting: false,
+    generatorStopping: false,
+    generatorStatus: null,
+    generatorStatusError: null,
+    generatorPolling: false,
+    generatorRuns: [],
   };
   const titles = {
     empfang: [
       "Empfang & Spektrum",
       "Signale erfassen. Merkmale verstehen. Entscheidungen nachvollziehen.",
     ],
+    generator: ["Signalgenerator & Empfangsmessung", "Signale reproduzierbar erzeugen. Mit echter Empfangsprovenienz aufnehmen."],
     aufnahmen: [
       "Aufnahmen & Datensätze",
       "IQ-Daten organisieren, Labels bestätigen und Versuche vorbereiten.",
@@ -337,6 +350,7 @@
     const actions = {
       empfang: ["play", "Empfang starten"],
       analyse: ["refresh", "Analyse aktualisieren"],
+      generator: ["check", "Plan prüfen"],
       aufnahmen: ["upload", "SigMF importieren"],
       emitter: ["plus", "Eintrag hinzufügen"],
       topologien: ["plus", "Eigene Topologie"],
@@ -353,6 +367,7 @@
     try {
       if (view === "aufnahmen") await loadRecordings();
       if (view === "analyse") await loadAnalysis(true);
+      if (view === "generator") await loadGenerator();
       if (view === "emitter") await loadEmitters();
       if (view === "topologien") await loadTopologies();
       if (view === "experimente") {
@@ -2610,6 +2625,7 @@
       suggestions: arr(r.label_suggestions),
       suggestion_reason:
         r.label_suggestion_reason || r.label_suggestion?.reason,
+      generator_reference: r.annotation?.verification_kind === "generator_reference" || Boolean(g["sc:generation"]),
       group_id: r.group_id,
       capture_quality:
         r.capture_quality || r.metadata?.global?.["sc:capture_quality"],
@@ -2721,7 +2737,7 @@
         const suggested = suggestionLabel(r);
         const label = r.label
           ? pill(
-              `${r.label}${r.verified ? " · bestätigt" : " · vorläufig"}`,
+              `${r.label}${r.generator_reference ? " · Generatorreferenz" : r.verified ? " · bestätigt" : " · vorläufig"}`,
               r.verified ? "green" : "amber",
             )
           : suggested
@@ -2807,6 +2823,7 @@
           ),
           el("td", {}, [
             label,
+            r.generator_reference ? el("small", { text: "Generatorreferenz, keine Decoderbestätigung" }) : null,
             !r.verified && (r.suggestion_reason || r.suggestion?.source)
               ? el("small", {
                   text: text(r.suggestion_reason || r.suggestion.source),
@@ -2852,7 +2869,7 @@
               el("span", {}, [
                 text(r.name),
                 el("small", {
-                  text: `${r.label} · ${duration(r.duration_seconds)} · Sitzung ${text(r.group_id, r.id).slice(0, 12)}`,
+                  text: `${r.label}${r.generator_reference ? " · Generatorreferenz" : ""} · ${duration(r.duration_seconds)} · Sitzung ${text(r.group_id, r.id).slice(0, 12)}`,
                 }),
               ]),
             ]),
@@ -4241,6 +4258,7 @@
           ? f.get("evaluation_mode")
           : "independent",
       allow_same_session: f.get("source") === "recordings" && f.has("allow_same_session"),
+      respect_generation_splits: f.get("source") === "recordings" && f.has("respect_generation_splits"),
       topology_id: topologyIds[0],
       topology_ids: topologyIds,
       samples_per_class: Number(f.get("samples_per_class")),
@@ -7783,6 +7801,10 @@
       throw new Error("Vorwissen muss als boolescher Wert gespeichert sein.");
     if (c.allow_same_session !== undefined && typeof c.allow_same_session !== "boolean")
       throw new Error("Die Zustimmung zu Aufnahmen derselben Sitzung muss als boolescher Wert gespeichert sein.");
+    if (c.respect_generation_splits !== undefined && typeof c.respect_generation_splits !== "boolean")
+      throw new Error("Generator-Kohorten müssen als boolescher Wert gespeichert sein.");
+    if (c.respect_generation_splits === true && (c.allow_same_session !== true || c.source !== "recordings"))
+      throw new Error("Generator-Kohorten benötigen Aufnahmen als Datenquelle und die Zustimmung zu Aufnahmen derselben Sitzung.");
     const listBounds = {
       segment_lengths: [256, 65536, 4, true],
       snr_db: [-30, 80, 12, false],
@@ -7918,6 +7940,8 @@
       );
     form.elements.use_priors.checked = c.use_priors === true;
     form.elements.allow_same_session.checked = c.allow_same_session === true;
+    form.elements.respect_generation_splits.checked = c.respect_generation_splits === true;
+    updateGenerationSplitControls();
     form.elements.experiment_notes.value = c.experiment_notes || "";
     populateOptimizationForm(prepared.optimization);
     populateExecutionForm(prepared.execution);
@@ -7932,7 +7956,1321 @@
         : "Versuchskonfiguration geladen. Der Versuch wurde noch nicht gestartet.",
     );
   }
+  const generatorImpairmentKeys = [
+    "snr_db",
+    "frequency_offset_hz",
+    "sample_clock_ppm",
+    "iq_gain_db",
+    "iq_phase_deg",
+    "dc_offset",
+  ];
+  function generatorSchemeKind(scheme) {
+    const raw = String(scheme?.implementation_kind || "unknown").toLowerCase();
+    if (raw.includes("proxy"))
+      return { id: "proxy", label: "Modulationsproxy", tone: "amber" };
+    if (raw.includes("fixture") || raw.includes("external"))
+      return { id: "fixture", label: "Externer IQ-Payload", tone: "" };
+    if (raw.includes("protocol") || raw.includes("encoder"))
+      return { id: "encoder", label: "Protokollgenerator", tone: "cyan" };
+    if (raw.includes("modulation"))
+      return { id: "encoder", label: "Modulationsgenerator", tone: "cyan" };
+    if (
+      raw.startsWith("native") ||
+      ["builtin", "generator", "waveform"].includes(raw)
+    )
+      return { id: "encoder", label: "Signalgenerator", tone: "cyan" };
+    return {
+      id: "other",
+      label: text(scheme?.implementation_kind, "Umsetzung nicht angegeben"),
+      tone: "",
+    };
+  }
+  function generatorFacets(scheme) {
+    const facets = scheme?.facets;
+    if (Array.isArray(facets)) return facets.map(String).join(" · ");
+    if (facets && typeof facets === "object") {
+      const names = {
+        waveform_family: "Signalform",
+        modulation: "Modulation",
+        protocol: "Protokoll",
+        service: "Funkdienst",
+        emitter: "Emitter",
+      };
+      const labels = {
+        single_carrier: "Einträgerartig",
+        multicarrier: "Mehrträgerartig",
+        chirp: "Chirp",
+        pulse: "Pulsförmig",
+      };
+      return Object.entries(facets)
+        .filter(
+          ([, value]) => value !== null && value !== undefined && value !== "",
+        )
+        .map(
+          ([key, value]) =>
+            `${names[key] || key}: ${Array.isArray(value) ? value.join(" / ") : labels[value] || text(value)}`,
+        )
+        .join(" · ");
+    }
+    return text(facets, "");
+  }
+  function generatorReferenceStatus(mode, schemes) {
+    const matched = mode?.native_cli_id
+      ? arr(schemes).find((scheme) => scheme.native_cli_id === mode.native_cli_id)
+      : null;
+    if (matched)
+      return {
+        label: "Externes Exportprofil",
+        detail:
+          matched.available === true
+            ? "CLI-Payload verfügbar; Grenzen im Plan prüfen."
+            : text(matched.reason, "CLI-Payload derzeit nicht verfügbar."),
+        tone: matched.available === true ? "cyan" : "",
+      };
+    const kind = {
+      tool: "Werkzeug / Hilfsfunktion",
+      scanner: "Scanner",
+      scan: "Scanner",
+      network: "Netzwerkeingang",
+      network_input: "Netzwerkeingang",
+      scientific: "Messfunktion",
+    }[mode?.kind];
+    return {
+      label: kind || "Nur Referenzeintrag",
+      detail: "Kein exakt zugeordnetes Exportprofil; kein Generatornachweis.",
+      tone: "",
+    };
+  }
+  function generatorVisibleSchemes(schemes, query = "", filter = "all") {
+    const needle = String(query).trim().toLocaleLowerCase("de-DE");
+    return arr(schemes).filter((scheme) => {
+      const kind = generatorSchemeKind(scheme);
+      return (
+        (!needle ||
+          `${scheme.id} ${scheme.name} ${generatorFacets(scheme)} ${text(scheme.reason, "")}`
+            .toLocaleLowerCase("de-DE")
+            .includes(needle)) &&
+        (filter === "all" ||
+          (filter === "available" && scheme.available === true) ||
+          (filter === "unavailable" && scheme.available !== true) ||
+          (filter === "encoder" && kind.id === "encoder") ||
+          (filter === "proxy" && kind.id === "proxy"))
+      );
+    });
+  }
+  function generatorSelectionWithAdditions(current, schemes) {
+    const selected = new Set(current);
+    for (const scheme of arr(schemes))
+      if (scheme.available === true) selected.add(String(scheme.id));
+    return selected;
+  }
+  function generatorValueList(raw, label, schema = {}) {
+    let values;
+    if (Array.isArray(raw)) values = [...raw];
+    else if (
+      String(raw ?? "")
+        .trim()
+        .startsWith("[")
+    ) {
+      try {
+        values = JSON.parse(String(raw));
+      } catch (_) {
+        throw new Error(`${label}: ungültige JSON-Werteliste.`);
+      }
+    } else
+      values = String(raw ?? "")
+        .split(/[,;\n]/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+    if (!Array.isArray(values) || !values.length || values.length > 32)
+      throw new Error(`${label}: 1 bis 32 Werte eingeben.`);
+    const type = schema.type || "number";
+    return values.map((value) => {
+      if (
+        schema.nullable &&
+        (value === null || String(value).toLowerCase() === "null")
+      )
+        return null;
+      let parsed;
+      if (type === "string" || type === "str" || type === "enum")
+        parsed = String(value);
+      else if (type === "boolean" || type === "bool") {
+        if (![true, false, "true", "false"].includes(value))
+          throw new Error(`${label}: nur true oder false sind erlaubt.`);
+        parsed = value === true || value === "true";
+      } else {
+        if (value === null || value === "" || typeof value === "boolean")
+          throw new Error(`${label}: eine endliche Zahl eingeben.`);
+        parsed = Number(value);
+        if (
+          !Number.isFinite(parsed) ||
+          (["integer", "int"].includes(type) && !Number.isInteger(parsed))
+        )
+          throw new Error(
+            `${label}: ${["integer", "int"].includes(type) ? "ganze" : "endliche"} Zahlen eingeben.`,
+          );
+        if (schema.min !== undefined && parsed < Number(schema.min))
+          throw new Error(`${label}: Minimum ${schema.min}.`);
+        if (schema.max !== undefined && parsed > Number(schema.max))
+          throw new Error(`${label}: Maximum ${schema.max}.`);
+      }
+      if (
+        arr(schema.choices).length &&
+        !schema.choices.some((choice) => choice === parsed)
+      )
+        throw new Error(
+          `${label}: erlaubte Werte sind ${schema.choices.join(", ")}.`,
+        );
+      return parsed;
+    });
+  }
+  function generatorNumber(
+    raw,
+    label,
+    minimum = -Infinity,
+    maximum = Infinity,
+    integer = false,
+  ) {
+    if (
+      raw === null ||
+      raw === undefined ||
+      String(raw).trim() === "" ||
+      typeof raw === "boolean"
+    )
+      throw new Error(`${label}: eine Zahl eingeben.`);
+    const value = Number(raw);
+    if (
+      !Number.isFinite(value) ||
+      value < minimum ||
+      value > maximum ||
+      (integer && !Number.isInteger(value))
+    )
+      throw new Error(
+        `${label}: ${integer ? "ganzen " : ""}Wert zwischen ${minimum} und ${maximum} eingeben.`,
+      );
+    return value;
+  }
+  function generatorConfig(values, modeIds, schemes, rawOverrides = {}) {
+    const ids = [...new Set(arr(modeIds).map(String))];
+    if (ids.length > 512)
+      throw new Error("Maximal 512 Generatorverfahren auswählen.");
+    if (!ids.length)
+      throw new Error("Mindestens ein verfügbares Verfahren auswählen.");
+    const registry = new Map(
+      arr(schemes).map((scheme) => [String(scheme.id), scheme]),
+    );
+    for (const id of ids)
+      if (registry.get(id)?.available !== true)
+        throw new Error(
+          `Verfahren ${id} ist nicht verfügbar. Katalog aktualisieren und Auswahl prüfen.`,
+        );
+    const optionalRate = (raw, label, low, high) =>
+      String(raw ?? "").trim() === ""
+        ? null
+        : generatorNumber(raw, label, low, high) * 1e6;
+    const overrides = Object.create(null);
+    for (const id of ids) {
+      const parameters = registry.get(id).parameters || {};
+      for (const [key, raw] of Object.entries(rawOverrides[id] || {})) {
+        if (
+          raw === null ||
+          raw === undefined ||
+          (!Array.isArray(raw) && !String(raw).trim())
+        )
+          continue;
+        if (!Object.prototype.hasOwnProperty.call(parameters, key))
+          throw new Error(`${id}: unbekannter Parameter ${key}.`);
+        if (!overrides[id]) overrides[id] = Object.create(null);
+        overrides[id][key] = generatorValueList(
+          raw,
+          `${registry.get(id).name || id} · ${key}`,
+          parameters[key],
+        );
+      }
+    }
+    const impairments = Object.create(null);
+    for (const key of generatorImpairmentKeys)
+      impairments[key] = generatorValueList(values[`impairment_${key}`], key, {
+        nullable: key === "snr_db",
+      });
+    const transport = values.transport ?? "cable";
+    if (!["cable", "over_the_air"].includes(transport))
+      throw new Error("Kabel oder Antenne als Übertragungsweg wählen.");
+    const gain = generatorNumber(values.tx_gain_db, "TX-Basispegel", -89.75, 0);
+    const attenuation = generatorValueList(
+      values.attenuation_offsets_db ?? "0, 3, 6",
+      "Zusätzliche TX-Dämpfung",
+      { min: 0, max: 89.75 },
+    );
+    generatorEffectiveGains(gain, attenuation);
+    if (!String(values.tx_uri || "").trim())
+      throw new Error("Pluto-Geräteadresse eingeben.");
+    const source = values.rx_source;
+    if (!["rsp1a", "pluto"].includes(source))
+      throw new Error("RSP1A oder Pluto als Empfänger wählen.");
+    if (!["scheme", "modulation", "protocol"].includes(values.label_facet))
+      throw new Error("Ungültige Soll-Label-Ebene.");
+    const frequencies = generatorValueList(
+      values.frequencies_mhz,
+      "Trägerfrequenzen",
+      { min: 325, max: source === "rsp1a" ? 2000 : 3800 },
+    ).map((value) => value * 1e6);
+    return {
+      transport,
+      mode_ids: ids,
+      frequencies_hz: [...new Set(frequencies)],
+      variants_per_mode: generatorNumber(
+        values.variants_per_mode,
+        "Varianten je Verfahren",
+        1,
+        32,
+        true,
+      ),
+      payload_repetitions: generatorNumber(
+        values.payload_repetitions,
+        "Payload-Wiederholungen",
+        1,
+        100,
+        true,
+      ),
+      duration_seconds: generatorNumber(
+        values.duration_seconds,
+        "Aufnahmedauer",
+        0.5,
+        30,
+      ),
+      seed: generatorNumber(values.seed, "Seed", 0, 2147483647, true),
+      label_facet: values.label_facet,
+      transmitter: {
+        uri: String(values.tx_uri || "").trim(),
+        tx_gain_db: gain,
+        attenuation_offsets_db: attenuation,
+        sample_rate: optionalRate(
+          values.tx_sample_rate_msps,
+          "TX-Abtastrate",
+          0.520834,
+          61.44,
+        ),
+        rf_bandwidth_hz: optionalRate(
+          values.tx_bandwidth_mhz,
+          "TX-HF-Bandbreite",
+          0.2,
+          20,
+        ),
+      },
+      receiver: {
+        source,
+        uri: String(values.rx_uri || "").trim(),
+        shared_pluto: source === "pluto" && values.shared_pluto === true,
+        sample_rate:
+          generatorNumber(
+            values.rx_sample_rate_msps,
+            "RX-Abtastrate",
+            0.520834,
+            10,
+          ) * 1e6,
+        gain_db: generatorNumber(
+          values.rx_gain_db,
+          "RX-Verstärkung",
+          source === "pluto" ? -3 : -20,
+          source === "pluto" ? 71 : 100,
+        ),
+      },
+      settle_seconds: generatorNumber(
+        values.settle_seconds,
+        "Einschwingzeit",
+        0.05,
+        5,
+      ),
+      rx_preroll_seconds: generatorNumber(
+        values.rx_preroll_seconds,
+        "RX-Vorlauf",
+        0.05,
+        5,
+      ),
+      max_bytes: Math.round(
+        generatorNumber(values.max_gib, "Dateibudget", 1 / 1024, 64) * 1073741824,
+      ),
+      parameter_overrides: overrides,
+      impairments,
+    };
+  }
+  function generatorEffectiveGains(baseline, offsets) {
+    if (
+      !Number.isFinite(baseline) ||
+      baseline < -89.75 ||
+      baseline > 0 ||
+      Math.abs(baseline * 4 - Math.round(baseline * 4)) > 1e-8
+    )
+      throw new Error(
+        "TX-Basispegel: −89,75 bis 0 dB in 0,25-dB-Schritten eingeben.",
+      );
+    return arr(offsets).map((offset) => {
+      if (
+        !Number.isFinite(offset) ||
+        offset < 0 ||
+        Math.abs(offset * 4 - Math.round(offset * 4)) > 1e-8 ||
+        baseline - offset < -89.75
+      )
+        throw new Error(
+          "Zusatzdämpfung: nichtnegative 0,25-dB-Schritte; der effektive TX-Pegel muss mindestens −89,75 dB bleiben.",
+        );
+      return baseline - offset;
+    });
+  }
+  function generatorCaseSummary(entry, index = 0) {
+    return {
+      id: entry.case_id ?? entry.index ?? index + 1,
+      mode: entry.mode_id || entry.scheme_id || entry.scheme || "—",
+      label: entry.label || entry.class_label,
+      frequency:
+        entry.tx_config?.center_frequency_hz ??
+        entry.rx_config?.center_frequency_hz ??
+        entry.frequency_hz ??
+        entry.center_frequency_hz,
+      parameters:
+        entry.waveform_spec?.parameters || entry.parameters || entry.params || {},
+      gain: entry.tx_config?.tx_gain_db ?? null,
+    };
+  }
+  function generatorStartPayload(
+    plan,
+    currentConfig,
+    transmitEnabled,
+    setupConfirmed,
+  ) {
+    if (plan?.ready !== true || !plan.id || !plan.sha256)
+      throw new Error("Zuerst einen gültigen Plan prüfen.");
+    if (plan.inputSignature !== JSON.stringify(currentConfig))
+      throw new Error("Die Konfiguration hat sich geändert. Plan erneut prüfen.");
+    if (transmitEnabled !== true || setupConfirmed !== true)
+      throw new Error(
+        "Messaufbau und ausdrückliche Sendefreigabe für diesen Plan bestätigen.",
+      );
+    return {
+      plan_id: plan.id,
+      plan_sha256: plan.sha256,
+      transmit_enabled: true,
+      setup_confirmed: true,
+    };
+  }
+  function generatorStatusLabel(value) {
+    return (
+      {
+        idle: "Bereit",
+        running: "Läuft",
+        stopping: "Wird gestoppt",
+        completed: "Abgeschlossen",
+        failed: "Fehlgeschlagen",
+        cancelled: "Abgebrochen",
+        interrupted: "Unterbrochen",
+      }[value] || text(value, "Unbekannt")
+    );
+  }
+  function generatorBusy(status = state.generatorStatus) {
+    return (
+      status?.busy === true ||
+      status?.tx_active === true ||
+      ["running", "stopping"].includes(status?.status)
+    );
+  }
+  function generatorNeedsAttention(status = state.generatorStatus) {
+    return (
+      status?.start_request_uncertain === true ||
+      generatorBusy(status) ||
+      (Boolean(status?.id) &&
+        status.tx_active !== false &&
+        ["interrupted", "failed", "cancelled", "completed"].includes(
+          status.status,
+        ))
+    );
+  }
+  function generatorFormConfig() {
+    const form = $("#generator-form"),
+      values = Object.fromEntries(new FormData(form));
+    values.shared_pluto = form.elements.shared_pluto.checked;
+    return generatorConfig(
+      values,
+      [...state.generatorSelected],
+      state.generatorCatalogue?.schemes,
+      state.generatorOverrides,
+    );
+  }
+  function generatorJSONDownload(data, filename, label) {
+    return button(
+      label,
+      () => {
+        const url = URL.createObjectURL(
+          new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+        );
+        const a = el("a", { href: url, download: filename });
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      },
+      "button button-quiet",
+      "download",
+    );
+  }
+  function generatorJSONDetails(title, data) {
+    return el("details", { class: "generator-json" }, [
+      el("summary", { text: title }),
+      el("pre", { text: JSON.stringify(data, null, 2) }),
+    ]);
+  }
+  function generatorInvalidatePlan() {
+    state.generatorPlanSequence++;
+    state.generatorPlan = null;
+    $("#generator-transmit-enabled").checked = false;
+    $("#generator-setup-confirmed").checked = false;
+    renderGeneratorPlan();
+  }
+  function updateGeneratorGain() {
+    const form = $("#generator-form"),
+      output = $("#generator-effective-gain");
+    try {
+      const baseline = generatorNumber(
+        form.elements.tx_gain_db.value,
+        "TX-Basispegel",
+        -89.75,
+        0,
+      );
+      const offsets = generatorValueList(
+        form.elements.attenuation_offsets_db.value,
+        "Zusatzdämpfung",
+        { min: 0 },
+      );
+      const gains = generatorEffectiveGains(baseline, offsets);
+      output.textContent = `Effektiver TX-Pegel = Basis − Zusatzdämpfung: ${gains.map((gain) => num(gain)).join(" / ")} dB. Keine kalibrierte HF-Leistung.`;
+    } catch (error) {
+      output.textContent = errorMessage(error);
+    }
+    const cable = form.elements.transport.value === "cable";
+    $("#generator-transport-help").textContent = cable
+      ? "Kabelaufbau mit geeigneter externer Dämpfung verwenden. Frequenz und Pegel müssen zum Aufbau und zulässigen Testbetrieb passen."
+      : "Antennenbetrieb: nur passende Frequenzen und Pegel im erlaubten Testbetrieb nutzen. Empfangsbedingungen unterscheiden sich von der Kabelmessung.";
+    $("#generator-setup-label").textContent = cable
+      ? "Kabelaufbau vorbereitet: TX ist über geeignete Dämpfung mit RX verbunden."
+      : "Antennenaufbau vorbereitet: Frequenz, Pegel und Testbetrieb sind für diesen Aufbau geeignet.";
+  }
+  function updateGeneratorReceiver() {
+    const form = $("#generator-form"),
+      pluto = form.elements.rx_source.value === "pluto";
+    $("#generator-shared-field").hidden = !pluto;
+    form.elements.rx_uri.placeholder = pluto
+      ? "ip:192.168.2.2 (oder gemeinsamer Pluto)"
+      : "Automatisch (RSP1A)";
+    if (!pluto) form.elements.shared_pluto.checked = false;
+  }
+  function renderGeneratorCatalogue() {
+    const catalogue = state.generatorCatalogue || {},
+      schemes = arr(catalogue.schemes);
+    const visible = generatorVisibleSchemes(
+      schemes,
+      $("#generator-search").value,
+      $("#generator-kind-filter").value,
+    );
+    $("#generator-selected-count").textContent =
+      `${num(state.generatorSelected.size, 0)} / ${num(schemes.filter((scheme) => scheme.available === true).length, 0)} gewählt`;
+    $("#generator-limit").textContent = num(
+      catalogue.limits?.max_cases ?? 4096,
+      0,
+    );
+    const body = $("#generator-catalog-body");
+    body.replaceChildren(
+      ...visible.map((scheme) => {
+        const kind = generatorSchemeKind(scheme),
+          check = el("input", {
+            type: "checkbox",
+            checked: state.generatorSelected.has(String(scheme.id)),
+            disabled: scheme.available !== true,
+            "aria-label": `${scheme.name || scheme.id} auswählen`,
+            dataset: { generatorMode: String(scheme.id) },
+          });
+        const row = el(
+          "tr",
+          { class: scheme.available === true ? "" : "generator-unavailable" },
+          [
+            el("td", {}, [check]),
+            detailCell(scheme.name || scheme.id, generatorFacets(scheme)),
+            el("td", {}, [
+              pill(kind.label, kind.tone),
+              el("small", {
+                text: scheme.available === true ? "Verfügbar" : "Nicht verfügbar",
+              }),
+            ]),
+            detailCell(
+              scheme.estimated_bandwidth_hz
+                ? `${num(scheme.estimated_bandwidth_hz / 1e3)} kHz`
+                : "Bandbreite je Parameterwahl",
+              scheme.reason ||
+                (kind.id === "proxy"
+                  ? "Modulationsmuster, kein vollständiger Protokollencoder."
+                  : "Grenzen werden im Plan geprüft."),
+            ),
+          ],
+        );
+        return row;
+      }),
+    );
+    if (!visible.length)
+      body.append(
+        el("tr", {}, [
+          el("td", { colSpan: 4 }, [
+            empty(
+              schemes.length
+                ? "Keine Verfahren für diesen Filter."
+                : "Keine Verfahren im Katalog verfügbar.",
+            ),
+          ]),
+        ]),
+      );
+    const onair = catalogue.engines?.onair;
+    replaceContent(
+      $("#generator-engine-status"),
+      onair
+        ? pill(
+            onair.available === true
+              ? `OnAir verfügbar${onair.version ? ` · ${onair.version}` : ""}`
+              : "OnAir nicht verfügbar",
+            onair.available === true ? "cyan" : "",
+          )
+        : null,
+      onair?.reason ? el("span", { text: onair.reason }) : null,
+    );
+    replaceContent(
+      $("#generator-catalog-notes"),
+      ...arr(catalogue.warnings).map((warning) =>
+        el("p", {
+          class: "form-help",
+          text: typeof warning === "string" ? warning : JSON.stringify(warning),
+        }),
+      ),
+    );
+    const coverage = catalogue.onair_coverage || {},
+      modes = arr(coverage.modes);
+    const observed =
+      coverage.observed_count ??
+      coverage.observed_catalog_entry_count ??
+      modes.length;
+    const claimed = coverage.claimed_count ?? coverage.site_claimed_mode_count;
+    $("#generator-reference-label").textContent =
+      `OnAir-Verzeichnis · ${num(observed, 0)} erfasste Einträge · Referenz, keine Implementierungszusage`;
+    const referenceQuery = $("#generator-search")
+      .value.trim()
+      .toLocaleLowerCase("de-DE");
+    const references = modes.filter(
+      (mode) =>
+        !referenceQuery ||
+        `${mode.name} ${mode.family} ${mode.source_id}`
+          .toLocaleLowerCase("de-DE")
+          .includes(referenceQuery),
+    );
+    const referenceTable = el(
+      "table",
+      { class: "data-table generator-reference-table" },
+      [
+        el("thead", {}, [
+          el(
+            "tr",
+            {},
+            [
+              "Referenzeintrag / Familie",
+              "Nutzbarkeit hier",
+              "Bandbreitenangabe der Quelle",
+            ].map((label) => el("th", { text: label })),
+          ),
+        ]),
+        el(
+          "tbody",
+          {},
+          references.map((mode) => {
+            const usability = generatorReferenceStatus(mode, schemes);
+            const width = mode.minimum_bandwidth_hz ?? mode.channel_bandwidth_hz;
+            return el("tr", {}, [
+              detailCell(mode.name || mode.source_id, mode.family),
+              el("td", {}, [
+                pill(usability.label, usability.tone),
+                el("small", { text: usability.detail }),
+              ]),
+              detailCell(
+                width === null || width === undefined
+                  ? "Nicht angegeben"
+                  : `${num(width / 1e3)} kHz`,
+                mode.minimum_bandwidth_hz
+                  ? "Genannte Mindestbandbreite"
+                  : mode.channel_bandwidth_hz
+                    ? "Genannte Kanalbreite; keine bewiesene Mindestbreite"
+                    : "Fehlend bedeutet unbekannt, nicht null Hz",
+              ),
+            ]);
+          }),
+        ),
+      ],
+    );
+    replaceContent(
+      $("#generator-onair-coverage"),
+      el("p", {
+        class: "form-help",
+        text: `Die Webliste${claimed ? ` nennt ${num(claimed, 0)} Einträge und` : ""} enthält auch Werkzeuge und Dienste. ${num(references.length, 0)} Referenzeinträge passen zur Suche. Der Katalog oben und seine Vorprüfung bestimmen, was hier tatsächlich nutzbar ist. Fehlende Profilzuordnungen werden nicht aus ähnlichen Namen abgeleitet.`,
+      }),
+      el(
+        "div",
+        {
+          class: "table-scroll",
+          role: "region",
+          tabIndex: 0,
+          "aria-label":
+            "OnAir-Referenz und tatsächliche Exportzuordnung, horizontal scrollbar",
+        },
+        [referenceTable],
+      ),
+      generatorJSONDetails("Quellenfakten und Grenzen als JSON", modes),
+    );
+  }
+  const generatorParameterNames = {
+    samples: "Samples je TX-Periode",
+    symbols: "Symbole je Periode",
+    samples_per_symbol: "Samples je Symbol",
+    audio_bandwidth_hz: "Audiobandbreite",
+    message_kind: "Nachrichtensignal",
+    rolloff: "Rolloff-Faktor",
+    filter_span_symbols: "Pulsfilter-Länge",
+    payload_bytes: "Nutzdatenlänge",
+    preamble_flags: "Präambel-Flags",
+    postamble_flags: "Nachlauf-Flags",
+    fm_deviation_hz: "FM-Frequenzhub",
+    capcode: "POCSAG-Adresse",
+    polarity: "FSK-Polarität",
+    active_carriers: "Aktive Unterträger",
+    cyclic_prefix: "Zyklisches Präfix",
+    subcarrier_modulation: "Unterträgermodulation",
+    fft_size: "FFT-Größe",
+    direction: "Chirp-Richtung",
+    chirps: "Chirps je Periode",
+    export_seconds: "Native Exportlaufzeit",
+    snr_db: "Generatorspezifischer Rauschwert",
+    symbol_rate: "Symbolrate",
+    symbol_rate_hz: "Symbolrate",
+    deviation_hz: "Frequenzhub",
+    modulation_index: "Modulationsindex",
+    tone_hz: "Modulationston",
+    audio_frequency_hz: "Audiofrequenz",
+    audio_hz: "Audiofrequenz",
+    bandwidth_hz: "Bandbreite",
+    spreading_factor: "Spreizfaktor",
+    coding_rate: "Coderate",
+    bt: "Bandbreite-Zeit-Produkt",
+    order: "Modulationsordnung",
+    amplitude: "Relative Amplitude",
+    pulse_width_seconds: "Pulsdauer",
+    bit_rate: "Bitrate",
+    bitrate: "Bitrate",
+    payload: "Nutzdaten",
+  };
+  function renderGeneratorParameters() {
+    const container = $("#generator-parameters"),
+      schemes = arr(state.generatorCatalogue?.schemes).filter((scheme) =>
+        state.generatorSelected.has(String(scheme.id)),
+      );
+    container.replaceChildren(
+      ...schemes.map((scheme, index) => {
+        const fields = Object.entries(scheme.parameters || {}).map(
+          ([key, schema]) => {
+            const input = el("input", {
+              value: state.generatorOverrides[scheme.id]?.[key] ?? "",
+              placeholder: Array.isArray(scheme.default_variations?.[key])
+                ? scheme.default_variations[key].join(", ")
+                : text(schema.default, "Automatisch"),
+              dataset: {
+                generatorParameterMode: String(scheme.id),
+                generatorParameterKey: key,
+              },
+              autocomplete: "off",
+            });
+            return el("label", {}, [
+              el("span", {
+                text: `${generatorParameterNames[key] || key}${schema.unit ? ` [${schema.unit}]` : ""}`,
+              }),
+              input,
+              el("small", {
+                text: `Leer = automatische Variation${schema.default !== undefined ? ` · Standard ${JSON.stringify(schema.default)}` : ""}${schema.min !== undefined ? ` · Min ${schema.min}` : ""}${schema.max !== undefined ? ` · Max ${schema.max}` : ""}${arr(schema.choices).length ? ` · Auswahl ${schema.choices.join(", ")}` : ""}. ${["string", "str", "enum"].includes(schema.type) ? "Werte als Textliste oder JSON-Array." : ["bool", "boolean"].includes(schema.type) ? "Werte true / false." : "Mehrere Werte mit Komma trennen."}`,
+              }),
+            ]);
+          },
+        );
+        return el(
+          "details",
+          {
+            class: "generator-parameter-group",
+            open: index === 0 && schemes.length <= 3,
+          },
+          [
+            el("summary", { text: scheme.name || scheme.id }),
+            el(
+              "div",
+              { class: "generator-advanced-body" },
+              fields.length
+                ? fields
+                : [
+                    el("p", {
+                      class: "form-help",
+                      text: "Keine frei einstellbaren Parameter für dieses Verfahren.",
+                    }),
+                  ],
+            ),
+          ],
+        );
+      }),
+    );
+    if (!schemes.length)
+      container.append(empty("Zuerst ein verfügbares Verfahren auswählen."));
+  }
+  function generatorMetric(label, value, secondary) {
+    return el("div", { class: "analysis-stat" }, [
+      el("small", { text: label }),
+      el("strong", { text: value }),
+      secondary ? el("small", { text: secondary }) : null,
+    ]);
+  }
+  function renderGeneratorPlan() {
+    const plan = state.generatorPlan,
+      holder = $("#generator-plan-content"),
+      status = $("#generator-plan-state");
+    status.textContent = plan
+      ? plan.ready === true
+        ? "Plan bereit"
+        : "Plan blockiert"
+      : "Kein gültiger Plan";
+    status.className = `pill ${plan ? (plan.ready === true ? "cyan" : "red") : ""}`;
+    if (!plan)
+      holder.replaceChildren(
+        empty(
+          "Verfahren auswählen und „Plan prüfen“ aufrufen. Änderungen verwerfen die bisherige Freigabe.",
+        ),
+      );
+    else {
+      const summary = plan.summary || {},
+        cases = arr(plan.cases),
+        errors = arr(plan.errors),
+        warnings = arr(plan.warnings);
+      const preview = el("details", { class: "generator-case-preview" }, [
+        el("summary", {
+          text: `Fallvorschau · ${num(cases.length, 0)} im Plan${cases.length > 40 ? ", erste 40 angezeigt" : ""}`,
+        }),
+        el(
+          "div",
+          {
+            class: "table-scroll",
+            role: "region",
+            tabIndex: 0,
+            "aria-label": "Geplante Generatorfälle, horizontal scrollbar",
+          },
+          [
+            el("table", { class: "data-table generator-cases-table" }, [
+              el("thead", {}, [
+                el(
+                  "tr",
+                  {},
+                  ["Fall", "Verfahren / Soll-Label", "Frequenz", "Parameter"].map(
+                    (value) => el("th", { text: value }),
+                  ),
+                ),
+              ]),
+              el(
+                "tbody",
+                {},
+                cases.slice(0, 40).map((entry, index) => {
+                  const row = generatorCaseSummary(entry, index);
+                  return el("tr", {}, [
+                    el("td", { text: row.id }),
+                    detailCell(row.mode, row.label),
+                    detailCell(
+                      mhz(row.frequency),
+                      row.gain === null ? undefined : `TX ${num(row.gain)} dB`,
+                    ),
+                    el("td", {
+                      class: "generator-case-parameters",
+                      text: JSON.stringify(row.parameters),
+                    }),
+                  ]);
+                }),
+              ),
+            ]),
+          ],
+        ),
+      ]);
+      replaceContent(
+        holder,
+        el("div", { class: "generator-metrics" }, [
+          generatorMetric(
+            "Geplante Fälle",
+            num(summary.cases ?? cases.length, 0),
+          ),
+          generatorMetric("Verfahren", num(summary.mode_count, 0)),
+          generatorMetric(
+            "Mindestdauer / Schätzung",
+            duration(summary.estimated_seconds),
+          ),
+          generatorMetric(
+            "Geschätzte RX-Daten",
+            bytes(summary.estimated_rx_bytes),
+          ),
+        ]),
+        ...errors.map((error) =>
+          el("p", {
+            class: "notice error",
+            text: typeof error === "string" ? error : JSON.stringify(error),
+          }),
+        ),
+        ...warnings.map((warning) =>
+          el("p", {
+            class: "notice amber",
+            text: typeof warning === "string" ? warning : JSON.stringify(warning),
+          }),
+        ),
+        el("p", {
+          class: "form-help",
+          text: `Soll-Label-Ebene: ${text(summary.label_facet || plan.config?.label_facet)} · ${Array.isArray(summary.classes) ? summary.classes.length : text(summary.classes)} Klassen. Mehr als 64 Klassen erfordern für ein ANN-Experiment eine Teilauswahl. Aufnahmen tragen Generatorprovenienz; Familien-/Kohortenzuordnung im Manifest prüfen.`,
+        }),
+        preview,
+        el("div", { class: "generator-plan-files" }, [
+          generatorJSONDownload(
+            { ...plan, inputSignature: undefined },
+            `generator-plan-${plan.id}.json`,
+            "Plan als JSON speichern",
+          ),
+          generatorJSONDetails("Vollständigen Plan ansehen", {
+            ...plan,
+            inputSignature: undefined,
+          }),
+        ]),
+      );
+    }
+    updateGeneratorStart();
+  }
+  function updateGeneratorStart() {
+    const enabled =
+      state.generatorPlan?.ready === true &&
+      !generatorNeedsAttention() &&
+      !state.generatorStarting &&
+      $("#generator-setup-confirmed").checked &&
+      $("#generator-transmit-enabled").checked;
+    $("#generator-start").disabled = !enabled;
+    $("#generator-plan-button").disabled =
+      state.generatorPlanning || generatorBusy();
+    const release = generatorBusy() || state.generatorStarting;
+    $("#generator-setup-confirmed").disabled = release;
+    $("#generator-transmit-enabled").disabled = release;
+  }
+  async function planGenerator() {
+    if (state.generatorPlanning) return;
+    if (generatorBusy())
+      throw new Error("Der laufende Generator muss zuerst vollständig stoppen.");
+    const config = generatorFormConfig();
+    generatorInvalidatePlan();
+    const sequence = state.generatorPlanSequence;
+    state.generatorPlanning = true;
+    updateGeneratorStart();
+    try {
+      const plan = await api("/api/generator/plan", {
+        method: "POST",
+        body: config,
+      });
+      if (sequence !== state.generatorPlanSequence) {
+        toast(
+          "Konfiguration während der Prüfung geändert. Den aktuellen Plan erneut prüfen.",
+        );
+        return;
+      }
+      state.generatorPlan = { ...plan, inputSignature: JSON.stringify(config) };
+      renderGeneratorPlan();
+    } finally {
+      state.generatorPlanning = false;
+      updateGeneratorStart();
+    }
+  }
+  async function startGenerator() {
+    if (generatorNeedsAttention())
+      throw new Error(
+        "Zuerst den laufenden Generator oder den ungeklärten TX-Zustand stoppen.",
+      );
+    const payload = generatorStartPayload(
+      state.generatorPlan,
+      generatorFormConfig(),
+      $("#generator-transmit-enabled").checked,
+      $("#generator-setup-confirmed").checked,
+    );
+    state.generatorStarting = true;
+    updateGeneratorStart();
+    try {
+      const response = await api("/api/generator/start", {
+        method: "POST",
+        body: payload,
+      });
+      if (response && typeof response === "object")
+        state.generatorStatus = response;
+      $("#generator-transmit-enabled").checked = false;
+      $("#generator-setup-confirmed").checked = false;
+      await loadGeneratorStatus();
+      renderGeneratorRun();
+      toast(
+        "Generatorlauf angefordert. Tatsächlicher TX-Zustand wird im Laufstatus angezeigt.",
+      );
+    } catch (error) {
+      if (!error.status || error.status >= 500) {
+        state.generatorStatus = {
+          ...(state.generatorStatus || {}),
+          tx_active: null,
+          start_request_uncertain: true,
+        };
+        state.generatorStatusError =
+          "Die Startantwort ist ungeklärt. TX-Abschaltung nicht bestätigt.";
+        renderGeneratorRun();
+      }
+      throw error;
+    } finally {
+      state.generatorStarting = false;
+      updateGeneratorStart();
+    }
+  }
+  async function stopGenerator() {
+    if (state.generatorStopping) return;
+    state.generatorStopping = true;
+    renderGeneratorRun();
+    try {
+      await api("/api/generator/stop", { method: "POST", body: {} });
+      await loadGeneratorStatus();
+    } finally {
+      state.generatorStopping = false;
+      renderGeneratorRun();
+    }
+  }
+  function renderGeneratorRun() {
+    const status = state.generatorStatus || {},
+      busy = generatorBusy(status),
+      tx = state.generatorStatusError
+        ? "TX-Status nicht aktuell"
+        : status.tx_active === true
+          ? "TX aktiv"
+          : status.tx_active === false
+            ? "TX aus"
+            : "TX-Zustand unbekannt";
+    const banner = $("#generator-global-banner");
+    banner.hidden = !generatorNeedsAttention(status);
+    $("#generator-global-title").textContent =
+      `${tx} · ${busy ? "Generator reserviert den Empfänger" : "Abschaltung prüfen"}`;
+    $("#generator-global-detail").textContent =
+      `${generatorStatusLabel(status.status)} · ${num(status.completed_cases ?? 0, 0)} / ${num(status.total_cases ?? 0, 0)} Fälle${state.generatorStatusError ? " · Status nicht aktuell: " + state.generatorStatusError : ""}`;
+    for (const id of ["generator-stop", "generator-global-stop"])
+      $("#" + id).disabled =
+        !generatorNeedsAttention(status) || state.generatorStopping;
+    updateGeneratorStart();
+    if (state.view !== "generator") return;
+    const tone =
+      status.status === "failed" || status.error ? "red" : busy ? "cyan" : "";
+    $("#generator-run-state").textContent = state.generatorStatus
+      ? generatorStatusLabel(status.status)
+      : "Status unbekannt";
+    $("#generator-run-state").className = `pill ${tone}`;
+    const total = Number(status.total_cases),
+      completed = Number(status.completed_cases ?? 0);
+    const failures = Array.isArray(status.failed_cases)
+      ? status.failed_cases.length
+      : Number(status.failed_cases ?? 0);
+    const progressValue =
+      typeof status.progress === "number" && Number.isFinite(status.progress)
+        ? status.progress
+        : total > 0
+          ? (completed + failures) / total
+          : 0;
+    const progress = Math.max(0, Math.min(1, progressValue));
+    const current = status.current_case;
+    const recordings = arr(status.recordings_saved),
+      savedCount = status.recordings_saved_count ?? recordings.length;
+    const holder = $("#generator-run-content");
+    const opened = new Set(
+      $$("details[open]", holder).map(
+        (details) => $("summary", details)?.textContent,
+      ),
+    );
+    const progressEl = el("progress", {
+      max: 1,
+      value: progress,
+      "aria-label": "Abgeschlossene Generatorfälle",
+    });
+    replaceContent(
+      holder,
+      el("div", { class: "generator-tx-indicator" }, [
+        pill(tx, status.tx_active === true ? "amber" : ""),
+        el("span", {
+          text: status.id ? `Lauf ${status.id}` : "Noch kein Lauf gestartet",
+        }),
+      ]),
+      state.generatorStatusError
+        ? el("p", {
+            class: "notice error",
+            text: `Status konnte nicht aktualisiert werden: ${state.generatorStatusError}. Ein vorheriger TX-Zustand ist kein aktueller Nachweis; der Stoppknopf bleibt verfügbar.`,
+          })
+        : null,
+      el("div", { class: "generator-run-progress" }, [
+        progressEl,
+        el("span", {
+          text: `${num(completed, 0)} / ${num(total || 0, 0)} Fälle abgeschlossen`,
+        }),
+      ]),
+      el("div", { class: "generator-metrics" }, [
+        generatorMetric(
+          "Aufnahmen gespeichert",
+          num(savedCount, 0),
+          status.verified_recordings_count === undefined
+            ? undefined
+            : `${num(status.verified_recordings_count, 0)} als Generatorreferenz nutzbar`,
+        ),
+        generatorMetric(
+          "Fehlgeschlagene Fälle",
+          Array.isArray(status.failed_cases)
+            ? num(status.failed_cases.length, 0)
+            : num(status.failed_cases ?? 0, 0),
+        ),
+      ]),
+      current !== undefined && current !== null
+        ? el("div", { class: "generator-current-case" }, [
+            el("strong", { text: "Aktueller Fall" }),
+            typeof current === "object"
+              ? generatorJSONDetails("Parameter & Ablauf", current)
+              : el("p", { text: String(current) }),
+          ])
+        : null,
+      status.progress !== undefined && status.progress !== null
+        ? el("p", {
+            class: "form-help",
+            text:
+              typeof status.progress === "object"
+                ? Object.entries(status.progress)
+                    .map(
+                      ([key, value]) =>
+                        `${key}: ${typeof value === "object" ? JSON.stringify(value) : text(value)}`,
+                    )
+                    .join(" · ")
+                : `Planfortschritt: ${num(Number(status.progress) * 100, 1)} %`,
+          })
+        : null,
+      status.current_rx_target_samples
+        ? el("p", {
+            class: "form-help",
+            text: `RX im aktuellen Fall: ${num(status.current_rx_samples ?? 0, 0)} / ${num(status.current_rx_target_samples, 0)} IQ-Samples`,
+          })
+        : null,
+      status.error || status.last_case_error
+        ? el("p", {
+            class: "notice error",
+            text: status.error || status.last_case_error,
+          })
+        : null,
+      Number(savedCount) > 0
+        ? el("p", {
+            class: "form-help",
+            text: "Gespeicherte Samples sind in „Aufnahmen“ verfügbar. Das automatische Label beschreibt den Erzeugungsplan; RX-Qualität und unabhängige Sitzungen vor dem Training prüfen.",
+          })
+        : null,
+      state.generatorStatus
+        ? generatorJSONDetails("Laufstatus & TX-Abschaltung", status)
+        : empty(
+            "Katalog und Status neu laden, um das Generator-Backend abzufragen.",
+          ),
+    );
+    for (const details of $$("details", holder))
+      if (opened.has($("summary", details)?.textContent)) details.open = true;
+  }
+  async function loadGeneratorStatus() {
+    if (state.generatorPolling) return;
+    state.generatorPolling = true;
+    try {
+      const previous = state.generatorStatus;
+      state.generatorStatus = await api("/api/generator/status");
+      state.generatorStatusError = null;
+      renderGeneratorRun();
+      if (
+        previous &&
+        generatorBusy(previous) &&
+        !generatorBusy() &&
+        state.view === "generator"
+      )
+        await Promise.all([loadGeneratorRuns(), loadRecordings()]);
+    } catch (error) {
+      state.generatorStatusError = errorMessage(error);
+      if (state.generatorStatus || state.view === "generator")
+        renderGeneratorRun();
+    } finally {
+      state.generatorPolling = false;
+    }
+  }
+  async function loadGeneratorCatalogue() {
+    const catalogue = await api("/api/generator/catalog");
+    state.generatorCatalogue = catalogue;
+    const available = new Set(
+      arr(catalogue.schemes)
+        .filter((scheme) => scheme.available === true)
+        .map((scheme) => String(scheme.id)),
+    );
+    const removed = [...state.generatorSelected].filter(
+      (id) => !available.has(id),
+    );
+    state.generatorSelected = new Set(
+      [...state.generatorSelected].filter((id) => available.has(id)),
+    );
+    if (removed.length) {
+      generatorInvalidatePlan();
+      toast(
+        `${removed.length} nicht mehr verfügbare Verfahren aus der Auswahl entfernt. Plan erneut prüfen.`,
+      );
+    }
+    renderGeneratorCatalogue();
+    renderGeneratorParameters();
+  }
+  async function loadGeneratorRuns() {
+    const response = await api("/api/generator/runs"),
+      runs = itemArray(response, "runs");
+    state.generatorRuns = runs;
+    const holder = $("#generator-runs");
+    holder.replaceChildren(
+      ...runs.map((run) =>
+        el("div", { class: "generator-history-row" }, [
+          el("div", {}, [
+            el("strong", { text: generatorStatusLabel(run.status) }),
+            el("small", {
+              text: `${date(run.created_at || run.started_at)} · ${text(run.id)} · ${num(run.completed_cases ?? run.summary?.cases ?? 0, 0)} Fälle`,
+            }),
+          ]),
+          button(
+            "Manifest",
+            () => action(() => loadGeneratorManifest(run.id)),
+            "button button-quiet",
+            "folder",
+          ),
+        ]),
+      ),
+    );
+    if (!runs.length)
+      holder.append(empty("Noch keine Generatorläufe gespeichert."));
+  }
+  async function loadGeneratorManifest(id) {
+    const manifest = await api(`/api/generator/runs/${encodeURIComponent(id)}`),
+      holder = $("#generator-manifest");
+    holder.hidden = false;
+    holder.replaceChildren(
+      el("h3", { text: `Manifest · ${text(id)}` }),
+      el("p", {
+        class: "form-help",
+        text: "Enthält den Erzeugungsplan, Soll-Labels und erfasste TX/RX-Provenienz. Datensätze und Kohorten bleiben dadurch prüfbar.",
+      }),
+      generatorJSONDownload(
+        manifest,
+        `generator-run-${id}.json`,
+        "Manifest speichern",
+      ),
+      generatorJSONDetails("Vollständige Provenienz ansehen", manifest),
+    );
+  }
+  async function loadGenerator() {
+    const results = await Promise.allSettled([
+      loadGeneratorCatalogue(),
+      loadGeneratorStatus(),
+      loadGeneratorRuns(),
+    ]);
+    for (const result of results)
+      if (result.status === "rejected") showError(result.reason);
+  }
+  function setupGeneratorEvents() {
+    $("#generator-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      action(planGenerator);
+    });
+    $("#generator-form").addEventListener("input", (event) => {
+      const input = event.target;
+      if (input.dataset.generatorParameterMode) {
+        const mode = input.dataset.generatorParameterMode;
+        if (!state.generatorOverrides[mode])
+          state.generatorOverrides[mode] = Object.create(null);
+        state.generatorOverrides[mode][input.dataset.generatorParameterKey] =
+          input.value;
+      }
+      generatorInvalidatePlan();
+      if (input.name === "rx_source") updateGeneratorReceiver();
+      if (
+        ["tx_gain_db", "attenuation_offsets_db", "transport"].includes(input.name)
+      )
+        updateGeneratorGain();
+    });
+    $("#generator-search").addEventListener("input", renderGeneratorCatalogue);
+    $("#generator-kind-filter").addEventListener(
+      "change",
+      renderGeneratorCatalogue,
+    );
+    $("#generator-catalog-body").addEventListener("change", (event) => {
+      const input = event.target.closest("[data-generator-mode]");
+      if (!input) return;
+      if (input.checked) state.generatorSelected.add(input.dataset.generatorMode);
+      else state.generatorSelected.delete(input.dataset.generatorMode);
+      generatorInvalidatePlan();
+      const schemes = arr(state.generatorCatalogue?.schemes);
+      $("#generator-selected-count").textContent =
+        `${num(state.generatorSelected.size, 0)} / ${num(schemes.filter((scheme) => scheme.available === true).length, 0)} gewählt`;
+      renderGeneratorParameters();
+    });
+    const select = (visibleOnly) => {
+      const schemes = visibleOnly
+        ? generatorVisibleSchemes(
+            state.generatorCatalogue?.schemes,
+            $("#generator-search").value,
+            $("#generator-kind-filter").value,
+          )
+        : state.generatorCatalogue?.schemes;
+      state.generatorSelected = generatorSelectionWithAdditions(
+        state.generatorSelected,
+        schemes,
+      );
+      generatorInvalidatePlan();
+      renderGeneratorCatalogue();
+      renderGeneratorParameters();
+    };
+    $("#generator-select-all").addEventListener("click", () => select(false));
+    $("#generator-select-visible").addEventListener("click", () => select(true));
+    $("#generator-select-none").addEventListener("click", () => {
+      state.generatorSelected.clear();
+      generatorInvalidatePlan();
+      renderGeneratorCatalogue();
+      renderGeneratorParameters();
+    });
+    $("#generator-refresh").addEventListener("click", () =>
+      action(loadGenerator),
+    );
+    $("#generator-runs-refresh").addEventListener("click", () =>
+      action(loadGeneratorRuns),
+    );
+    $("#generator-start").addEventListener("click", () => action(startGenerator));
+    $("#generator-stop").addEventListener("click", () => action(stopGenerator));
+    $("#generator-global-stop").addEventListener("click", () =>
+      action(stopGenerator),
+    );
+    for (const id of ["generator-setup-confirmed", "generator-transmit-enabled"])
+      $("#" + id).addEventListener("change", updateGeneratorStart);
+    updateGeneratorReceiver();
+    updateGeneratorGain();
+    renderGeneratorPlan();
+  }
+  function updateGenerationSplitControls() {
+    const form = $("#experiment-form"), control = form.elements.respect_generation_splits;
+    control.disabled = form.elements.source.value !== "recordings" || !form.elements.allow_same_session.checked;
+    if (control.disabled) control.checked = false;
+  }
   function setupEvents() {
+    updateGenerationSplitControls();
+    $("#experiment-source").addEventListener("change", updateGenerationSplitControls);
+    $("#experiment-allow-same-session").addEventListener("change", updateGenerationSplitControls);
+    setupGeneratorEvents();
     setupAnalysisEvents();
     document.addEventListener("visibilitychange", () => {
       syncSpectrumTransport();
@@ -8052,6 +9390,7 @@
       } else if (state.view === "modelle") openDialog("model-import-dialog");
       else if (state.view === "drohnen") openDialog("bridge-dialog");
       else if (state.view === "analyse") action(() => loadAnalysis(true));
+      else if (state.view === "generator") action(planGenerator);
     });
     $("#receiver-form").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -8400,6 +9739,7 @@
     state.polling = true;
     try {
       await loadStatus();
+      await loadGeneratorStatus();
       if (spectrumViewActive() && (receiverRunning() || !state.spectrum)) {
         await loadSpectrum();
       }
@@ -8445,6 +9785,7 @@
       loadRecordings(),
       loadTopologies(),
       loadLiveComparison(),
+      loadGeneratorStatus(),
     ]);
     for (const result of initial) {
       if (result.status === "rejected") showError(result.reason);

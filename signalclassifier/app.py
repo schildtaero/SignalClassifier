@@ -36,6 +36,7 @@ from .sigmf import read_recording
 from .telemetry import ResourceSummary, ResourceTelemetry
 from .surveillance import ScanController, build_scan_plan
 from .spectrum_stream import SpectrumHub
+from .generation import GenerationManager, catalogue as generator_catalogue
 
 LOG = logging.getLogger(__name__)
 IDENTIFIER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
@@ -176,6 +177,7 @@ class Runtime:
             lambda frequency: labels.suggest(self.store, frequency))
         self.scanner = ScanController(self.capture, on_window=self.analysis.finish_window)
         self.spectrum_stream = SpectrumHub(self.capture)
+        self.generator = GenerationManager(data_dir, self.store)
 
     def resource_sample(self, sample):
         with self.lock:
@@ -736,6 +738,7 @@ class Runtime:
 
     def close(self):
         self.closing = True
+        self.generator.close()
         self.spectrum_stream.close()
         for event in self.cancel_events.values():
             event.set()
@@ -902,15 +905,63 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/status")
     def status():
-        recordings = runtime.capture.list_recordings()
-        annotations = {row["id"]: row for row in runtime.store.all("label")}
+        generation = runtime.generator.status()
+        if generation.get("busy"):
+            base = generation.get("base_counts", {})
+            recording_count = base.get("recordings", 0)+generation.get("recordings_saved_count", 0)
+            label_count = base.get("labels", 0)+generation.get("verified_recordings_count", 0)
+        else:
+            recordings = runtime.capture.list_recordings()
+            annotations = {row["id"]: row for row in runtime.store.all("label")}
+            recording_count = len(recordings)
+            label_count = sum(bool(runtime.annotated_recording(r, annotations, with_suggestions=False).get("annotation")) for r in recordings)
         return finite_json({"version": __version__, "receiver": runtime.capture.status(), "hardware": hardware_info(),
             "telemetry": runtime.telemetry.snapshot(),
-            "counts": {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r, annotations, with_suggestions=False).get("annotation")) for r in recordings),
+            "counts": {"recordings": recording_count, "labels": label_count,
                        "experiments": runtime.store.count("experiment"), "models": runtime.store.count("model")},
+            "counts_scope": "snapshot_at_generator_start_plus_saved_generator_records" if generation.get("busy") else "current_catalogue",
             "active_experiment": runtime.store.get("experiment", runtime.active_experiment) if runtime.active_experiment else None,
             "active_model": runtime.store.get("active_model", "main"),
-            "spectrum_stream": runtime.spectrum_stream.stats()})
+            "spectrum_stream": runtime.spectrum_stream.stats(), "generator": generation})
+
+    @app.get("/api/generator/catalog")
+    def generator_catalog():
+        return finite_json(generator_catalogue())
+
+    @app.post("/api/generator/plan")
+    def generator_plan(payload: dict):
+        return finite_json(runtime.generator.plan(payload))
+
+    @app.post("/api/generator/start")
+    def generator_start(payload: dict):
+        with runtime.lock:
+            if runtime.capture.status().get("busy") or runtime.scanner.status().get("running"):
+                raise HTTPException(409, "Empfänger ist belegt. Empfang oder Scan vor dem Generatorlauf beenden.")
+            recordings = runtime.capture.list_recordings()
+            annotations = {row["id"]: row for row in runtime.store.all("label")}
+            counts = {"recordings": len(recordings), "labels": sum(bool(runtime.annotated_recording(r, annotations, with_suggestions=False).get("annotation")) for r in recordings)}
+            return finite_json(runtime.generator.start(payload, base_counts=counts))
+
+    @app.get("/api/generator/status")
+    def generator_status():
+        return finite_json(runtime.generator.status())
+
+    @app.post("/api/generator/stop")
+    def generator_stop():
+        return finite_json(runtime.generator.stop())
+
+    @app.get("/api/generator/runs")
+    def generator_runs():
+        return finite_json(runtime.generator.runs())
+
+    @app.get("/api/generator/runs/{identifier}/download")
+    def generator_manifest(identifier: str):
+        value = runtime.generator.detail(identifier)
+        return JSONResponse(finite_json(value), headers={"Content-Disposition": f'attachment; filename="generation-{identifier}.json"'})
+
+    @app.get("/api/generator/runs/{identifier}")
+    def generator_run(identifier: str):
+        return finite_json(runtime.generator.detail(identifier))
 
     @app.get("/api/receiver/status")
     def receiver_status():
@@ -919,6 +970,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.post("/api/receiver/start")
     def receiver_start(config: dict):
         with runtime.lock:
+            if runtime.generator.status().get("busy"):
+                raise HTTPException(409, "Der Signalgenerator reserviert den Empfänger. Zuerst TX/Generator stoppen.")
             if runtime.scanner.status().get("running"):
                 raise ValueError("Ein Scan läuft; vor manueller Abstimmung zuerst den Scan stoppen")
             if not runtime.capture.status().get("busy") and config.get("classification_enabled", True) is not False:
@@ -933,6 +986,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.post("/api/receiver/stop")
     def receiver_stop():
         with runtime.lock:
+            if runtime.generator.status().get("busy"):
+                raise HTTPException(409, "Der Signalgenerator verwaltet diesen Empfänger. Zum Beenden TX/Generator stoppen.")
             if runtime.scanner.status().get("running"):
                 raise ValueError("Ein Scan läuft; zum Beenden den Scan stoppen")
             return finite_json(runtime.capture.stop())
@@ -1133,6 +1188,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.post("/api/analysis/scan/start")
     def start_analysis_scan(payload: dict):
         with runtime.lock:
+            if runtime.generator.status().get("busy"):
+                raise HTTPException(409, "Der Signalgenerator reserviert den Empfänger. Zuerst TX/Generator stoppen.")
             plan = build_scan_plan(payload)
             # Match the decision filter to this requested scan, without changing expert scopes.
             settings = runtime.analysis.get_settings()
